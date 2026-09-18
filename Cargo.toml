@@ -1,0 +1,13 @@
+[package]
+name = "omarchy-tui"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ratatui = "0.29"
+toml = "0.8"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
