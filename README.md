@@ -1,16 +1,30 @@
 # omarchy-tui
 
-A small, fast terminal UI written in Rust ([ratatui](https://ratatui.rs) +
-crossterm) that uses your active [Omarchy](https://omarchy.org) theme and
+A fast terminal client for **Google Tasks**, written in Rust
+([ratatui](https://ratatui.rs) + crossterm). Each task list is a column and
+its tasks run down the column. Press Enter on a task to open a details shelf
+beside it.
+
+It uses your active [Omarchy](https://omarchy.org) theme and
 **live-reloads when you switch themes**. It works in any terminal: without
 Omarchy it falls back to plain ANSI colors, so it picks up your terminal's
 own palette.
 
-Right now it's a demo app: a header showing the theme name, a colored event
-list, and a status bar. It's meant as a starting point for Omarchy-native TUIs.
+Right now it's read-only. Creating, editing and deleting tasks and lists is
+next.
 
 ## Features
 
+- Shows all your task lists side by side. Columns scroll horizontally when
+  they don't fit.
+- Subtasks sit indented under their parent. Completed tasks appear struck
+  through at the bottom of their list.
+- Due dates are relative ("Today", "Friday", "3d overdue"). Overdue dates are
+  red and today's are yellow.
+- The details shelf shows status, due date, completed/updated times, the
+  parent task, subtask progress, notes, links and the web link.
+- API calls run on a background thread, so the UI never blocks. Lists fill in
+  as they load.
 - Reads the active Omarchy palette (`colors.toml`) and maps it to semantic
   roles: background, foreground, surface, accent, muted, selection, red,
   green, yellow, blue.
@@ -22,6 +36,18 @@ list, and a status bar. It's meant as a starting point for Omarchy-native TUIs.
 - Transparent mode paints no background, so terminal opacity shows through.
 - Never crashes when the theme is missing or broken. It falls back to ANSI
   colors instead.
+
+## Google setup
+
+You need an OAuth client of type **Desktop app** from a Google Cloud project
+with the Google Tasks API enabled. Download its JSON to
+`~/.gcloud/credentials.json`, or point `GOOGLE_TASKS_CREDENTIALS` at it.
+
+On first run the app opens your browser to authorize access, then saves the
+refresh token to `~/.config/omarchy-tui/token.json` (mode `0600`). If a
+google-auth `token.json` for the same client, with the Tasks scope, sits next
+to `credentials.json`, the app reuses its refresh token and skips the browser
+step. It only reads that file and never modifies it.
 
 ## Install and run
 
@@ -42,11 +68,16 @@ cargo install --path .
 
 | Key            | Action                          |
 | -------------- | ------------------------------- |
-| `j` / `↓`      | Move down                       |
-| `k` / `↑`      | Move up                         |
+| `h` / `←`      | Previous list                   |
+| `l` / `→`      | Next list                       |
+| `j` / `↓`      | Next task                       |
+| `k` / `↑`      | Previous task                   |
+| `g` / `G`      | First / last task               |
+| `Enter`        | Open / close the details shelf  |
+| `r`            | Refresh from Google             |
 | `t`            | Toggle transparent background   |
-| `r`            | Force a theme reload            |
-| `q` / `Esc`    | Quit                            |
+| `Esc`          | Close the shelf, or quit        |
+| `q`            | Quit                            |
 
 ## How theming works
 
@@ -80,7 +111,9 @@ The theme name shown in the header comes from the symlink target
 
 ```
 src/
-├── main.rs    # demo app: event loop, key handling, rendering
+├── main.rs    # board UI: columns, details shelf, event loop, API worker thread
+├── api.rs     # Google Tasks v1 client (task lists, tasks, pagination)
+├── auth.rs    # OAuth: client secret, token cache, refresh, loopback sign-in
 └── theme.rs   # theme discovery, colors.toml parsing, role mapping, fingerprint
 ```
 
@@ -96,6 +129,7 @@ real theme.
 
 ## Roadmap
 
+- Create, edit, complete and delete tasks and task lists.
 - A `theme-set.d` hook (for example through an `--install-hook` flag) that
   signals running instances for instant reload, with polling kept as a
   fallback.

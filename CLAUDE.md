@@ -1,14 +1,28 @@
 # omarchy-tui
 
-A fast Rust TUI (ratatui 0.29 + crossterm) that fully integrates with the
-Omarchy theming system and live-reloads when the user switches themes.
+A fast Rust TUI (ratatui 0.29 + crossterm) for Google Tasks: one column per
+task list, tasks listed vertically, Enter opens a details shelf. Fully
+integrates with the Omarchy theming system and live-reloads when the user
+switches themes. Goal: full CRUD on tasks and task lists.
+
+Work directly on `main`; no feature branches.
 
 ## Layout
 - `src/theme.rs` — finds the active Omarchy theme, parses `colors.toml`, maps it
   to semantic roles (`bg, fg, surface, accent, muted, sel_bg, sel_fg, red,
   green, yellow, blue`). Exposes `load()` and `fingerprint()`.
-- `src/main.rs` — demo app: header w/ theme name, colored event list, status
-  bar. Event loop polls input with a 500 ms timeout and calls `check_theme()`.
+- `src/auth.rs` — OAuth for an installed client. Secret from
+  `~/.gcloud/credentials.json` (`GOOGLE_TASKS_CREDENTIALS` overrides); refresh
+  token cached in `$XDG_CONFIG_HOME/omarchy-tui/token.json` (0600). Bootstraps
+  from a sibling google-auth `token.json` if it has the tasks scope, else runs
+  the loopback browser flow. Runs before the TUI starts.
+- `src/api.rs` — blocking Tasks v1 client on `ureq` 3; `get_all` follows
+  `nextPageToken`.
+- `src/main.rs` — board UI. A worker thread owns the `Client` and talks to the
+  UI over `Cmd`/`Msg` channels; the event loop polls input every 100 ms,
+  drains messages, and calls `check_theme()` every 500 ms. `order()` sorts
+  open tasks by position, then completed tasks newest first, with subtasks
+  under their parent.
 
 ## Omarchy theming facts (verified Sept 2026)
 - Active theme dir, current releases: `$XDG_STATE_HOME/omarchy/current`
