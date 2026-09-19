@@ -138,7 +138,7 @@ mod tests {
 
     #[test]
     fn loads_named_and_legacy_keys() {
-        let root = env::temp_dir().join(format!("omarchy-tui-test-{}", std::process::id()));
+        let root = env::temp_dir().join(format!("google-tasks-tui-test-{}", std::process::id()));
         let theme_dir = root.join("state/omarchy/themes/nord");
         fs::create_dir_all(&theme_dir).unwrap();
         fs::create_dir_all(root.join("state/omarchy/current")).unwrap();

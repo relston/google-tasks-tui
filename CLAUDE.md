@@ -1,4 +1,4 @@
-# omarchy-tui
+# google-tasks-tui
 
 A fast Rust TUI (ratatui 0.29 + crossterm) for Google Tasks: one column per
 task list, tasks listed vertically, Enter opens a details shelf. Fully
@@ -11,9 +11,10 @@ Work directly on `main`; no feature branches.
 - `src/theme.rs` — finds the active Omarchy theme, parses `colors.toml`, maps it
   to semantic roles (`bg, fg, surface, accent, muted, sel_bg, sel_fg, red,
   green, yellow, blue`). Exposes `load()` and `fingerprint()`.
+- All app config/state lives under `$XDG_CONFIG_HOME/google-tasks-tui/`.
 - `src/auth.rs` — OAuth for an installed client. Secret from
   `~/.gcloud/credentials.json` (`GOOGLE_TASKS_CREDENTIALS` overrides); refresh
-  token cached in `$XDG_CONFIG_HOME/omarchy-tui/token.json` (0600). Bootstraps
+  token cached in `$XDG_CONFIG_HOME/google-tasks-tui/token.json` (0600). Bootstraps
   from a sibling google-auth `token.json` if it has the tasks scope, else runs
   the loopback browser flow. Runs before the TUI starts.
 - `src/api.rs` — blocking Tasks v1 client on `ureq` 3; `get_all` follows

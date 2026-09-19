@@ -1,4 +1,4 @@
-# omarchy-tui
+# google-tasks-tui
 
 A fast terminal client for **Google Tasks**, written in Rust
 ([ratatui](https://ratatui.rs) + crossterm). Each task list is a column and
@@ -44,7 +44,7 @@ with the Google Tasks API enabled. Download its JSON to
 `~/.gcloud/credentials.json`, or point `GOOGLE_TASKS_CREDENTIALS` at it.
 
 On first run the app opens your browser to authorize access, then saves the
-refresh token to `~/.config/omarchy-tui/token.json` (mode `0600`). If a
+refresh token to `~/.config/google-tasks-tui/token.json` (mode `0600`). If a
 google-auth `token.json` for the same client, with the Tasks scope, sits next
 to `credentials.json`, the app reuses its refresh token and skips the browser
 step. It only reads that file and never modifies it.
@@ -62,6 +62,12 @@ The release profile uses LTO and strips the binary. To install it on your
 
 ```sh
 cargo install --path .
+```
+
+This puts a `google-tasks-tui` binary in `~/.cargo/bin`. Then run:
+
+```sh
+google-tasks-tui
 ```
 
 ## Keys

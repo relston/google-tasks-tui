@@ -1,6 +1,6 @@
 //! Google OAuth for an installed ("desktop") client. Reads the client secret
 //! from `~/.gcloud/credentials.json` (override with `GOOGLE_TASKS_CREDENTIALS`)
-//! and caches the refresh token in `$XDG_CONFIG_HOME/omarchy-tui/token.json`.
+//! and caches the refresh token in `$XDG_CONFIG_HOME/google-tasks-tui/token.json`.
 //! On first run it reuses a refresh token from a sibling `token.json` (the
 //! google-auth quickstart format) if it covers the Tasks scope; otherwise it
 //! runs the loopback browser flow.
@@ -157,7 +157,7 @@ fn cache_path() -> PathBuf {
     env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| home().join(".config"))
-        .join("omarchy-tui/token.json")
+        .join("google-tasks-tui/token.json")
 }
 
 fn borrow_existing(client_id: &str) -> Option<String> {
