@@ -11,7 +11,7 @@ use std::{
 
 use chrono::{DateTime, Datelike, Local, NaiveDate};
 use ratatui::{
-    crossterm::event::{self, Event, KeyCode, KeyEventKind},
+    crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style, Stylize},
     text::{Line, Span},
@@ -33,12 +33,83 @@ const SHELF_W: u16 = 52;
 /// Requests to the network thread.
 enum Cmd {
     Refresh,
+    SetTitle { list_id: String, task_id: String, title: String },
 }
 
 /// Results from the network thread.
 enum Msg {
     Lists(Result<Vec<TaskList>, String>),
     Tasks(String, Result<Vec<Task>, String>),
+    Updated(String, Result<Task, String>),
+}
+
+/// An in-progress title edit. `cursor` is a byte offset into `buf`.
+struct Edit {
+    list_id: String,
+    task_id: String,
+    buf: String,
+    cursor: usize,
+}
+
+impl Edit {
+    fn insert(&mut self, c: char) {
+        self.buf.insert(self.cursor, c);
+        self.cursor += c.len_utf8();
+    }
+
+    fn left(&mut self) {
+        if let Some((i, _)) = self.buf[..self.cursor].char_indices().next_back() {
+            self.cursor = i;
+        }
+    }
+
+    fn right(&mut self) {
+        if let Some(c) = self.buf[self.cursor..].chars().next() {
+            self.cursor += c.len_utf8();
+        }
+    }
+
+    fn backspace(&mut self) {
+        let end = self.cursor;
+        self.left();
+        self.buf.replace_range(self.cursor..end, "");
+    }
+
+    fn delete(&mut self) {
+        if let Some(c) = self.buf[self.cursor..].chars().next() {
+            let end = self.cursor + c.len_utf8();
+            self.buf.replace_range(self.cursor..end, "");
+        }
+    }
+
+    fn kill_word(&mut self) {
+        let head = self.buf[..self.cursor].trim_end_matches(char::is_whitespace);
+        let start = head
+            .char_indices()
+            .rev()
+            .find(|(_, c)| c.is_whitespace())
+            .map_or(0, |(i, c)| i + c.len_utf8());
+        self.buf.replace_range(start..self.cursor, "");
+        self.cursor = start;
+    }
+
+    fn kill_to_start(&mut self) {
+        self.buf.replace_range(..self.cursor, "");
+        self.cursor = 0;
+    }
+
+    /// The slice that fits `width` columns with the cursor in view, and the
+    /// cursor's offset within it.
+    fn view(&self, width: usize) -> (&str, usize) {
+        let width = width.max(1);
+        let chars: Vec<usize> = self.buf.char_indices().map(|(i, _)| i).collect();
+        let cur = chars.iter().position(|i| *i >= self.cursor).unwrap_or(chars.len());
+        let start = cur.saturating_sub(width - 1);
+        let end = (start + width).min(chars.len());
+        let from = chars.get(start).copied().unwrap_or(self.buf.len());
+        let to = chars.get(end).copied().unwrap_or(self.buf.len());
+        (&self.buf[from..to], cur - start)
+    }
 }
 
 struct Row {
@@ -68,7 +139,10 @@ struct App {
     /// Index of the leftmost visible column.
     scroll: usize,
     shelf: bool,
+    edit: Option<Edit>,
     fetching: bool,
+    /// Edits sent to Google that haven't come back yet.
+    saving: usize,
     error: Option<String>,
     cmds: Sender<Cmd>,
     quit: bool,
@@ -84,7 +158,9 @@ impl App {
             focus: 0,
             scroll: 0,
             shelf: false,
+            edit: None,
             fetching: false,
+            saving: 0,
             error: None,
             cmds,
             quit: false,
@@ -101,6 +177,40 @@ impl App {
 
     fn loading(&self) -> bool {
         self.fetching || self.columns.iter().any(|c| !c.loaded)
+    }
+
+    fn start_edit(&mut self) {
+        let Some(col) = self.columns.get(self.focus) else { return };
+        let Some(row) = col.selected() else { return };
+        self.edit = Some(Edit {
+            list_id: col.list.id.clone(),
+            task_id: row.task.id.clone(),
+            cursor: row.task.title.len(),
+            buf: row.task.title.clone(),
+        });
+        self.shelf = true;
+    }
+
+    fn commit_edit(&mut self) {
+        let Some(e) = self.edit.take() else { return };
+        let title = e.buf.trim().to_string();
+        if title.is_empty() {
+            self.error = Some("A task needs a title".into());
+            self.edit = Some(e);
+            return;
+        }
+        // Show the new title straight away; Google confirms it a moment later.
+        if let Some(row) = self
+            .columns
+            .iter_mut()
+            .find(|c| c.list.id == e.list_id)
+            .and_then(|c| c.rows.iter_mut().find(|r| r.task.id == e.task_id))
+        {
+            row.task.title = title.clone();
+        }
+        self.error = None;
+        self.saving += 1;
+        let _ = self.cmds.send(Cmd::SetTitle { list_id: e.list_id, task_id: e.task_id, title });
     }
 
     /// Reload the palette only when the fingerprint changes (cheap stat calls).
@@ -155,6 +265,27 @@ impl App {
                     Err(e) => self.error = Some(format!("{}: {e}", col.list.title)),
                 }
             }
+            Msg::Updated(list_id, res) => {
+                self.saving = self.saving.saturating_sub(1);
+                match res {
+                    Ok(task) => {
+                        if let Some(row) = self
+                            .columns
+                            .iter_mut()
+                            .find(|c| c.list.id == list_id)
+                            .and_then(|c| c.rows.iter_mut().find(|r| r.task.id == task.id))
+                        {
+                            row.task = task;
+                        }
+                    }
+                    Err(e) => {
+                        // The optimistic title may be wrong now, so resync.
+                        self.error = Some(format!("save failed: {e}"));
+                        self.fetching = true;
+                        let _ = self.cmds.send(Cmd::Refresh);
+                    }
+                }
+            }
         }
     }
 
@@ -169,8 +300,12 @@ impl App {
         self.columns.get(self.focus)?.selected()
     }
 
-    fn on_key(&mut self, code: KeyCode) {
-        match code {
+    fn on_key(&mut self, k: KeyEvent) {
+        if self.edit.is_some() {
+            self.edit_key(k);
+            return;
+        }
+        match k.code {
             KeyCode::Char('q') => self.quit = true,
             KeyCode::Esc if self.shelf => self.shelf = false,
             KeyCode::Esc => self.quit = true,
@@ -183,8 +318,40 @@ impl App {
             KeyCode::Char('g') | KeyCode::Home => self.move_task(isize::MIN / 2),
             KeyCode::Char('G') | KeyCode::End => self.move_task(isize::MAX / 2),
             KeyCode::Enter => self.shelf = !self.shelf && self.selected_task().is_some(),
+            KeyCode::Char('i') => self.start_edit(),
             KeyCode::Char('r') => self.refresh(),
             KeyCode::Char('t') => self.transparent = !self.transparent,
+            _ => {}
+        }
+    }
+
+    /// Keys while editing a title. Enter saves, Esc discards.
+    fn edit_key(&mut self, k: KeyEvent) {
+        match k.code {
+            KeyCode::Esc => {
+                self.edit = None;
+                return;
+            }
+            KeyCode::Enter => {
+                self.commit_edit();
+                return;
+            }
+            _ => {}
+        }
+        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+        let Some(e) = self.edit.as_mut() else { return };
+        match k.code {
+            KeyCode::Char('w') if ctrl => e.kill_word(),
+            KeyCode::Char('u') if ctrl => e.kill_to_start(),
+            KeyCode::Char('a') if ctrl => e.cursor = 0,
+            KeyCode::Char('e') if ctrl => e.cursor = e.buf.len(),
+            KeyCode::Char(c) if !ctrl => e.insert(c),
+            KeyCode::Backspace => e.backspace(),
+            KeyCode::Delete => e.delete(),
+            KeyCode::Left => e.left(),
+            KeyCode::Right => e.right(),
+            KeyCode::Home => e.cursor = 0,
+            KeyCode::End => e.cursor = e.buf.len(),
             _ => {}
         }
     }
@@ -205,19 +372,23 @@ impl App {
             Span::styled(" Tasks ", Style::default().fg(t.bg).bg(t.accent).bold()),
             Span::styled(format!("  theme: {}", t.name), Style::default().fg(t.muted)),
         ];
-        if self.loading() {
+        if self.saving > 0 {
+            head.push(Span::styled("  saving…", Style::default().fg(t.yellow)));
+        } else if self.loading() {
             head.push(Span::styled("  syncing…", Style::default().fg(t.yellow)));
         }
         f.render_widget(Line::from(head), header);
 
         self.draw_board(f, body, &t);
 
+        let hints = if self.edit.is_some() {
+            " ⏎ save · Esc cancel · ^W delete word · ^U clear"
+        } else {
+            " h/l list · j/k task · ⏎ details · i edit title · r refresh · t transparent · q quit"
+        };
         let status_line = match &self.error {
             Some(e) => Line::styled(format!(" {e}"), Style::default().fg(t.red)),
-            None => Line::styled(
-                " h/l list · j/k task · ⏎ details · r refresh · t transparent · q quit",
-                Style::default().fg(t.muted),
-            ),
+            None => Line::styled(hints, Style::default().fg(t.muted)),
         };
         f.render_widget(status_line, status);
     }
@@ -231,6 +402,7 @@ impl App {
         self.focus = self.focus.min(self.columns.len() - 1);
         if self.selected_task().is_none() {
             self.shelf = false;
+            self.edit = None;
         }
 
         // Columns share the width evenly within limits; the shelf takes a fixed slot.
@@ -303,10 +475,25 @@ impl App {
         let today = Local::now().date_naive();
         let muted = Style::default().fg(t.muted);
 
-        let mut lines = vec![
-            Line::styled(title_of(task).to_string(), Style::default().fg(t.fg).bold()),
-            Line::default(),
-        ];
+        // Inside the border and the block's one-column padding.
+        let inner_w = area.width.saturating_sub(4) as usize;
+        let editing = self
+            .edit
+            .as_ref()
+            .filter(|e| e.task_id == task.id && e.list_id == col.list.id);
+        let mut cursor = None;
+        let title_line = match editing {
+            Some(e) => {
+                let (text, offset) = e.view(inner_w);
+                cursor = Some((area.x + 2 + offset as u16, area.y + 1));
+                Line::styled(
+                    format!("{text:<inner_w$}"),
+                    Style::default().fg(t.sel_fg).bg(t.sel_bg).bold(),
+                )
+            }
+            None => Line::styled(title_of(task).to_string(), Style::default().fg(t.fg).bold()),
+        };
+        let mut lines = vec![title_line, Line::default()];
         let (status, color) = if task.is_done() { ("Completed", t.green) } else { ("Open", t.blue) };
         lines.push(field("Status", Span::styled(status, Style::default().fg(color)), t));
         if let Some(d) = task.due_date() {
@@ -360,6 +547,9 @@ impl App {
             .padding(Padding::horizontal(1))
             .style(Style::default().bg(self.bg(t.bg)));
         f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).block(block), area);
+        if let Some(pos) = cursor {
+            f.set_cursor_position(pos);
+        }
     }
 }
 
@@ -455,6 +645,12 @@ fn order(tasks: Vec<Task>) -> Vec<Row> {
 fn worker(mut client: Client, cmds: Receiver<Cmd>, out: Sender<Msg>) {
     for cmd in cmds {
         match cmd {
+            Cmd::SetTitle { list_id, task_id, title } => {
+                let res = client.set_title(&list_id, &task_id, &title).map_err(|e| e.to_string());
+                if out.send(Msg::Updated(list_id, res)).is_err() {
+                    return;
+                }
+            }
             Cmd::Refresh => {
                 let lists = client.tasklists().map_err(|e| e.to_string());
                 let ids: Vec<String> = lists.iter().flatten().map(|l| l.id.clone()).collect();
@@ -480,7 +676,7 @@ fn run(mut term: DefaultTerminal, mut app: App, msgs: Receiver<Msg>) -> std::io:
         if event::poll(TICK)? {
             if let Event::Key(k) = event::read()? {
                 if k.kind == KeyEventKind::Press {
-                    app.on_key(k.code);
+                    app.on_key(k);
                 }
             }
         }
@@ -520,6 +716,40 @@ mod tests {
             status: if done { "completed" } else { "needsAction" }.into(),
             ..Default::default()
         }
+    }
+
+    fn edit(buf: &str) -> Edit {
+        Edit {
+            list_id: "l".into(),
+            task_id: "t".into(),
+            cursor: buf.len(),
+            buf: buf.into(),
+        }
+    }
+
+    #[test]
+    fn edits_title_around_the_cursor() {
+        let mut e = edit("Buy milk");
+        e.insert('!');
+        assert_eq!(e.buf, "Buy milk!");
+        e.backspace();
+        e.kill_word();
+        assert_eq!((e.buf.as_str(), e.cursor), ("Buy ", 4));
+        e.insert('é');
+        e.left();
+        e.delete();
+        assert_eq!(e.buf, "Buy ");
+        e.kill_to_start();
+        assert_eq!((e.buf.as_str(), e.cursor), ("", 0));
+    }
+
+    #[test]
+    fn view_scrolls_to_keep_the_cursor_visible() {
+        let mut e = edit("abcdefgh");
+        assert_eq!(e.view(4), ("fgh", 3));
+        e.cursor = 0;
+        assert_eq!(e.view(4), ("abcd", 0));
+        assert_eq!(edit("").view(4), ("", 0));
     }
 
     #[test]

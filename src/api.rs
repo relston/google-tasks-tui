@@ -79,6 +79,20 @@ impl Client {
         )
     }
 
+    /// Rename a task; returns the task as Google stored it.
+    pub fn set_title(&mut self, list_id: &str, task_id: &str, title: &str) -> Result<Task> {
+        let token = self.auth.token()?;
+        let task = self
+            .auth
+            .agent
+            .patch(format!("{BASE}/lists/{}/tasks/{}", pct(list_id), pct(task_id)))
+            .header("Authorization", format!("Bearer {token}"))
+            .send_json(serde_json::json!({ "title": title }))?
+            .body_mut()
+            .read_json()?;
+        Ok(task)
+    }
+
     /// Follow `nextPageToken` until the collection is exhausted.
     fn get_all<T: DeserializeOwned>(&mut self, url: &str, query: &[(&str, &str)]) -> Result<Vec<T>> {
         let mut out = Vec::new();

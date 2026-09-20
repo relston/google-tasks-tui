@@ -10,8 +10,8 @@ It uses your active [Omarchy](https://omarchy.org) theme and
 Omarchy it falls back to plain ANSI colors, so it picks up your terminal's
 own palette.
 
-Right now it's read-only. Creating, editing and deleting tasks and lists is
-next.
+Press `i` to rename a task. Creating, deleting and editing the other fields
+is next.
 
 ## Features
 
@@ -25,6 +25,11 @@ next.
   parent task, subtask progress, notes, links and the web link.
 - API calls run on a background thread, so the UI never blocks. Lists fill in
   as they load.
+- `i` turns the title in the shelf into a text input (opening the shelf if
+  needed). Enter saves to Google, Esc discards. Editing supports the usual
+  arrows plus `Ctrl-W` (delete word), `Ctrl-U` (clear), `Ctrl-A`/`Ctrl-E`.
+  The new title shows immediately; a failed save reports in the status bar
+  and resyncs.
 - Reads the active Omarchy palette (`colors.toml`) and maps it to semantic
   roles: background, foreground, surface, accent, muted, selection, red,
   green, yellow, blue.
@@ -80,6 +85,7 @@ google-tasks-tui
 | `k` / `↑`      | Previous task                   |
 | `g` / `G`      | First / last task               |
 | `Enter`        | Open / close the details shelf  |
+| `i`            | Edit the task title             |
 | `r`            | Refresh from Google             |
 | `t`            | Toggle transparent background   |
 | `Esc`          | Close the shelf, or quit        |
@@ -135,7 +141,7 @@ real theme.
 
 ## Roadmap
 
-- Create, edit, complete and delete tasks and task lists.
+- Create, complete and delete tasks; edit notes and due dates; manage lists.
 - A `theme-set.d` hook (for example through an `--install-hook` flag) that
   signals running instances for instant reload, with polling kept as a
   fallback.
