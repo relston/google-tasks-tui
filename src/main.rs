@@ -1,5 +1,6 @@
 mod api;
 mod auth;
+mod cache;
 mod theme;
 
 use std::{
@@ -38,6 +39,7 @@ const TICK: Duration = Duration::from_millis(100);
 const COL_MIN: u16 = 30;
 const COL_MAX: u16 = 56;
 const SHELF_W: u16 = 52;
+const READ_ONLY: &str = "Syncing with Google — read-only for a moment";
 
 /// Requests to the network thread.
 enum Cmd {
@@ -210,6 +212,9 @@ struct App {
     edit: Option<Edit>,
     pending: Option<Pending>,
     fetching: bool,
+    /// False while the board may still be stale: edits are blocked until the
+    /// first sync of this run lands.
+    synced: bool,
     /// Edits sent to Google that haven't come back yet.
     saving: usize,
     error: Option<String>,
@@ -218,12 +223,23 @@ struct App {
 }
 
 impl App {
-    fn new(cmds: Sender<Cmd>) -> Self {
+    fn new(cmds: Sender<Cmd>, cached: cache::Cache) -> Self {
+        // Paint the last known board straight away; the sync replaces it.
+        let columns = cached
+            .lists
+            .into_iter()
+            .map(|c| Column {
+                list: c.list,
+                state: ListState::default().with_selected((!c.tasks.is_empty()).then_some(0)),
+                rows: order(c.tasks),
+                loaded: true,
+            })
+            .collect();
         let mut app = Self {
             theme: theme::load(),
             fingerprint: theme::fingerprint(),
             transparent: false,
-            columns: Vec::new(),
+            columns,
             focus: 0,
             scroll: 0,
             shelf: false,
@@ -232,6 +248,7 @@ impl App {
             edit: None,
             pending: None,
             fetching: false,
+            synced: false,
             saving: 0,
             error: None,
             cmds,
@@ -244,7 +261,40 @@ impl App {
     fn refresh(&mut self) {
         self.error = None;
         self.fetching = true;
+        self.synced = false;
         let _ = self.cmds.send(Cmd::Refresh);
+    }
+
+    /// Editing waits until this run has seen Google's copy of every list.
+    fn writable(&mut self) -> bool {
+        if !self.synced {
+            self.error = Some(READ_ONLY.into());
+        }
+        self.synced
+    }
+
+    fn check_synced(&mut self) {
+        if self.fetching || !self.columns.iter().all(|c| c.loaded) {
+            return;
+        }
+        self.synced = true;
+        if self.error.as_deref() == Some(READ_ONLY) {
+            self.error = None;
+        }
+        self.save_cache();
+    }
+
+    fn save_cache(&self) {
+        cache::save(&cache::Cache {
+            lists: self
+                .columns
+                .iter()
+                .map(|c| cache::CachedList {
+                    list: c.list.clone(),
+                    tasks: c.rows.iter().map(|r| r.task.clone()).collect(),
+                })
+                .collect(),
+        });
     }
 
     fn loading(&self) -> bool {
@@ -253,6 +303,9 @@ impl App {
 
     /// Start a new task in the focused list: an empty title input in the shelf.
     fn start_create(&mut self) {
+        if !self.writable() {
+            return;
+        }
         let Some(col) = self.columns.get(self.focus) else { return };
         self.edit = Some(Edit {
             list_id: col.list.id.clone(),
@@ -268,6 +321,9 @@ impl App {
 
     /// Edit the focused shelf field, opening the shelf on the title if it's shut.
     fn start_edit(&mut self) {
+        if !self.writable() {
+            return;
+        }
         let Some(col) = self.columns.get(self.focus) else { return };
         let Some(row) = col.selected() else { return };
         let (list_id, task_id) = (col.list.id.clone(), row.task.id.clone());
@@ -333,6 +389,9 @@ impl App {
 
     /// Tick or untick the selected task.
     fn toggle_done(&mut self) {
+        if !self.writable() {
+            return;
+        }
         let Some(col) = self.columns.get_mut(self.focus) else { return };
         let list_id = col.list.id.clone();
         let Some(i) = col.state.selected() else { return };
@@ -352,6 +411,9 @@ impl App {
 
     /// Ask before deleting; `confirm_delete` does the work on "y".
     fn ask_delete(&mut self) {
+        if !self.writable() {
+            return;
+        }
         let Some(col) = self.columns.get(self.focus) else { return };
         let Some(row) = col.selected() else { return };
         let subtasks = col
@@ -425,6 +487,7 @@ impl App {
                 self.focus = focused
                     .and_then(|id| self.columns.iter().position(|c| c.list.id == id))
                     .unwrap_or(0);
+                self.check_synced(); // an account with no lists is already in sync
             }
             Msg::Tasks(id, res) => {
                 let Some(col) = self.columns.iter_mut().find(|c| c.list.id == id) else { return };
@@ -442,6 +505,7 @@ impl App {
                     }
                     Err(e) => self.error = Some(format!("{}: {e}", col.list.title)),
                 }
+                self.check_synced();
             }
             Msg::Created(list_id, res) => {
                 self.saving = self.saving.saturating_sub(1);
@@ -458,12 +522,14 @@ impl App {
                         if let Some(i) = col.rows.iter().position(|r| r.task.id == id) {
                             col.state.select(Some(i));
                         }
+                        self.save_cache();
                     }
                     Err(e) => self.error = Some(format!("create failed: {e}")),
                 }
             }
             Msg::Deleted(res) => {
                 self.saving = self.saving.saturating_sub(1);
+                self.save_cache();
                 if let Err(e) = res {
                     // The task is still there, so put the board back.
                     self.error = Some(format!("delete failed: {e}"));
@@ -490,6 +556,7 @@ impl App {
                         if let Some(i) = col.rows.iter().position(|r| r.task.id == id) {
                             col.state.select(Some(i));
                         }
+                        self.save_cache();
                     }
                     Err(e) => {
                         // The optimistic title may be wrong now, so resync.
@@ -629,6 +696,8 @@ impl App {
             " ⏎ save · ⇧⏎ new line · Esc cancel · ^W delete word"
         } else if self.edit.is_some() {
             " ⏎ save · Esc cancel · ^W delete word · ^U clear"
+        } else if !self.synced {
+            " syncing with Google… board is read-only until it lands"
         } else if self.shelf {
             " Tab field · i edit · c new · ␣ done · j/k task · d delete · q quit"
         } else {
@@ -1090,15 +1159,20 @@ fn enable_key_detail() -> bool {
 }
 
 fn main() -> auth::Result<()> {
-    // Auth first: it may need the terminal for the browser sign-in prompt.
-    let client = Client::new(auth::Auth::new()?);
+    // Reuse the stored token so nothing blocks the first frame; only a first
+    // run (or a wiped token) needs the browser, which wants the terminal.
+    let auth = match auth::Auth::cached() {
+        Some(a) => a,
+        None => auth::Auth::new()?,
+    };
+    let client = Client::new(auth);
     let (cmd_tx, cmd_rx) = mpsc::channel();
     let (msg_tx, msg_rx) = mpsc::channel();
     thread::spawn(move || worker(client, cmd_rx, msg_tx));
 
     let term = ratatui::init();
     let detailed_keys = enable_key_detail();
-    let res = run(term, App::new(cmd_tx), msg_rx);
+    let res = run(term, App::new(cmd_tx, cache::load()), msg_rx);
     if detailed_keys {
         let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
     }

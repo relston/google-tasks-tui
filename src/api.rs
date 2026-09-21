@@ -1,20 +1,20 @@
 //! Minimal Google Tasks v1 client.
 
 use chrono::NaiveDate;
-use serde::{de::DeserializeOwned, Deserialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::auth::{pct, Auth, Result};
 
 const BASE: &str = "https://tasks.googleapis.com/tasks/v1";
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct TaskList {
     pub id: String,
     pub title: String,
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Task {
     pub id: String,
@@ -33,7 +33,7 @@ pub struct Task {
     pub links: Vec<Link>,
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Link {
     pub description: String,

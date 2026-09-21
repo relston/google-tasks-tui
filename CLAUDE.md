@@ -17,7 +17,13 @@ Work directly on `main`; no feature branches.
   `~/.gcloud/credentials.json` (`GOOGLE_TASKS_CREDENTIALS` overrides); refresh
   token cached in `$XDG_CONFIG_HOME/google-tasks-tui/token.json` (0600). Bootstraps
   from a sibling google-auth `token.json` if it has the tasks scope, else runs
-  the loopback browser flow. Runs before the TUI starts.
+  the loopback browser flow. `Auth::cached()` (no network) is the startup path;
+  only a first run falls back to `Auth::new()`, which may open a browser and so
+  runs before the TUI starts. A 400/401 on refresh reports "sign-in expired".
+- `src/cache.rs` — board snapshot at `<config dir>/cache.json` (0600, written
+  via temp + rename). `App::new` paints from it before any network call;
+  `App::synced` gates every write until this run's first full sync lands, and
+  `check_synced()` rewrites the snapshot then and after each mutation.
 - `src/api.rs` — blocking Tasks v1 client on `ureq` 3; `get_all` follows
   `nextPageToken`; `patch` PATCHes arbitrary fields of one task; `create` POSTs one; `delete`
   removes one.

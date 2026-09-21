@@ -103,20 +103,42 @@ impl Auth {
         Ok(auth)
     }
 
+    /// Build from the cached refresh token without touching the network, so
+    /// startup doesn't wait on Google. `None` when there's nothing to reuse
+    /// and the browser flow is needed.
+    pub fn cached() -> Option<Self> {
+        let raw = fs::read_to_string(credentials_path()).ok()?;
+        let client = serde_json::from_str::<ClientFile>(&raw).ok()?.installed;
+        let tok = fs::read_to_string(cache_path())
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .or_else(|| {
+                borrow_existing(&client.client_id).map(|refresh_token| Cached {
+                    refresh_token,
+                    access_token: String::new(),
+                    expires_at: 0,
+                })
+            })?;
+        Some(Self { client, tok, agent: ureq::Agent::new_with_defaults() })
+    }
+
     /// A valid access token, refreshed when it's within a minute of expiry.
     pub fn token(&mut self) -> Result<String> {
         if now() + 60 >= self.tok.expires_at {
-            let r: TokenResponse = self
-                .agent
-                .post(&self.client.token_uri)
-                .send_form([
-                    ("client_id", self.client.client_id.as_str()),
-                    ("client_secret", self.client.client_secret.as_str()),
-                    ("refresh_token", self.tok.refresh_token.as_str()),
-                    ("grant_type", "refresh_token"),
-                ])?
-                .body_mut()
-                .read_json()?;
+            let sent = self.agent.post(&self.client.token_uri).send_form([
+                ("client_id", self.client.client_id.as_str()),
+                ("client_secret", self.client.client_secret.as_str()),
+                ("refresh_token", self.tok.refresh_token.as_str()),
+                ("grant_type", "refresh_token"),
+            ]);
+            let r: TokenResponse = match sent {
+                Ok(mut resp) => resp.body_mut().read_json()?,
+                // Google rejects the token itself, rather than failing to answer.
+                Err(ureq::Error::StatusCode(400 | 401)) => {
+                    return Err("sign-in expired — quit and start the app again to sign in".into())
+                }
+                Err(e) => return Err(e.into()),
+            };
             self.tok.access_token = r.access_token;
             self.tok.expires_at = now() + r.expires_in;
             if let Some(rt) = r.refresh_token {
@@ -153,11 +175,16 @@ fn credentials_path() -> PathBuf {
         .unwrap_or_else(|| home().join(".gcloud/credentials.json"))
 }
 
-fn cache_path() -> PathBuf {
+/// Where this app keeps its token and its board snapshot.
+pub fn config_dir() -> PathBuf {
     env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| home().join(".config"))
-        .join("google-tasks-tui/token.json")
+        .join("google-tasks-tui")
+}
+
+fn cache_path() -> PathBuf {
+    config_dir().join("token.json")
 }
 
 fn borrow_existing(client_id: &str) -> Option<String> {

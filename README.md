@@ -30,6 +30,10 @@ Press `c` to create a task, `Space` to tick one off, `d` to delete it, and
   Google deletes those too.
 - API calls run on a background thread, so the UI never blocks. Lists fill in
   as they load.
+- Startup is instant: the board is painted from a local snapshot before any
+  network call, then Google's copy replaces it in the background. The board is
+  read-only until that first sync lands, so you never edit stale data; the
+  status bar says so while you wait.
 - `c` opens a "New task" shelf next to the focused list with an empty title
   input ready to type. `Enter` creates it in that list and selects it; `Esc`
   throws the draft away.
@@ -60,7 +64,10 @@ with the Google Tasks API enabled. Download its JSON to
 `~/.gcloud/credentials.json`, or point `GOOGLE_TASKS_CREDENTIALS` at it.
 
 On first run the app opens your browser to authorize access, then saves the
-refresh token to `~/.config/google-tasks-tui/token.json` (mode `0600`). If a
+refresh token to `~/.config/google-tasks-tui/token.json` (mode `0600`). Later
+runs reuse it without contacting Google before the first frame, and the board
+snapshot sits beside it in `cache.json` (also `0600`). Deleting either file is
+safe: the app re-fetches, and re-authorizes. If a
 google-auth `token.json` for the same client, with the Tasks scope, sits next
 to `credentials.json`, the app reuses its refresh token and skips the browser
 step. It only reads that file and never modifies it.
@@ -140,6 +147,7 @@ The theme name shown in the header comes from the symlink target
 src/
 ├── main.rs    # board UI: columns, details shelf, event loop, API worker thread
 ├── api.rs     # Google Tasks v1 client (task lists, tasks, pagination)
+├── cache.rs   # board snapshot on disk for instant startup
 ├── auth.rs    # OAuth: client secret, token cache, refresh, loopback sign-in
 └── theme.rs   # theme discovery, colors.toml parsing, role mapping, fingerprint
 ```
