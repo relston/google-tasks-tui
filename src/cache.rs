@@ -7,12 +7,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::api::{Task, TaskList};
 
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub struct Cache {
     pub lists: Vec<CachedList>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct CachedList {
     pub list: TaskList,
     pub tasks: Vec<Task>,

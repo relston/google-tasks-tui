@@ -12,6 +12,8 @@ own palette.
 
 Press `c` to create a task, `Space` to tick one off, `d` to delete it, and
 `Tab`/`i` in the shelf to edit its title or notes. Due dates are next.
+The same CRUD is available as subcommands for scripts and agents
+(`google-tasks-tui lists`, `create`, `done`, …).
 
 ## Features
 
@@ -93,6 +95,41 @@ This puts a `google-tasks-tui` binary in `~/.cargo/bin`. Then run:
 google-tasks-tui
 ```
 
+With no arguments that opens the board. Any subcommand is a one-shot CLI
+that uses the same OAuth token and writes `cache.json` after mutations, so
+the next TUI start is current. A TUI that is already running will not pick
+up those edits until you press `r`.
+
+## CLI
+
+Stdout is Markdown by default. Pass `-f json` / `--format json` for one JSON
+value plus a newline (agents that want to parse). Errors go to stderr. Exit
+`0` on success, `1` on API/auth failure, `2` on usage errors (missing
+`--yes`, ambiguous list title, unknown id). `--list` accepts a list id or a
+unique title. `-f` is global, so it works before or after the subcommand.
+
+```sh
+google-tasks-tui lists
+google-tasks-tui -f json lists
+google-tasks-tui tasks --list Inbox
+google-tasks-tui get TASK_ID --list Inbox
+google-tasks-tui create --list Inbox --title "Ship CLI" --notes "Phase 3" --due 2026-09-21
+google-tasks-tui update TASK_ID --title "Shipped"
+google-tasks-tui done TASK_ID
+google-tasks-tui undone TASK_ID --list Inbox
+google-tasks-tui delete TASK_ID --yes
+```
+
+`lists` is a bullet list of titles with ids in backticks. `tasks` is a
+heading per list and GitHub-style checkboxes (`- [ ]` / `- [x]`). `get` /
+`create` / `update` / `done` / `undone` print one task as a heading plus
+fields. `delete --yes` prints nothing. JSON shapes: `lists` is an array of
+`{id, title}`; `tasks --list` is an array of tasks; `tasks` is
+`{ "lists": [ { "list": …, "tasks": […] } ] }` (same as `cache.json`).
+
+`create` can also take `--parent TASK_ID`. `update` sends only the flags you
+pass (`--title`, `--notes`, `--due`, `--status needsAction|completed`).
+
 ## Keys
 
 | Key            | Action                          |
@@ -145,7 +182,10 @@ The theme name shown in the header comes from the symlink target
 
 ```
 src/
-├── main.rs    # board UI: columns, details shelf, event loop, API worker thread
+├── main.rs    # dispatches to the TUI or the CLI
+├── lib.rs     # crate root: no args → TUI, subcommand → CLI
+├── tui.rs     # board UI: columns, details shelf, event loop, API worker thread
+├── cli.rs     # clap subcommands; -f json|md (default md); resolve list by id or title
 ├── api.rs     # Google Tasks v1 client (task lists, tasks, pagination)
 ├── cache.rs   # board snapshot on disk for instant startup
 ├── auth.rs    # OAuth: client secret, token cache, refresh, loopback sign-in

@@ -1,0 +1,712 @@
+//! One-shot CLI: markdown on stdout by default, diagnostics on stderr.
+
+use std::io::{self, Write};
+
+use clap::{Parser, Subcommand, ValueEnum};
+use serde_json::{json, Map, Value};
+
+use crate::api::{Task, TaskList, TasksApi};
+use crate::cache::{self, CachedList};
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+pub enum Format {
+    /// GitHub-flavoured markdown (the default).
+    #[default]
+    Md,
+    Json,
+}
+
+#[derive(Parser, Debug)]
+#[command(
+    name = "google-tasks-tui",
+    about = "Google Tasks TUI. Pass a subcommand to run a one-shot CLI instead."
+)]
+pub struct Args {
+    /// Output format. `md` is the default; `json` is for scripts.
+    #[arg(short = 'f', long, value_enum, default_value_t = Format::Md, global = true)]
+    pub format: Format,
+    #[command(subcommand)]
+    pub command: Option<Command>,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum Command {
+    /// Print every task list.
+    Lists,
+    /// Print tasks in a list, or the whole board.
+    Tasks {
+        #[arg(short, long)]
+        list: Option<String>,
+    },
+    /// Print one task.
+    Get {
+        task_id: String,
+        #[arg(short, long)]
+        list: Option<String>,
+    },
+    /// Create a task in a list.
+    Create {
+        #[arg(short, long)]
+        list: String,
+        #[arg(short, long)]
+        title: String,
+        #[arg(long)]
+        notes: Option<String>,
+        /// Due date as YYYY-MM-DD.
+        #[arg(long)]
+        due: Option<String>,
+        #[arg(long)]
+        parent: Option<String>,
+    },
+    /// Patch fields of a task. Only flags you pass are sent.
+    Update {
+        task_id: String,
+        #[arg(short, long)]
+        list: Option<String>,
+        #[arg(long)]
+        title: Option<String>,
+        #[arg(long)]
+        notes: Option<String>,
+        #[arg(long)]
+        due: Option<String>,
+        #[arg(long, value_parser = ["needsAction", "completed"])]
+        status: Option<String>,
+    },
+    /// Mark a task completed.
+    Done {
+        task_id: String,
+        #[arg(short, long)]
+        list: Option<String>,
+    },
+    /// Mark a task not completed.
+    Undone {
+        task_id: String,
+        #[arg(short, long)]
+        list: Option<String>,
+    },
+    /// Delete a task (and its subtasks). Requires --yes.
+    Delete {
+        task_id: String,
+        #[arg(short, long)]
+        list: Option<String>,
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum Error {
+    Usage(String),
+    Fail(String),
+}
+
+impl Error {
+    pub fn exit_code(&self) -> i32 {
+        match self {
+            Error::Usage(_) => 2,
+            Error::Fail(_) => 1,
+        }
+    }
+}
+
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Error::Usage(m) | Error::Fail(m) => f.write_str(m),
+        }
+    }
+}
+
+impl std::error::Error for Error {}
+
+pub fn execute_to(
+    api: &mut impl TasksApi,
+    command: Command,
+    format: Format,
+    out: &mut impl Write,
+) -> Result<(), Error> {
+    match command {
+        Command::Lists => {
+            let lists = tasklists(api)?;
+            match format {
+                Format::Json => write_json(out, &lists)?,
+                Format::Md => write_str(out, &md_lists(&lists))?,
+            }
+        }
+        Command::Tasks { list } => {
+            if let Some(spec) = list {
+                let lists = tasklists(api)?;
+                let list = resolve_list(&lists, &spec)?;
+                let tasks = tasks(api, &list.id)?;
+                match format {
+                    Format::Json => write_json(out, &tasks)?,
+                    Format::Md => write_str(out, &md_task_section(list, &tasks))?,
+                }
+            } else {
+                let board = load_board(api)?;
+                match format {
+                    Format::Json => {
+                        let lists: Vec<CachedList> = board
+                            .into_iter()
+                            .map(|(list, tasks)| CachedList { list, tasks })
+                            .collect();
+                        write_json(out, &cache::Cache { lists })?;
+                    }
+                    Format::Md => {
+                        let md = board
+                            .iter()
+                            .map(|(list, tasks)| md_task_section(list, tasks))
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        write_str(out, &md)?;
+                    }
+                }
+            }
+        }
+        Command::Get { task_id, list } => {
+            let (_, task) = find_task(api, &task_id, list.as_deref())?;
+            write_task(out, format, &task)?;
+        }
+        Command::Create {
+            list,
+            title,
+            notes,
+            due,
+            parent,
+        } => {
+            if title.trim().is_empty() {
+                return Err(Error::Usage("a task needs a title".into()));
+            }
+            let lists = tasklists(api)?;
+            let list = resolve_list(&lists, &list)?;
+            let mut body = json!({ "title": title });
+            if let Some(n) = notes {
+                body["notes"] = json!(n);
+            }
+            if let Some(d) = due {
+                body["due"] = json!(due_rfc3339(&d)?);
+            }
+            let task = api
+                .create(&list.id, &body, parent.as_deref())
+                .map_err(api_fail)?;
+            refresh_cache(api, &list.id);
+            write_task(out, format, &task)?;
+        }
+        Command::Update {
+            task_id,
+            list,
+            title,
+            notes,
+            due,
+            status,
+        } => {
+            let mut fields = Map::new();
+            if let Some(t) = title {
+                if t.trim().is_empty() {
+                    return Err(Error::Usage("a task needs a title".into()));
+                }
+                fields.insert("title".into(), json!(t));
+            }
+            if let Some(n) = notes {
+                fields.insert("notes".into(), json!(n));
+            }
+            if let Some(d) = due {
+                fields.insert("due".into(), json!(due_rfc3339(&d)?));
+            }
+            if let Some(s) = status {
+                fields.insert("status".into(), json!(s));
+            }
+            if fields.is_empty() {
+                return Err(Error::Usage(
+                    "update needs at least one of --title, --notes, --due, --status".into(),
+                ));
+            }
+            let (list_id, task) = find_task(api, &task_id, list.as_deref())?;
+            let task = api
+                .patch(&list_id, &task.id, &Value::Object(fields))
+                .map_err(api_fail)?;
+            refresh_cache(api, &list_id);
+            write_task(out, format, &task)?;
+        }
+        Command::Done { task_id, list } => {
+            patch_status(api, out, format, &task_id, list.as_deref(), "completed")?;
+        }
+        Command::Undone { task_id, list } => {
+            patch_status(api, out, format, &task_id, list.as_deref(), "needsAction")?;
+        }
+        Command::Delete { task_id, list, yes } => {
+            if !yes {
+                return Err(Error::Usage(
+                    "delete requires --yes (Google also removes subtasks)".into(),
+                ));
+            }
+            let (list_id, task) = find_task(api, &task_id, list.as_deref())?;
+            api.delete(&list_id, &task.id).map_err(api_fail)?;
+            refresh_cache(api, &list_id);
+        }
+    }
+    Ok(())
+}
+
+fn patch_status(
+    api: &mut impl TasksApi,
+    out: &mut impl Write,
+    format: Format,
+    task_id: &str,
+    list: Option<&str>,
+    status: &str,
+) -> Result<(), Error> {
+    let (list_id, task) = find_task(api, task_id, list)?;
+    let task = api
+        .patch(&list_id, &task.id, &json!({ "status": status }))
+        .map_err(api_fail)?;
+    refresh_cache(api, &list_id);
+    write_task(out, format, &task)
+}
+
+fn tasklists(api: &mut impl TasksApi) -> Result<Vec<TaskList>, Error> {
+    api.tasklists().map_err(api_fail)
+}
+
+fn tasks(api: &mut impl TasksApi, list_id: &str) -> Result<Vec<Task>, Error> {
+    api.tasks(list_id).map_err(api_fail)
+}
+
+fn load_board(api: &mut impl TasksApi) -> Result<Vec<(TaskList, Vec<Task>)>, Error> {
+    let lists = tasklists(api)?;
+    let mut board = Vec::with_capacity(lists.len());
+    for list in lists {
+        let tasks = tasks(api, &list.id)?;
+        board.push((list, tasks));
+    }
+    Ok(board)
+}
+
+fn find_task(
+    api: &mut impl TasksApi,
+    task_id: &str,
+    list_spec: Option<&str>,
+) -> Result<(String, Task), Error> {
+    let lists = tasklists(api)?;
+    if let Some(spec) = list_spec {
+        let list = resolve_list(&lists, spec)?;
+        let tasks = tasks(api, &list.id)?;
+        let task = tasks
+            .into_iter()
+            .find(|t| t.id == task_id)
+            .ok_or_else(|| Error::Usage(format!("no task {task_id:?} in list {spec:?}")))?;
+        return Ok((list.id.clone(), task));
+    }
+    let mut hits = Vec::new();
+    for list in &lists {
+        if let Some(task) = tasks(api, &list.id)?.into_iter().find(|t| t.id == task_id) {
+            hits.push((list.id.clone(), task));
+        }
+    }
+    match hits.len() {
+        0 => Err(Error::Usage(format!("no task {task_id:?}"))),
+        1 => Ok(hits.pop().unwrap()),
+        _ => Err(Error::Usage(format!(
+            "task {task_id:?} appears in more than one list; pass --list"
+        ))),
+    }
+}
+
+pub fn resolve_list<'a>(lists: &'a [TaskList], spec: &str) -> Result<&'a TaskList, Error> {
+    if let Some(list) = lists.iter().find(|l| l.id == spec) {
+        return Ok(list);
+    }
+    let hits: Vec<_> = lists.iter().filter(|l| l.title == spec).collect();
+    match hits.as_slice() {
+        [one] => Ok(one),
+        [] => Err(Error::Usage(format!("no list matches {spec:?}"))),
+        _ => Err(Error::Usage(format!("list title {spec:?} is not unique"))),
+    }
+}
+
+fn due_rfc3339(d: &str) -> Result<String, Error> {
+    chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d")
+        .map(|d| format!("{d}T00:00:00.000Z"))
+        .map_err(|_| Error::Usage(format!("due date must be YYYY-MM-DD, not {d:?}")))
+}
+
+fn refresh_cache(api: &mut impl TasksApi, list_id: &str) {
+    let Ok(tasks) = api.tasks(list_id) else { return };
+    let mut cache = cache::load();
+    if let Some(slot) = cache.lists.iter_mut().find(|c| c.list.id == list_id) {
+        slot.tasks = tasks;
+    } else if let Ok(lists) = api.tasklists() {
+        if let Some(list) = lists.into_iter().find(|l| l.id == list_id) {
+            cache.lists.push(CachedList { list, tasks });
+        }
+    }
+    cache::save(&cache);
+}
+
+fn write_json(out: &mut impl Write, v: &impl serde::Serialize) -> Result<(), Error> {
+    writeln!(out, "{}", serde_json::to_string(v).map_err(|e| Error::Fail(e.to_string()))?)
+        .map_err(io_fail)
+}
+
+fn write_str(out: &mut impl Write, s: &str) -> Result<(), Error> {
+    write!(out, "{s}").map_err(io_fail)?;
+    if !s.ends_with('\n') {
+        writeln!(out).map_err(io_fail)?;
+    }
+    Ok(())
+}
+
+fn write_task(out: &mut impl Write, format: Format, task: &Task) -> Result<(), Error> {
+    match format {
+        Format::Json => write_json(out, task),
+        Format::Md => write_str(out, &md_task(task)),
+    }
+}
+
+fn md_lists(lists: &[TaskList]) -> String {
+    lists
+        .iter()
+        .map(|l| format!("- {} (`{}`)\n", l.title, l.id))
+        .collect()
+}
+
+fn md_task_section(list: &TaskList, tasks: &[Task]) -> String {
+    let mut s = format!("# {} (`{}`)\n", list.title, list.id);
+    if !tasks.is_empty() {
+        s.push('\n');
+        for t in tasks {
+            let mark = if t.is_done() { "x" } else { " " };
+            let indent = if t.parent.is_some() { "  " } else { "" };
+            s.push_str(&format!("{indent}- [{mark}] {} (`{}`)\n", t.title, t.id));
+        }
+    }
+    s
+}
+
+fn md_task(task: &Task) -> String {
+    let mut s = format!("# {}\n\n- id: `{}`\n- status: {}", task.title, task.id, task.status);
+    if let Some(d) = task.due_date() {
+        s.push_str(&format!("\n- due: {d}"));
+    }
+    if let Some(p) = &task.parent {
+        s.push_str(&format!("\n- parent: `{p}`"));
+    }
+    if let Some(n) = task.notes.as_deref().map(str::trim).filter(|n| !n.is_empty()) {
+        s.push_str("\n\n");
+        s.push_str(n);
+    }
+    s.push('\n');
+    s
+}
+
+fn api_fail(e: Box<dyn std::error::Error + Send + Sync>) -> Error {
+    Error::Fail(e.to_string())
+}
+
+fn io_fail(e: io::Error) -> Error {
+    Error::Fail(e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+    use std::env;
+    use std::fs;
+    use std::sync::Mutex;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    static CONFIG: Mutex<()> = Mutex::new(());
+
+    struct Fake {
+        lists: Vec<TaskList>,
+        tasks: HashMap<String, Vec<Task>>,
+        fail: Option<String>,
+        creates: usize,
+        patches: Vec<Value>,
+        deletes: Vec<(String, String)>,
+        task_fetches: usize,
+        next_id: u32,
+        last_cache: Option<cache::Cache>,
+    }
+
+    impl Fake {
+        fn new() -> Self {
+            let inbox = TaskList { id: "l1".into(), title: "Inbox".into() };
+            let other = TaskList { id: "l2".into(), title: "Inbox".into() };
+            let work = TaskList { id: "lw".into(), title: "Work".into() };
+            let t1 = task("t1", "Buy milk", "needsAction");
+            let t2 = task("t2", "Ship CLI", "completed");
+            Self {
+                lists: vec![inbox.clone(), other, work],
+                tasks: HashMap::from([
+                    ("l1".into(), vec![t1]),
+                    ("l2".into(), vec![task("t1", "dup", "needsAction")]),
+                    ("lw".into(), vec![t2]),
+                ]),
+                fail: None,
+                creates: 0,
+                patches: Vec::new(),
+                deletes: Vec::new(),
+                task_fetches: 0,
+                next_id: 10,
+                last_cache: None,
+            }
+        }
+    }
+
+    impl TasksApi for Fake {
+        fn tasklists(&mut self) -> crate::auth::Result<Vec<TaskList>> {
+            if let Some(e) = &self.fail {
+                return Err(e.clone().into());
+            }
+            Ok(self.lists.clone())
+        }
+
+        fn tasks(&mut self, list_id: &str) -> crate::auth::Result<Vec<Task>> {
+            self.task_fetches += 1;
+            if let Some(e) = &self.fail {
+                return Err(e.clone().into());
+            }
+            Ok(self.tasks.get(list_id).cloned().unwrap_or_default())
+        }
+
+        fn patch(
+            &mut self,
+            list_id: &str,
+            task_id: &str,
+            fields: &Value,
+        ) -> crate::auth::Result<Task> {
+            self.patches.push(fields.clone());
+            let tasks = self.tasks.get_mut(list_id).ok_or("no list")?;
+            let task = tasks.iter_mut().find(|t| t.id == task_id).ok_or("no task")?;
+            if let Some(t) = fields.get("title").and_then(Value::as_str) {
+                task.title = t.into();
+            }
+            if let Some(n) = fields.get("notes").and_then(Value::as_str) {
+                task.notes = Some(n.into());
+            }
+            if let Some(d) = fields.get("due").and_then(Value::as_str) {
+                task.due = Some(d.into());
+            }
+            if let Some(s) = fields.get("status").and_then(Value::as_str) {
+                task.status = s.into();
+            }
+            Ok(task.clone())
+        }
+
+        fn create(
+            &mut self,
+            list_id: &str,
+            body: &Value,
+            parent: Option<&str>,
+        ) -> crate::auth::Result<Task> {
+            self.creates += 1;
+            let t = Task {
+                id: format!("n{}", self.next_id),
+                title: body["title"].as_str().unwrap_or("").into(),
+                notes: body.get("notes").and_then(Value::as_str).map(str::to_string),
+                due: body.get("due").and_then(Value::as_str).map(str::to_string),
+                parent: parent.map(str::to_string),
+                status: "needsAction".into(),
+                ..Default::default()
+            };
+            self.next_id += 1;
+            self.tasks.entry(list_id.into()).or_default().push(t.clone());
+            Ok(t)
+        }
+
+        fn delete(&mut self, list_id: &str, task_id: &str) -> crate::auth::Result<()> {
+            self.deletes.push((list_id.into(), task_id.into()));
+            if let Some(tasks) = self.tasks.get_mut(list_id) {
+                tasks.retain(|t| t.id != task_id);
+            }
+            Ok(())
+        }
+    }
+
+    fn task(id: &str, title: &str, status: &str) -> Task {
+        Task { id: id.into(), title: title.into(), status: status.into(), ..Default::default() }
+    }
+
+    fn parse(args: &[&str]) -> Args {
+        Args::try_parse_from(std::iter::once("google-tasks-tui").chain(args.iter().copied())).unwrap()
+    }
+
+    fn run(api: &mut Fake, args: &[&str]) -> (Result<(), Error>, String) {
+        let _guard = CONFIG.lock().unwrap();
+        let root = env::temp_dir().join(format!(
+            "gtt-cli-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let prev = env::var_os("XDG_CONFIG_HOME");
+        env::set_var("XDG_CONFIG_HOME", &root);
+        let parsed = parse(args);
+        let mut out = Vec::new();
+        let res = execute_to(
+            api,
+            parsed.command.expect("subcommand"),
+            parsed.format,
+            &mut out,
+        );
+        api.last_cache = Some(cache::load());
+        match prev {
+            Some(p) => env::set_var("XDG_CONFIG_HOME", p),
+            None => env::remove_var("XDG_CONFIG_HOME"),
+        }
+        let _ = fs::remove_dir_all(&root);
+        (res, String::from_utf8(out).unwrap())
+    }
+
+    #[test]
+    fn no_subcommand_means_tui() {
+        let a = Args::try_parse_from(["google-tasks-tui"]).unwrap();
+        assert!(a.command.is_none());
+    }
+
+    #[test]
+    fn resolve_list_prefers_id_then_unique_title() {
+        let lists = [
+            TaskList { id: "l1".into(), title: "Inbox".into() },
+            TaskList { id: "l2".into(), title: "Inbox".into() },
+            TaskList { id: "lw".into(), title: "Work".into() },
+        ];
+        assert_eq!(resolve_list(&lists, "lw").unwrap().id, "lw");
+        assert_eq!(resolve_list(&lists, "Work").unwrap().id, "lw");
+        assert!(matches!(resolve_list(&lists, "Inbox"), Err(Error::Usage(_))));
+        assert!(matches!(resolve_list(&lists, "nope"), Err(Error::Usage(_))));
+        assert_eq!(resolve_list(&lists, "l1").unwrap().title, "Inbox");
+    }
+
+    #[test]
+    fn format_defaults_to_md_and_is_global() {
+        let a = parse(&["lists"]);
+        assert_eq!(a.format, Format::Md);
+        assert_eq!(parse(&["-f", "json", "lists"]).format, Format::Json);
+        assert_eq!(parse(&["lists", "--format", "json"]).format, Format::Json);
+    }
+
+    #[test]
+    fn lists_markdown_and_json() {
+        let mut api = Fake::new();
+        let (_, md) = run(&mut api, &["lists"]);
+        assert_eq!(md, "- Inbox (`l1`)\n- Inbox (`l2`)\n- Work (`lw`)\n");
+        let (_, json) = run(&mut api, &["lists", "-f", "json"]);
+        let v: Vec<TaskList> = serde_json::from_str(json.trim()).unwrap();
+        assert_eq!(v.len(), 3);
+    }
+
+    #[test]
+    fn tasks_one_list_and_whole_board() {
+        let mut api = Fake::new();
+        let (res, md) = run(&mut api, &["tasks", "--list", "Work"]);
+        assert!(res.is_ok());
+        assert_eq!(md, "# Work (`lw`)\n\n- [x] Ship CLI (`t2`)\n");
+        let (_, json) = run(&mut api, &["-f", "json", "tasks", "--list", "Work"]);
+        let v: Vec<Task> = serde_json::from_str(json.trim()).unwrap();
+        assert_eq!(v[0].id, "t2");
+        let (_, board) = run(&mut api, &["-f", "json", "tasks"]);
+        let cache: cache::Cache = serde_json::from_str(board.trim()).unwrap();
+        assert_eq!(cache.lists.len(), 3);
+        let (_, board_md) = run(&mut api, &["tasks"]);
+        assert!(board_md.contains("# Inbox (`l1`)"));
+        assert!(board_md.contains("- [ ] Buy milk (`t1`)"));
+        assert!(board_md.contains("# Work (`lw`)"));
+    }
+
+    #[test]
+    fn get_needs_list_when_id_is_duplicated() {
+        let mut api = Fake::new();
+        let (res, _) = run(&mut api, &["get", "t1"]);
+        assert!(matches!(res, Err(Error::Usage(m)) if m.contains("more than one")));
+        let (_, md) = run(&mut api, &["get", "t1", "--list", "l1"]);
+        assert_eq!(md, "# Buy milk\n\n- id: `t1`\n- status: needsAction\n");
+        let (_, json) = run(&mut api, &["-f", "json", "get", "t1", "--list", "l1"]);
+        let t: Task = serde_json::from_str(json.trim()).unwrap();
+        assert_eq!(t.title, "Buy milk");
+    }
+
+    #[test]
+    fn create_sends_optional_fields_and_refetches_the_list() {
+        let mut api = Fake::new();
+        let fetches = api.task_fetches;
+        let (res, json) = run(
+            &mut api,
+            &[
+                "-f",
+                "json",
+                "create",
+                "--list",
+                "Work",
+                "--title",
+                "New",
+                "--notes",
+                "hi",
+                "--due",
+                "2026-09-21",
+                "--parent",
+                "t2",
+            ],
+        );
+        assert!(res.is_ok());
+        let t: Task = serde_json::from_str(json.trim()).unwrap();
+        assert_eq!(t.title, "New");
+        assert_eq!(t.notes.as_deref(), Some("hi"));
+        assert_eq!(t.due.as_deref(), Some("2026-09-21T00:00:00.000Z"));
+        assert_eq!(t.parent.as_deref(), Some("t2"));
+        assert_eq!(api.creates, 1);
+        assert!(api.task_fetches > fetches);
+        let cache = api.last_cache.as_ref().unwrap();
+        assert!(cache
+            .lists
+            .iter()
+            .any(|c| c.list.id == "lw" && c.tasks.iter().any(|t| t.title == "New")));
+    }
+
+    #[test]
+    fn update_and_done_patch_only_given_fields() {
+        let mut api = Fake::new();
+        let (res, _) = run(&mut api, &["update", "t2"]);
+        assert!(matches!(res, Err(Error::Usage(_))));
+        let (_, json) = run(
+            &mut api,
+            &["-f", "json", "update", "t2", "--title", "Shipped", "--list", "Work"],
+        );
+        let t: Task = serde_json::from_str(json.trim()).unwrap();
+        assert_eq!(t.title, "Shipped");
+        assert_eq!(api.patches[0], json!({ "title": "Shipped" }));
+        let _ = run(&mut api, &["done", "t1", "--list", "l1"]);
+        assert_eq!(api.patches.last().unwrap()["status"], "completed");
+        let _ = run(&mut api, &["undone", "t2", "--list", "lw"]);
+        assert_eq!(api.patches.last().unwrap()["status"], "needsAction");
+    }
+
+    #[test]
+    fn delete_requires_yes() {
+        let mut api = Fake::new();
+        let (res, out) = run(&mut api, &["delete", "t2", "--list", "Work"]);
+        assert!(matches!(res, Err(Error::Usage(m)) if m.contains("--yes")));
+        assert!(out.is_empty());
+        let (res, out) = run(&mut api, &["delete", "t2", "--list", "Work", "--yes"]);
+        assert!(res.is_ok());
+        assert!(out.is_empty());
+        assert_eq!(api.deletes, vec![("lw".into(), "t2".into())]);
+    }
+
+    #[test]
+    fn due_must_be_a_date() {
+        assert!(due_rfc3339("nope").is_err());
+        assert_eq!(due_rfc3339("2026-01-02").unwrap(), "2026-01-02T00:00:00.000Z");
+    }
+
+    #[test]
+    fn api_failures_are_exit_one() {
+        let mut api = Fake::new();
+        api.fail = Some("sign-in expired".into());
+        let err = run(&mut api, &["lists"]).0.unwrap_err();
+        assert_eq!(err.exit_code(), 1);
+        assert!(matches!(err, Error::Fail(m) if m.contains("sign-in expired")));
+    }
+}

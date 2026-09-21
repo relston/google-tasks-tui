@@ -96,16 +96,20 @@ impl Client {
 
     /// Add a task to the top of a list.
     pub fn create(&mut self, list_id: &str, title: &str) -> Result<Task> {
+        self.insert(list_id, &serde_json::json!({ "title": title }), None)
+    }
+
+    fn insert(&mut self, list_id: &str, body: &Value, parent: Option<&str>) -> Result<Task> {
         let token = self.auth.token()?;
-        let task = self
+        let mut req = self
             .auth
             .agent
             .post(format!("{BASE}/lists/{}/tasks", pct(list_id)))
-            .header("Authorization", format!("Bearer {token}"))
-            .send_json(serde_json::json!({ "title": title }))?
-            .body_mut()
-            .read_json()?;
-        Ok(task)
+            .header("Authorization", format!("Bearer {token}"));
+        if let Some(p) = parent {
+            req = req.query("parent", p);
+        }
+        Ok(req.send_json(body)?.body_mut().read_json()?)
     }
 
     /// Delete a task. Google deletes its subtasks along with it.
@@ -144,5 +148,37 @@ impl Client {
                 None => return Ok(out),
             }
         }
+    }
+}
+
+/// The Google Tasks operations the CLI (and tests) need. `Client` is the
+/// real implementation; tests use a fake.
+pub trait TasksApi {
+    fn tasklists(&mut self) -> Result<Vec<TaskList>>;
+    fn tasks(&mut self, list_id: &str) -> Result<Vec<Task>>;
+    fn patch(&mut self, list_id: &str, task_id: &str, fields: &Value) -> Result<Task>;
+    fn create(&mut self, list_id: &str, body: &Value, parent: Option<&str>) -> Result<Task>;
+    fn delete(&mut self, list_id: &str, task_id: &str) -> Result<()>;
+}
+
+impl TasksApi for Client {
+    fn tasklists(&mut self) -> Result<Vec<TaskList>> {
+        Client::tasklists(self)
+    }
+
+    fn tasks(&mut self, list_id: &str) -> Result<Vec<Task>> {
+        Client::tasks(self, list_id)
+    }
+
+    fn patch(&mut self, list_id: &str, task_id: &str, fields: &Value) -> Result<Task> {
+        Client::patch(self, list_id, task_id, fields)
+    }
+
+    fn create(&mut self, list_id: &str, body: &Value, parent: Option<&str>) -> Result<Task> {
+        self.insert(list_id, body, parent)
+    }
+
+    fn delete(&mut self, list_id: &str, task_id: &str) -> Result<()> {
+        Client::delete(self, list_id, task_id)
     }
 }
