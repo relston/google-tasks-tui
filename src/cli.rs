@@ -92,6 +92,34 @@ pub enum Command {
         #[arg(long)]
         yes: bool,
     },
+    /// Create, rename, or delete a task list.
+    List {
+        #[command(subcommand)]
+        cmd: ListCmd,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum ListCmd {
+    /// Create a task list.
+    Create {
+        #[arg(short, long)]
+        title: String,
+    },
+    /// Rename a task list.
+    Update {
+        /// List id or unique title.
+        list: String,
+        #[arg(short, long)]
+        title: String,
+    },
+    /// Delete a task list (and every task in it). Requires --yes.
+    Delete {
+        /// List id or unique title.
+        list: String,
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -244,6 +272,41 @@ pub fn execute_to(
             api.delete(&list_id, &task.id).map_err(api_fail)?;
             refresh_cache(api, &list_id);
         }
+        Command::List { cmd } => match cmd {
+            ListCmd::Create { title } => {
+                if title.trim().is_empty() {
+                    return Err(Error::Usage("a list needs a title".into()));
+                }
+                let list = api.create_list(&title).map_err(api_fail)?;
+                cache_upsert_list(list.clone());
+                write_list(out, format, &list)?;
+            }
+            ListCmd::Update { list, title } => {
+                if title.trim().is_empty() {
+                    return Err(Error::Usage("a list needs a title".into()));
+                }
+                let lists = tasklists(api)?;
+                let list = resolve_list(&lists, &list)?;
+                let list = api
+                    .patch_list(&list.id, &json!({ "title": title }))
+                    .map_err(api_fail)?;
+                cache_upsert_list(list.clone());
+                write_list(out, format, &list)?;
+            }
+            ListCmd::Delete { list, yes } => {
+                let lists = tasklists(api)?;
+                let list = resolve_list(&lists, &list)?;
+                if !yes {
+                    return Err(Error::Usage(format!(
+                        "list delete requires --yes (Google also removes every task in \"{}\")",
+                        list.title
+                    )));
+                }
+                let id = list.id.clone();
+                api.delete_list(&id).map_err(api_fail)?;
+                cache_remove_list(&id);
+            }
+        },
     }
     Ok(())
 }
@@ -343,6 +406,22 @@ fn refresh_cache(api: &mut impl TasksApi, list_id: &str) {
     cache::save(&cache);
 }
 
+fn cache_upsert_list(list: TaskList) {
+    let mut cache = cache::load();
+    if let Some(slot) = cache.lists.iter_mut().find(|c| c.list.id == list.id) {
+        slot.list = list;
+    } else {
+        cache.lists.push(CachedList { list, tasks: Vec::new() });
+    }
+    cache::save(&cache);
+}
+
+fn cache_remove_list(list_id: &str) {
+    let mut cache = cache::load();
+    cache.lists.retain(|c| c.list.id != list_id);
+    cache::save(&cache);
+}
+
 fn write_json(out: &mut impl Write, v: &impl serde::Serialize) -> Result<(), Error> {
     writeln!(out, "{}", serde_json::to_string(v).map_err(|e| Error::Fail(e.to_string()))?)
         .map_err(io_fail)
@@ -363,6 +442,13 @@ fn write_task(out: &mut impl Write, format: Format, task: &Task) -> Result<(), E
     }
 }
 
+fn write_list(out: &mut impl Write, format: Format, list: &TaskList) -> Result<(), Error> {
+    match format {
+        Format::Json => write_json(out, list),
+        Format::Md => write_str(out, &md_lists(std::slice::from_ref(list))),
+    }
+}
+
 fn md_lists(lists: &[TaskList]) -> String {
     lists
         .iter()
@@ -378,6 +464,11 @@ fn md_task_section(list: &TaskList, tasks: &[Task]) -> String {
             let mark = if t.is_done() { "x" } else { " " };
             let indent = if t.parent.is_some() { "  " } else { "" };
             s.push_str(&format!("{indent}- [{mark}] {} (`{}`)\n", t.title, t.id));
+            if let Some(n) = t.notes.as_deref().map(str::trim).filter(|n| !n.is_empty()) {
+                for line in n.lines() {
+                    s.push_str(&format!("{indent}  {line}\n"));
+                }
+            }
         }
     }
     s
@@ -436,7 +527,10 @@ mod tests {
             let other = TaskList { id: "l2".into(), title: "Inbox".into() };
             let work = TaskList { id: "lw".into(), title: "Work".into() };
             let t1 = task("t1", "Buy milk", "needsAction");
-            let t2 = task("t2", "Ship CLI", "completed");
+            let t2 = Task {
+                notes: Some("Phase 3\nsee PR".into()),
+                ..task("t2", "Ship CLI", "completed")
+            };
             Self {
                 lists: vec![inbox.clone(), other, work],
                 tasks: HashMap::from([
@@ -523,6 +617,35 @@ mod tests {
             }
             Ok(())
         }
+
+        fn create_list(&mut self, title: &str) -> crate::auth::Result<TaskList> {
+            let list = TaskList {
+                id: format!("n{}", self.next_id),
+                title: title.into(),
+            };
+            self.next_id += 1;
+            self.lists.push(list.clone());
+            self.tasks.insert(list.id.clone(), Vec::new());
+            Ok(list)
+        }
+
+        fn patch_list(
+            &mut self,
+            list_id: &str,
+            fields: &Value,
+        ) -> crate::auth::Result<TaskList> {
+            let list = self.lists.iter_mut().find(|l| l.id == list_id).ok_or("no list")?;
+            if let Some(t) = fields.get("title").and_then(Value::as_str) {
+                list.title = t.into();
+            }
+            Ok(list.clone())
+        }
+
+        fn delete_list(&mut self, list_id: &str) -> crate::auth::Result<()> {
+            self.lists.retain(|l| l.id != list_id);
+            self.tasks.remove(list_id);
+            Ok(())
+        }
     }
 
     fn task(id: &str, title: &str, status: &str) -> Task {
@@ -603,7 +726,10 @@ mod tests {
         let mut api = Fake::new();
         let (res, md) = run(&mut api, &["tasks", "--list", "Work"]);
         assert!(res.is_ok());
-        assert_eq!(md, "# Work (`lw`)\n\n- [x] Ship CLI (`t2`)\n");
+        assert_eq!(
+            md,
+            "# Work (`lw`)\n\n- [x] Ship CLI (`t2`)\n  Phase 3\n  see PR\n"
+        );
         let (_, json) = run(&mut api, &["-f", "json", "tasks", "--list", "Work"]);
         let v: Vec<Task> = serde_json::from_str(json.trim()).unwrap();
         assert_eq!(v[0].id, "t2");
@@ -614,6 +740,7 @@ mod tests {
         assert!(board_md.contains("# Inbox (`l1`)"));
         assert!(board_md.contains("- [ ] Buy milk (`t1`)"));
         assert!(board_md.contains("# Work (`lw`)"));
+        assert!(board_md.contains("Phase 3"));
     }
 
     #[test]
@@ -708,5 +835,50 @@ mod tests {
         let err = run(&mut api, &["lists"]).0.unwrap_err();
         assert_eq!(err.exit_code(), 1);
         assert!(matches!(err, Error::Fail(m) if m.contains("sign-in expired")));
+    }
+
+    #[test]
+    fn list_create_update_delete() {
+        let mut api = Fake::new();
+        let (res, md) = run(&mut api, &["list", "create", "--title", "Errands"]);
+        assert!(res.is_ok());
+        assert_eq!(md, "- Errands (`n10`)\n");
+        assert!(api.lists.iter().any(|l| l.id == "n10" && l.title == "Errands"));
+        let cache = api.last_cache.as_ref().unwrap();
+        assert!(cache.lists.iter().any(|c| c.list.id == "n10" && c.tasks.is_empty()));
+
+        let (_, json) = run(&mut api, &["-f", "json", "list", "create", "--title", "Later"]);
+        let created: TaskList = serde_json::from_str(json.trim()).unwrap();
+        assert_eq!(created.title, "Later");
+
+        let (res, md) = run(&mut api, &["list", "update", "Work", "--title", "Projects"]);
+        assert!(res.is_ok());
+        assert_eq!(md, "- Projects (`lw`)\n");
+        assert_eq!(api.lists.iter().find(|l| l.id == "lw").unwrap().title, "Projects");
+        let cache = api.last_cache.as_ref().unwrap();
+        assert!(cache.lists.iter().any(|c| c.list.id == "lw" && c.list.title == "Projects"));
+
+        let (res, _) = run(&mut api, &["list", "update", "lw", "--title", "Office"]);
+        assert!(res.is_ok());
+        assert_eq!(api.lists.iter().find(|l| l.id == "lw").unwrap().title, "Office");
+
+        let (res, _) = run(&mut api, &["list", "update", "Inbox", "--title", "Nope"]);
+        assert!(matches!(res, Err(Error::Usage(m)) if m.contains("not unique")));
+
+        let (res, _) = run(&mut api, &["list", "create", "--title", "  "]);
+        assert!(matches!(res, Err(Error::Usage(m)) if m.contains("title")));
+
+        let (res, out) = run(&mut api, &["list", "delete", "Office"]);
+        assert!(matches!(res, Err(Error::Usage(m)) if m.contains("--yes") && m.contains("Office")));
+        assert!(out.is_empty());
+        assert!(api.lists.iter().any(|l| l.id == "lw"));
+
+        let (res, out) = run(&mut api, &["list", "delete", "lw", "--yes"]);
+        assert!(res.is_ok());
+        assert!(out.is_empty());
+        assert!(api.lists.iter().all(|l| l.id != "lw"));
+        assert!(!api.tasks.contains_key("lw"));
+        let cache = api.last_cache.as_ref().unwrap();
+        assert!(cache.lists.iter().all(|c| c.list.id != "lw"));
     }
 }

@@ -118,17 +118,25 @@ google-tasks-tui update TASK_ID --title "Shipped"
 google-tasks-tui done TASK_ID
 google-tasks-tui undone TASK_ID --list Inbox
 google-tasks-tui delete TASK_ID --yes
+google-tasks-tui list create --title "Work"
+google-tasks-tui list update Work --title "Projects"
+google-tasks-tui list delete Projects --yes
 ```
 
 `lists` is a bullet list of titles with ids in backticks. `tasks` is a
-heading per list and GitHub-style checkboxes (`- [ ]` / `- [x]`). `get` /
+heading per list and GitHub-style checkboxes (`- [ ]` / `- [x]`), with notes
+indented under the item when present. `get` /
 `create` / `update` / `done` / `undone` print one task as a heading plus
-fields. `delete --yes` prints nothing. JSON shapes: `lists` is an array of
-`{id, title}`; `tasks --list` is an array of tasks; `tasks` is
-`{ "lists": [ { "list": …, "tasks": […] } ] }` (same as `cache.json`).
+fields. `list create` / `list update` print one list the same way as
+`lists`. `delete --yes` and `list delete --yes` print nothing. JSON shapes:
+`lists` is an array of `{id, title}`; `tasks --list` is an array of tasks;
+`tasks` is `{ "lists": [ { "list": …, "tasks": […] } ] }` (same as
+`cache.json`).
 
 `create` can also take `--parent TASK_ID`. `update` sends only the flags you
 pass (`--title`, `--notes`, `--due`, `--status needsAction|completed`).
+`list update` / `list delete` take a list id or unique title. `list delete`
+requires `--yes` because Google removes every task in that list.
 
 ## Keys
 
@@ -209,7 +217,7 @@ real theme.
 
 ## Roadmap
 
-- Edit due dates; manage task lists; move tasks between lists.
+- Edit due dates; manage task lists in the TUI; move tasks between lists.
 - A `theme-set.d` hook (for example through an `--install-hook` flag) that
   signals running instances for instant reload, with polling kept as a
   fallback.

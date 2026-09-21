@@ -15,10 +15,10 @@ Work directly on `main`; no feature branches.
   `-f` / `--format json|md` (global) selects JSON for scripts.
 - `src/main.rs` — binary shim that calls `entry()`.
 - `src/cli.rs` — `lists`, `tasks`, `get`, `create`, `update`, `done`,
-  `undone`, `delete`. Resolves `--list` by id first, then unique title.
-  `-f` / `--format` is `md` (default) or `json`. Mutations go through
-  `TasksApi`, then refresh that list in `cache.json`.
-  A running TUI does not live-reload CLI edits (press `r`).
+  `undone`, `delete`, and `list create|update|delete`. Resolves `--list` /
+  list specs by id first, then unique title. `-f` / `--format` is `md`
+  (default) or `json`. Mutations go through `TasksApi`, then refresh
+  `cache.json`. A running TUI does not live-reload CLI edits (press `r`).
 - `src/theme.rs` — finds the active Omarchy theme, parses `colors.toml`, maps it
   to semantic roles (`bg, fg, surface, accent, muted, sel_bg, sel_fg, red,
   green, yellow, blue`). Exposes `load()` and `fingerprint()`.
@@ -38,7 +38,8 @@ Work directly on `main`; no feature branches.
 - `src/api.rs` — blocking Tasks v1 client on `ureq` 3; `get_all` follows
   `nextPageToken`; `patch` PATCHes arbitrary fields of one task; `create` POSTs
   a title (TUI); `insert` accepts a JSON body and optional `parent` query
-  (CLI); `delete` removes one. `TasksApi` is the trait the CLI and tests call.
+  (CLI); `delete` removes one; `create_list` / `patch_list` / `delete_list`
+  mutate task lists. `TasksApi` is the trait the CLI and tests call.
 - `src/tui.rs` — board UI. A worker thread owns the `Client` and talks to the
   UI over `Cmd`/`Msg` channels; the event loop polls input every 100 ms,
   drains messages, and calls `check_theme()` every 500 ms. `order()` sorts

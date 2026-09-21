@@ -123,6 +123,43 @@ impl Client {
         Ok(())
     }
 
+    /// Create a task list.
+    pub fn create_list(&mut self, title: &str) -> Result<TaskList> {
+        let token = self.auth.token()?;
+        Ok(self
+            .auth
+            .agent
+            .post(format!("{BASE}/users/@me/lists"))
+            .header("Authorization", format!("Bearer {token}"))
+            .send_json(serde_json::json!({ "title": title }))?
+            .body_mut()
+            .read_json()?)
+    }
+
+    /// Patch the given fields of a task list; returns it as Google stored it.
+    pub fn patch_list(&mut self, list_id: &str, fields: &Value) -> Result<TaskList> {
+        let token = self.auth.token()?;
+        Ok(self
+            .auth
+            .agent
+            .patch(format!("{BASE}/users/@me/lists/{}", pct(list_id)))
+            .header("Authorization", format!("Bearer {token}"))
+            .send_json(fields)?
+            .body_mut()
+            .read_json()?)
+    }
+
+    /// Delete a task list. Google deletes every task in it.
+    pub fn delete_list(&mut self, list_id: &str) -> Result<()> {
+        let token = self.auth.token()?;
+        self.auth
+            .agent
+            .delete(format!("{BASE}/users/@me/lists/{}", pct(list_id)))
+            .header("Authorization", format!("Bearer {token}"))
+            .call()?;
+        Ok(())
+    }
+
     /// Follow `nextPageToken` until the collection is exhausted.
     fn get_all<T: DeserializeOwned>(&mut self, url: &str, query: &[(&str, &str)]) -> Result<Vec<T>> {
         let mut out = Vec::new();
@@ -159,6 +196,9 @@ pub trait TasksApi {
     fn patch(&mut self, list_id: &str, task_id: &str, fields: &Value) -> Result<Task>;
     fn create(&mut self, list_id: &str, body: &Value, parent: Option<&str>) -> Result<Task>;
     fn delete(&mut self, list_id: &str, task_id: &str) -> Result<()>;
+    fn create_list(&mut self, title: &str) -> Result<TaskList>;
+    fn patch_list(&mut self, list_id: &str, fields: &Value) -> Result<TaskList>;
+    fn delete_list(&mut self, list_id: &str) -> Result<()>;
 }
 
 impl TasksApi for Client {
@@ -180,5 +220,17 @@ impl TasksApi for Client {
 
     fn delete(&mut self, list_id: &str, task_id: &str) -> Result<()> {
         Client::delete(self, list_id, task_id)
+    }
+
+    fn create_list(&mut self, title: &str) -> Result<TaskList> {
+        Client::create_list(self, title)
+    }
+
+    fn patch_list(&mut self, list_id: &str, fields: &Value) -> Result<TaskList> {
+        Client::patch_list(self, list_id, fields)
+    }
+
+    fn delete_list(&mut self, list_id: &str) -> Result<()> {
+        Client::delete_list(self, list_id)
     }
 }
