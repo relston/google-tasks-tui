@@ -10,8 +10,8 @@ It uses your active [Omarchy](https://omarchy.org) theme and
 Omarchy it falls back to plain ANSI colors, so it picks up your terminal's
 own palette.
 
-Press `Space` to tick a task off and `i` to rename it. Creating, deleting and
-editing the other fields is next.
+Press `Space` to tick a task off, `i` to rename it and `d` to delete it.
+Creating tasks and editing notes and due dates are next.
 
 ## Features
 
@@ -25,6 +25,9 @@ editing the other fields is next.
   subtask progress, notes, links, and the last-updated time at the bottom.
 - `Space` ticks or unticks the selected task. It moves to or from the
   completed group straight away, and the selection follows it.
+- `d` deletes the selected task after a y/n confirmation in the status bar.
+  The prompt names the task and counts the subtasks that go with it, since
+  Google deletes those too.
 - API calls run on a background thread, so the UI never blocks. Lists fill in
   as they load.
 - `i` turns the title in the shelf into a text input (opening the shelf if
@@ -89,6 +92,7 @@ google-tasks-tui
 | `Space`        | Tick / untick the task          |
 | `Enter`        | Open / close the details shelf  |
 | `i`            | Edit the task title             |
+| `d`            | Delete the task (asks y/n)      |
 | `r`            | Refresh from Google             |
 | `t`            | Toggle transparent background   |
 | `Esc`          | Close the shelf, or quit        |
@@ -144,7 +148,7 @@ real theme.
 
 ## Roadmap
 
-- Create and delete tasks; edit notes and due dates; manage lists.
+- Create tasks; edit notes and due dates; manage lists.
 - A `theme-set.d` hook (for example through an `--install-hook` flag) that
   signals running instances for instant reload, with polling kept as a
   fallback.

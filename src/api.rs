@@ -94,6 +94,17 @@ impl Client {
         Ok(task)
     }
 
+    /// Delete a task. Google deletes its subtasks along with it.
+    pub fn delete(&mut self, list_id: &str, task_id: &str) -> Result<()> {
+        let token = self.auth.token()?;
+        self.auth
+            .agent
+            .delete(format!("{BASE}/lists/{}/tasks/{}", pct(list_id), pct(task_id)))
+            .header("Authorization", format!("Bearer {token}"))
+            .call()?;
+        Ok(())
+    }
+
     /// Follow `nextPageToken` until the collection is exhausted.
     fn get_all<T: DeserializeOwned>(&mut self, url: &str, query: &[(&str, &str)]) -> Result<Vec<T>> {
         let mut out = Vec::new();

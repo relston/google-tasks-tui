@@ -36,6 +36,7 @@ const SHELF_W: u16 = 52;
 enum Cmd {
     Refresh,
     Patch { list_id: String, task_id: String, fields: Value },
+    Delete { list_id: String, task_id: String },
 }
 
 /// Results from the network thread.
@@ -43,6 +44,14 @@ enum Msg {
     Lists(Result<Vec<TaskList>, String>),
     Tasks(String, Result<Vec<Task>, String>),
     Updated(String, Result<Task, String>),
+    Deleted(Result<(), String>),
+}
+
+/// A delete waiting on a y/n answer in the status bar.
+struct Pending {
+    list_id: String,
+    task_id: String,
+    prompt: String,
 }
 
 /// An in-progress title edit. `cursor` is a byte offset into `buf`.
@@ -142,6 +151,7 @@ struct App {
     scroll: usize,
     shelf: bool,
     edit: Option<Edit>,
+    pending: Option<Pending>,
     fetching: bool,
     /// Edits sent to Google that haven't come back yet.
     saving: usize,
@@ -161,6 +171,7 @@ impl App {
             scroll: 0,
             shelf: false,
             edit: None,
+            pending: None,
             fetching: false,
             saving: 0,
             error: None,
@@ -233,6 +244,42 @@ impl App {
         self.send_patch(list_id, task_id, fields);
     }
 
+    /// Ask before deleting; `confirm_delete` does the work on "y".
+    fn ask_delete(&mut self) {
+        let Some(col) = self.columns.get(self.focus) else { return };
+        let Some(row) = col.selected() else { return };
+        let subtasks = col
+            .rows
+            .iter()
+            .filter(|r| r.task.parent.as_deref() == Some(row.task.id.as_str()))
+            .count();
+        let also = match subtasks {
+            0 => String::new(),
+            1 => " and its subtask".into(),
+            n => format!(" and its {n} subtasks"),
+        };
+        self.pending = Some(Pending {
+            list_id: col.list.id.clone(),
+            task_id: row.task.id.clone(),
+            prompt: format!("Delete \"{}\"{also}?  y/n", title_of(&row.task)),
+        });
+    }
+
+    fn confirm_delete(&mut self) {
+        let Some(p) = self.pending.take() else { return };
+        if let Some(col) = self.columns.iter_mut().find(|c| c.list.id == p.list_id) {
+            // Drop the task and its subtasks locally; Google cascades the same way.
+            col.rows
+                .retain(|r| r.task.id != p.task_id && r.task.parent.as_deref() != Some(p.task_id.as_str()));
+            let last = col.rows.len().checked_sub(1);
+            let sel = col.state.selected().unwrap_or(0);
+            col.state.select(last.map(|l| sel.min(l)));
+        }
+        self.error = None;
+        self.saving += 1;
+        let _ = self.cmds.send(Cmd::Delete { list_id: p.list_id, task_id: p.task_id });
+    }
+
     fn send_patch(&mut self, list_id: String, task_id: String, fields: Value) {
         self.saving += 1;
         let _ = self.cmds.send(Cmd::Patch { list_id, task_id, fields });
@@ -290,6 +337,15 @@ impl App {
                     Err(e) => self.error = Some(format!("{}: {e}", col.list.title)),
                 }
             }
+            Msg::Deleted(res) => {
+                self.saving = self.saving.saturating_sub(1);
+                if let Err(e) = res {
+                    // The task is still there, so put the board back.
+                    self.error = Some(format!("delete failed: {e}"));
+                    self.fetching = true;
+                    let _ = self.cmds.send(Cmd::Refresh);
+                }
+            }
             Msg::Updated(list_id, res) => {
                 self.saving = self.saving.saturating_sub(1);
                 match res {
@@ -337,6 +393,14 @@ impl App {
             self.edit_key(k);
             return;
         }
+        if self.pending.is_some() {
+            // Only "y" deletes; every other key cancels.
+            match k.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => self.confirm_delete(),
+                _ => self.pending = None,
+            }
+            return;
+        }
         match k.code {
             KeyCode::Char('q') => self.quit = true,
             KeyCode::Esc if self.shelf => self.shelf = false,
@@ -352,6 +416,7 @@ impl App {
             KeyCode::Enter => self.shelf = !self.shelf && self.selected_task().is_some(),
             KeyCode::Char('i') => self.start_edit(),
             KeyCode::Char(' ') => self.toggle_done(),
+            KeyCode::Char('d') => self.ask_delete(),
             KeyCode::Char('r') => self.refresh(),
             KeyCode::Char('t') => self.transparent = !self.transparent,
             _ => {}
@@ -417,11 +482,12 @@ impl App {
         let hints = if self.edit.is_some() {
             " ⏎ save · Esc cancel · ^W delete word · ^U clear"
         } else {
-            " h/l list · j/k task · ␣ done · ⏎ details · i edit · r refresh · t transparent · q quit"
+            " h/l list · j/k task · ␣ done · ⏎ details · i edit · d delete · r refresh · q quit"
         };
-        let status_line = match &self.error {
-            Some(e) => Line::styled(format!(" {e}"), Style::default().fg(t.red)),
-            None => Line::styled(hints, Style::default().fg(t.muted)),
+        let status_line = match (&self.pending, &self.error) {
+            (Some(p), _) => Line::styled(format!(" {}", p.prompt), Style::default().fg(t.yellow).bold()),
+            (None, Some(e)) => Line::styled(format!(" {e}"), Style::default().fg(t.red)),
+            (None, None) => Line::styled(hints, Style::default().fg(t.muted)),
         };
         f.render_widget(status_line, status);
     }
@@ -673,6 +739,12 @@ fn order(tasks: Vec<Task>) -> Vec<Row> {
 fn worker(mut client: Client, cmds: Receiver<Cmd>, out: Sender<Msg>) {
     for cmd in cmds {
         match cmd {
+            Cmd::Delete { list_id, task_id } => {
+                let res = client.delete(&list_id, &task_id).map_err(|e| e.to_string());
+                if out.send(Msg::Deleted(res)).is_err() {
+                    return;
+                }
+            }
             Cmd::Patch { list_id, task_id, fields } => {
                 let res = client.patch(&list_id, &task_id, &fields).map_err(|e| e.to_string());
                 if out.send(Msg::Updated(list_id, res)).is_err() {
