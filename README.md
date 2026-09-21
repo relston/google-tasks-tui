@@ -10,8 +10,8 @@ It uses your active [Omarchy](https://omarchy.org) theme and
 Omarchy it falls back to plain ANSI colors, so it picks up your terminal's
 own palette.
 
-Press `Space` to tick a task off, `i` to rename it and `d` to delete it.
-Creating tasks and editing notes and due dates are next.
+Press `Space` to tick a task off, `d` to delete it, and `Tab`/`i` in the shelf
+to edit its title or notes. Creating tasks and editing due dates are next.
 
 ## Features
 
@@ -30,11 +30,14 @@ Creating tasks and editing notes and due dates are next.
   Google deletes those too.
 - API calls run on a background thread, so the UI never blocks. Lists fill in
   as they load.
-- `i` turns the title in the shelf into a text input (opening the shelf if
-  needed). Enter saves to Google, Esc discards. Editing supports the usual
-  arrows plus `Ctrl-W` (delete word), `Ctrl-U` (clear), `Ctrl-A`/`Ctrl-E`.
-  The new title shows immediately; a failed save reports in the status bar
-  and resyncs.
+- In the shelf, `Tab` moves between the title and the notes; the focused one
+  carries a marker in the accent color. `i` turns it into a text input
+  (opening the shelf first if needed) and `Enter` saves to Google, `Esc`
+  discards. Notes are multi-line: `Shift+Enter` starts a new line, and the
+  arrows move around it.
+- Editing supports `Ctrl-W` (delete word), `Ctrl-U` (clear to line start) and
+  `Ctrl-A`/`Ctrl-E`. Changes show immediately; a failed save reports in the
+  status bar and resyncs.
 - Reads the active Omarchy palette (`colors.toml`) and maps it to semantic
   roles: background, foreground, surface, accent, muted, selection, red,
   green, yellow, blue.
@@ -89,9 +92,10 @@ google-tasks-tui
 | `j` / `↓`      | Next task                       |
 | `k` / `↑`      | Previous task                   |
 | `g` / `G`      | First / last task               |
+| `Tab`          | Move between shelf fields       |
 | `Space`        | Tick / untick the task          |
 | `Enter`        | Open / close the details shelf  |
-| `i`            | Edit the task title             |
+| `i`            | Edit the focused shelf field    |
 | `d`            | Delete the task (asks y/n)      |
 | `r`            | Refresh from Google             |
 | `t`            | Toggle transparent background   |
@@ -142,13 +146,18 @@ src/
 cargo test
 ```
 
+`Shift+Enter` needs a terminal that speaks the kitty keyboard protocol
+(Ghostty, Kitty, Alacritty, foot, WezTerm). The app asks for it at startup and
+falls back to `Alt+Enter` / `Ctrl-J` elsewhere — inside tmux, that fallback is
+what you'll use unless `extended-keys` is on.
+
 The test in `theme.rs` builds a fake Omarchy state directory under the system
 temp dir and points `HOME` / `XDG_STATE_HOME` at it, so it doesn't touch your
 real theme.
 
 ## Roadmap
 
-- Create tasks; edit notes and due dates; manage lists.
+- Create tasks; edit due dates; manage lists.
 - A `theme-set.d` hook (for example through an `--install-hook` flag) that
   signals running instances for instant reload, with polling kept as a
   fallback.

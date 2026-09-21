@@ -1,7 +1,8 @@
 # google-tasks-tui
 
 A fast Rust TUI (ratatui 0.29 + crossterm) for Google Tasks: one column per
-task list, tasks listed vertically, Enter opens a details shelf, `i` edits the title inline, Space ticks a task, `d` deletes it. Fully
+task list, tasks listed vertically, Enter opens a details shelf, Tab moves between shelf fields (title/notes), `i` edits one inline, Space
+ticks a task, `d` deletes it. Fully
 integrates with the Omarchy theming system and live-reloads when the user
 switches themes. Goal: full CRUD on tasks and task lists.
 
@@ -28,7 +29,11 @@ Work directly on `main`; no feature branches.
   error and refreshes. `Msg::Updated` re-runs `order()` so a ticked task moves
   to the completed group with the selection following it. Destructive keys go
   through `App::pending` (a y/n prompt in the status bar), never straight to
-  the API.
+  the API. The shelf lays out explicit sub-rects (title/meta/notes/updated) so
+  `wrap()` + `cursor_rc()` can place the real terminal cursor; `App::field`
+  holds shelf focus. Startup pushes kitty keyboard flags when the terminal
+  supports them, so Shift+Enter reaches the notes editor (Alt+Enter and Ctrl-J
+  are the fallbacks).
 
 ## Omarchy theming facts (verified Sept 2026)
 - Active theme dir, current releases: `$XDG_STATE_HOME/omarchy/current`

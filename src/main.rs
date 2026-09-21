@@ -4,6 +4,7 @@ mod theme;
 
 use std::{
     collections::HashSet,
+    io,
     sync::mpsc::{self, Receiver, Sender},
     thread,
     time::{Duration, Instant},
@@ -11,12 +12,18 @@ use std::{
 
 use chrono::{DateTime, Datelike, Local, NaiveDate};
 use ratatui::{
-    crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
+    crossterm::{
+        event::{
+            self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
+            PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+        },
+        execute, terminal,
+    },
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style, Stylize},
     text::{Line, Span},
     widgets::{
-        Block, BorderType, HighlightSpacing, List, ListItem, ListState, Padding, Paragraph, Wrap,
+        Block, BorderType, HighlightSpacing, List, ListItem, ListState, Padding, Paragraph,
     },
     DefaultTerminal, Frame,
 };
@@ -54,10 +61,18 @@ struct Pending {
     prompt: String,
 }
 
-/// An in-progress title edit. `cursor` is a byte offset into `buf`.
+/// The editable fields of the shelf.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FieldId {
+    Title,
+    Notes,
+}
+
+/// An in-progress edit. `cursor` is a byte offset into `buf`.
 struct Edit {
     list_id: String,
     task_id: String,
+    field: FieldId,
     buf: String,
     cursor: usize,
 }
@@ -105,8 +120,44 @@ impl Edit {
     }
 
     fn kill_to_start(&mut self) {
-        self.buf.replace_range(..self.cursor, "");
-        self.cursor = 0;
+        let start = self.line_start();
+        self.buf.replace_range(start..self.cursor, "");
+        self.cursor = start;
+    }
+
+    fn line_start(&self) -> usize {
+        self.buf[..self.cursor].rfind('\n').map_or(0, |i| i + 1)
+    }
+
+    fn line_end(&self) -> usize {
+        self.buf[self.cursor..].find('\n').map_or(self.buf.len(), |i| self.cursor + i)
+    }
+
+    /// Move a logical line up or down, keeping the column where possible.
+    fn step_line(&mut self, down: bool) {
+        let start = self.line_start();
+        let col = self.buf[start..self.cursor].chars().count();
+        let target = if down {
+            let end = self.line_end();
+            if end == self.buf.len() {
+                self.cursor = end;
+                return;
+            }
+            end + 1
+        } else {
+            if start == 0 {
+                self.cursor = 0;
+                return;
+            }
+            self.buf[..start - 1].rfind('\n').map_or(0, |i| i + 1)
+        };
+        let line = &self.buf[target..];
+        let len = line.find('\n').unwrap_or(line.len());
+        self.cursor = target
+            + line[..len]
+                .char_indices()
+                .nth(col)
+                .map_or(len, |(i, _)| i);
     }
 
     /// The slice that fits `width` columns with the cursor in view, and the
@@ -150,6 +201,8 @@ struct App {
     /// Index of the leftmost visible column.
     scroll: usize,
     shelf: bool,
+    /// Which shelf field the keyboard is on.
+    field: FieldId,
     edit: Option<Edit>,
     pending: Option<Pending>,
     fetching: bool,
@@ -170,6 +223,7 @@ impl App {
             focus: 0,
             scroll: 0,
             shelf: false,
+            field: FieldId::Title,
             edit: None,
             pending: None,
             fetching: false,
@@ -192,37 +246,56 @@ impl App {
         self.fetching || self.columns.iter().any(|c| !c.loaded)
     }
 
+    /// Edit the focused shelf field, opening the shelf on the title if it's shut.
     fn start_edit(&mut self) {
         let Some(col) = self.columns.get(self.focus) else { return };
         let Some(row) = col.selected() else { return };
-        self.edit = Some(Edit {
-            list_id: col.list.id.clone(),
-            task_id: row.task.id.clone(),
-            cursor: row.task.title.len(),
-            buf: row.task.title.clone(),
-        });
-        self.shelf = true;
+        let (list_id, task_id) = (col.list.id.clone(), row.task.id.clone());
+        let (title, notes) = (row.task.title.clone(), row.task.notes.clone().unwrap_or_default());
+        if !self.shelf {
+            self.shelf = true;
+            self.field = FieldId::Title;
+        }
+        let buf = match self.field {
+            FieldId::Title => title,
+            FieldId::Notes => notes,
+        };
+        self.edit = Some(Edit { list_id, task_id, field: self.field, cursor: buf.len(), buf });
+    }
+
+    fn row_mut(&mut self, list_id: &str, task_id: &str) -> Option<&mut Row> {
+        self.columns
+            .iter_mut()
+            .find(|c| c.list.id == list_id)
+            .and_then(|c| c.rows.iter_mut().find(|r| r.task.id == task_id))
     }
 
     fn commit_edit(&mut self) {
         let Some(e) = self.edit.take() else { return };
-        let title = e.buf.trim().to_string();
-        if title.is_empty() {
-            self.error = Some("A task needs a title".into());
-            self.edit = Some(e);
-            return;
-        }
-        // Show the new title straight away; Google confirms it a moment later.
-        if let Some(row) = self
-            .columns
-            .iter_mut()
-            .find(|c| c.list.id == e.list_id)
-            .and_then(|c| c.rows.iter_mut().find(|r| r.task.id == e.task_id))
-        {
-            row.task.title = title.clone();
-        }
+        // Show the change straight away; Google confirms it a moment later.
+        let fields = match e.field {
+            FieldId::Title => {
+                let title = e.buf.trim().to_string();
+                if title.is_empty() {
+                    self.error = Some("A task needs a title".into());
+                    self.edit = Some(e);
+                    return;
+                }
+                if let Some(row) = self.row_mut(&e.list_id, &e.task_id) {
+                    row.task.title = title.clone();
+                }
+                json!({ "title": title })
+            }
+            FieldId::Notes => {
+                let notes = e.buf.trim_end().to_string();
+                if let Some(row) = self.row_mut(&e.list_id, &e.task_id) {
+                    row.task.notes = Some(notes.clone()).filter(|n| !n.is_empty());
+                }
+                json!({ "notes": notes })
+            }
+        };
         self.error = None;
-        self.send_patch(e.list_id, e.task_id, json!({ "title": title }));
+        self.send_patch(e.list_id, e.task_id, fields);
     }
 
     /// Tick or untick the selected task.
@@ -413,7 +486,16 @@ impl App {
             KeyCode::Char('k') | KeyCode::Up => self.move_task(-1),
             KeyCode::Char('g') | KeyCode::Home => self.move_task(isize::MIN / 2),
             KeyCode::Char('G') | KeyCode::End => self.move_task(isize::MAX / 2),
-            KeyCode::Enter => self.shelf = !self.shelf && self.selected_task().is_some(),
+            KeyCode::Enter => {
+                self.shelf = !self.shelf && self.selected_task().is_some();
+                self.field = FieldId::Title;
+            }
+            KeyCode::Tab | KeyCode::BackTab if self.shelf => {
+                self.field = match self.field {
+                    FieldId::Title => FieldId::Notes,
+                    FieldId::Notes => FieldId::Title,
+                }
+            }
             KeyCode::Char('i') => self.start_edit(),
             KeyCode::Char(' ') => self.toggle_done(),
             KeyCode::Char('d') => self.ask_delete(),
@@ -423,33 +505,41 @@ impl App {
         }
     }
 
-    /// Keys while editing a title. Enter saves, Esc discards.
+    /// Keys while editing a field. Enter saves, Esc discards; in notes,
+    /// Shift+Enter (or Alt+Enter / Ctrl+J where the terminal can't report it)
+    /// starts a new line.
     fn edit_key(&mut self, k: KeyEvent) {
+        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
+        let newline = k.modifiers.intersects(KeyModifiers::SHIFT | KeyModifiers::ALT);
+        let notes = self.edit.as_ref().is_some_and(|e| e.field == FieldId::Notes);
         match k.code {
             KeyCode::Esc => {
                 self.edit = None;
                 return;
             }
-            KeyCode::Enter => {
+            KeyCode::Enter if !(notes && newline) => {
                 self.commit_edit();
                 return;
             }
             _ => {}
         }
-        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         let Some(e) = self.edit.as_mut() else { return };
         match k.code {
+            KeyCode::Enter => e.insert('\n'),
+            KeyCode::Char('j') if ctrl && notes => e.insert('\n'),
             KeyCode::Char('w') if ctrl => e.kill_word(),
             KeyCode::Char('u') if ctrl => e.kill_to_start(),
-            KeyCode::Char('a') if ctrl => e.cursor = 0,
-            KeyCode::Char('e') if ctrl => e.cursor = e.buf.len(),
+            KeyCode::Char('a') if ctrl => e.cursor = e.line_start(),
+            KeyCode::Char('e') if ctrl => e.cursor = e.line_end(),
             KeyCode::Char(c) if !ctrl => e.insert(c),
             KeyCode::Backspace => e.backspace(),
             KeyCode::Delete => e.delete(),
             KeyCode::Left => e.left(),
             KeyCode::Right => e.right(),
-            KeyCode::Home => e.cursor = 0,
-            KeyCode::End => e.cursor = e.buf.len(),
+            KeyCode::Up if notes => e.step_line(false),
+            KeyCode::Down if notes => e.step_line(true),
+            KeyCode::Home => e.cursor = e.line_start(),
+            KeyCode::End => e.cursor = e.line_end(),
             _ => {}
         }
     }
@@ -479,8 +569,12 @@ impl App {
 
         self.draw_board(f, body, &t);
 
-        let hints = if self.edit.is_some() {
+        let hints = if self.edit.as_ref().is_some_and(|e| e.field == FieldId::Notes) {
+            " ⏎ save · ⇧⏎ new line · Esc cancel · ^W delete word"
+        } else if self.edit.is_some() {
             " ⏎ save · Esc cancel · ^W delete word · ^U clear"
+        } else if self.shelf {
+            " Tab field · i edit · ␣ done · j/k task · d delete · r refresh · q quit"
         } else {
             " h/l list · j/k task · ␣ done · ⏎ details · i edit · d delete · r refresh · q quit"
         };
@@ -574,77 +668,172 @@ impl App {
         let today = Local::now().date_naive();
         let muted = Style::default().fg(t.muted);
 
-        // Inside the border and the block's one-column padding.
-        let inner_w = area.width.saturating_sub(4) as usize;
-        let editing = self
-            .edit
-            .as_ref()
-            .filter(|e| e.task_id == task.id && e.list_id == col.list.id);
-        let mut cursor = None;
-        let title_line = match editing {
-            Some(e) => {
-                let (text, offset) = e.view(inner_w);
-                cursor = Some((area.x + 2 + offset as u16, area.y + 1));
-                Line::styled(
-                    format!("{text:<inner_w$}"),
-                    Style::default().fg(t.sel_fg).bg(t.sel_bg).bold(),
-                )
-            }
-            None => Line::styled(title_of(task).to_string(), Style::default().fg(t.fg).bold()),
-        };
-        let mut lines = vec![title_line, Line::default()];
-        let (status, color) = if task.is_done() { ("Completed", t.green) } else { ("Open", t.blue) };
-        lines.push(field("Status", Span::styled(status, Style::default().fg(color)), t));
-        if let Some(d) = task.due_date() {
-            let label = format!("{} · {}", d.format("%a %b %-d, %Y"), relative(d, today));
-            let color = if task.is_done() { t.fg } else { due_color(d, today, t) };
-            lines.push(field("Due", Span::styled(label, Style::default().fg(color)), t));
-        }
-        if let Some(c) = &task.completed {
-            lines.push(field("Completed", fmt_time(c).into(), t));
-        }
-        if let Some(p) = task.parent.as_deref().and_then(|p| col.rows.iter().find(|r| r.task.id == p)) {
-            lines.push(field("Parent", title_of(&p.task).to_string().into(), t));
-        }
-        let subtasks: Vec<&Task> =
-            col.rows.iter().map(|r| &r.task).filter(|c| c.parent.as_deref() == Some(task.id.as_str())).collect();
-        if !subtasks.is_empty() {
-            let done = subtasks.iter().filter(|s| s.is_done()).count();
-            lines.push(field("Subtasks", format!("{done}/{} done", subtasks.len()).into(), t));
-        }
-        if task.hidden {
-            lines.push(field("Hidden", "yes".into(), t));
-        }
-
-        if let Some(notes) = task.notes.as_deref().filter(|n| !n.trim().is_empty()) {
-            lines.push(Line::default());
-            lines.push(Line::styled("Notes", muted.bold()));
-            lines.extend(notes.lines().map(|l| Line::raw(l.to_string())));
-        }
-        if !task.links.is_empty() {
-            lines.push(Line::default());
-            lines.push(Line::styled("Links", muted.bold()));
-            for l in &task.links {
-                if !l.description.is_empty() {
-                    lines.push(Line::raw(l.description.clone()));
-                }
-                lines.push(Line::styled(l.link.clone(), Style::default().fg(t.blue)));
-            }
-        }
-        lines.push(Line::default());
-        lines.push(field("Updated", fmt_time(&task.updated).into(), t));
-
         let block = Block::bordered()
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(t.accent))
             .title(Line::styled(" Details ", Style::default().fg(t.accent).bold()))
             .padding(Padding::horizontal(1))
             .style(Style::default().bg(self.bg(t.bg)));
-        f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).block(block), area);
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+        if inner.width < 8 || inner.height < 8 {
+            return;
+        }
+        // Two columns go to the focus marker.
+        let w = inner.width as usize - 2;
+        let editing = self
+            .edit
+            .as_ref()
+            .filter(|e| e.task_id == task.id && e.list_id == col.list.id);
+        let editing_field = editing.map(|e| e.field);
+        let input = Style::default().fg(t.sel_fg).bg(t.sel_bg);
+        let mut cursor = None;
+
+        let mut meta = Vec::new();
+        let (status, color) = if task.is_done() { ("Completed", t.green) } else { ("Open", t.blue) };
+        meta.push(field("Status", Span::styled(status, Style::default().fg(color)), t));
+        if let Some(d) = task.due_date() {
+            let label = format!("{} · {}", d.format("%a %b %-d, %Y"), relative(d, today));
+            let color = if task.is_done() { t.fg } else { due_color(d, today, t) };
+            meta.push(field("Due", Span::styled(label, Style::default().fg(color)), t));
+        }
+        if let Some(c) = &task.completed {
+            meta.push(field("Completed", fmt_time(c).into(), t));
+        }
+        if let Some(p) = task.parent.as_deref().and_then(|p| col.rows.iter().find(|r| r.task.id == p)) {
+            meta.push(field("Parent", title_of(&p.task).to_string().into(), t));
+        }
+        let subtasks: Vec<&Task> =
+            col.rows.iter().map(|r| &r.task).filter(|c| c.parent.as_deref() == Some(task.id.as_str())).collect();
+        if !subtasks.is_empty() {
+            let done = subtasks.iter().filter(|s| s.is_done()).count();
+            meta.push(field("Subtasks", format!("{done}/{} done", subtasks.len()).into(), t));
+        }
+        if task.hidden {
+            meta.push(field("Hidden", "yes".into(), t));
+        }
+        for l in &task.links {
+            let text = if l.description.is_empty() { &l.link } else { &l.description };
+            meta.push(field("Link", Span::styled(text.clone(), Style::default().fg(t.blue)), t));
+        }
+
+        // title · gap · meta · gap · "Notes" · notes · gap · updated
+        let title_h = match editing_field {
+            Some(FieldId::Title) => 1,
+            _ => wrap(title_of(task), w).len().min(3) as u16,
+        };
+        let meta_h = meta.len() as u16;
+        let notes_h = inner.height.saturating_sub(title_h + meta_h + 5).max(1);
+        let [title_a, _, meta_a, _, notes_label_a, notes_a, _, updated_a] = Layout::vertical([
+            Constraint::Length(title_h),
+            Constraint::Length(1),
+            Constraint::Length(meta_h),
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(notes_h),
+            Constraint::Min(0),
+            Constraint::Length(1),
+        ])
+        .areas(inner);
+
+        let title = title_of(task);
+        let title_lines = match editing.filter(|e| e.field == FieldId::Title) {
+            Some(e) => {
+                let (text, offset) = e.view(w);
+                cursor = Some((title_a.x + 2 + offset as u16, title_a.y));
+                vec![Line::styled(format!("{text:<w$}"), input.bold())]
+            }
+            None => wrap(title, w)
+                .into_iter()
+                .take(title_h as usize)
+                .map(|(s, e)| Line::styled(title[s..e].to_string(), Style::default().fg(t.fg).bold()))
+                .collect(),
+        };
+        let on_title = self.field == FieldId::Title;
+        f.render_widget(Paragraph::new(marked(title_lines, on_title, t)), title_a);
+        f.render_widget(Paragraph::new(marked(meta, false, t)), meta_a);
+        f.render_widget(Line::styled("  Notes", muted.bold()), notes_label_a);
+
+        let stored = task.notes.as_deref().unwrap_or("");
+        let notes_text = editing.filter(|e| e.field == FieldId::Notes).map_or(stored, |e| &e.buf);
+        let rows = notes_a.height as usize;
+        let notes_lines = if notes_text.is_empty() && editing_field != Some(FieldId::Notes) {
+            vec![Line::styled("(none)", muted)]
+        } else {
+            let segs = wrap(notes_text, w);
+            let mut scroll = 0;
+            if let Some(e) = editing.filter(|e| e.field == FieldId::Notes) {
+                let (row, col) = cursor_rc(&segs, notes_text, e.cursor);
+                scroll = (row + 1).saturating_sub(rows);
+                cursor = Some((notes_a.x + 2 + col as u16, notes_a.y + (row - scroll) as u16));
+            }
+            let style = match editing_field {
+                Some(FieldId::Notes) => input,
+                _ => Style::default().fg(t.fg),
+            };
+            segs.into_iter()
+                .skip(scroll)
+                .take(rows)
+                .map(|(s, e)| Line::styled(format!("{:<w$}", &notes_text[s..e]), style))
+                .collect()
+        };
+        let on_notes = self.field == FieldId::Notes;
+        f.render_widget(Paragraph::new(marked(notes_lines, on_notes, t)), notes_a);
+        f.render_widget(
+            Paragraph::new(marked(vec![field("Updated", fmt_time(&task.updated).into(), t)], false, t)),
+            updated_a,
+        );
         if let Some(pos) = cursor {
             f.set_cursor_position(pos);
         }
     }
+}
+
+/// Greedy word wrap. Returns the byte range of each display line, so the
+/// caller can map a cursor offset onto the same layout it renders.
+fn wrap(text: &str, width: usize) -> Vec<(usize, usize)> {
+    let width = width.max(1);
+    let mut out = Vec::new();
+    let mut base = 0;
+    for line in text.split('\n') {
+        let mut start = 0;
+        loop {
+            let rest = &line[start..];
+            if rest.chars().count() <= width {
+                out.push((base + start, base + line.len()));
+                break;
+            }
+            let hard = rest.char_indices().nth(width).map_or(rest.len(), |(i, _)| i);
+            // Break on the last space that fits, else mid-word.
+            let cut = rest[..hard].rfind(' ').map_or(hard, |i| i + 1);
+            out.push((base + start, base + start + cut));
+            start += cut;
+        }
+        base += line.len() + 1; // skip the '\n'
+    }
+    out
+}
+
+/// Where `cursor` lands in the wrapped layout, as (line, column).
+fn cursor_rc(segs: &[(usize, usize)], text: &str, cursor: usize) -> (usize, usize) {
+    let col = |start: usize| text[start..cursor].chars().count();
+    for (row, (s, e)) in segs.iter().enumerate() {
+        if cursor >= *s && (cursor < *e || row + 1 == segs.len()) {
+            return (row, col(*s));
+        }
+    }
+    segs.last().map_or((0, 0), |(s, _)| (segs.len() - 1, col(*s)))
+}
+
+/// Prefix each line with the focus marker so focused fields stand out.
+fn marked<'a>(lines: Vec<Line<'a>>, focused: bool, t: &Theme) -> Vec<Line<'a>> {
+    lines
+        .into_iter()
+        .map(|l| {
+            let mark = Span::styled(if focused { "▌ " } else { "  " }, Style::default().fg(t.accent));
+            Line::from([vec![mark], l.spans].concat())
+        })
+        .collect()
 }
 
 fn title_of(task: &Task) -> &str {
@@ -791,6 +980,19 @@ fn run(mut term: DefaultTerminal, mut app: App, msgs: Receiver<Msg>) -> std::io:
     Ok(())
 }
 
+/// Ask the terminal to report Shift+Enter and friends (kitty keyboard
+/// protocol). Returns whether the flags were pushed, so they can be popped.
+fn enable_key_detail() -> bool {
+    if !terminal::supports_keyboard_enhancement().unwrap_or(false) {
+        return false;
+    }
+    execute!(
+        io::stdout(),
+        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+    )
+    .is_ok()
+}
+
 fn main() -> auth::Result<()> {
     // Auth first: it may need the terminal for the browser sign-in prompt.
     let client = Client::new(auth::Auth::new()?);
@@ -799,7 +1001,11 @@ fn main() -> auth::Result<()> {
     thread::spawn(move || worker(client, cmd_rx, msg_tx));
 
     let term = ratatui::init();
+    let detailed_keys = enable_key_detail();
     let res = run(term, App::new(cmd_tx), msg_rx);
+    if detailed_keys {
+        let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
+    }
     ratatui::restore();
     Ok(res?)
 }
@@ -822,6 +1028,7 @@ mod tests {
         Edit {
             list_id: "l".into(),
             task_id: "t".into(),
+            field: FieldId::Title,
             cursor: buf.len(),
             buf: buf.into(),
         }
