@@ -1,7 +1,7 @@
 # google-tasks-tui
 
 A fast Rust TUI (ratatui 0.29 + crossterm) for Google Tasks: one column per
-task list, tasks listed vertically, Enter opens a details shelf, `i` edits the title inline. Fully
+task list, tasks listed vertically, Enter opens a details shelf, `i` edits the title inline, Space ticks a task. Fully
 integrates with the Omarchy theming system and live-reloads when the user
 switches themes. Goal: full CRUD on tasks and task lists.
 
@@ -18,14 +18,15 @@ Work directly on `main`; no feature branches.
   from a sibling google-auth `token.json` if it has the tasks scope, else runs
   the loopback browser flow. Runs before the TUI starts.
 - `src/api.rs` — blocking Tasks v1 client on `ureq` 3; `get_all` follows
-  `nextPageToken`; `set_title` PATCHes one task.
+  `nextPageToken`; `patch` PATCHes arbitrary fields of one task.
 - `src/main.rs` — board UI. A worker thread owns the `Client` and talks to the
   UI over `Cmd`/`Msg` channels; the event loop polls input every 100 ms,
   drains messages, and calls `check_theme()` every 500 ms. `order()` sorts
   open tasks by position, then completed tasks newest first, with subtasks
   under their parent. `Edit` holds the title buffer + byte cursor; commits are
-  optimistic (local title first, then `Cmd::SetTitle`), and a failed save sets
-  an error and refreshes.
+  optimistic (local change first, then `Cmd::Patch`), and a failed save sets an
+  error and refreshes. `Msg::Updated` re-runs `order()` so a ticked task moves
+  to the completed group with the selection following it.
 
 ## Omarchy theming facts (verified Sept 2026)
 - Active theme dir, current releases: `$XDG_STATE_HOME/omarchy/current`

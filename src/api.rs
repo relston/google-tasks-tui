@@ -2,6 +2,7 @@
 
 use chrono::NaiveDate;
 use serde::{de::DeserializeOwned, Deserialize};
+use serde_json::Value;
 
 use crate::auth::{pct, Auth, Result};
 
@@ -79,15 +80,15 @@ impl Client {
         )
     }
 
-    /// Rename a task; returns the task as Google stored it.
-    pub fn set_title(&mut self, list_id: &str, task_id: &str, title: &str) -> Result<Task> {
+    /// Patch the given fields of a task; returns it as Google stored it.
+    pub fn patch(&mut self, list_id: &str, task_id: &str, fields: &Value) -> Result<Task> {
         let token = self.auth.token()?;
         let task = self
             .auth
             .agent
             .patch(format!("{BASE}/lists/{}/tasks/{}", pct(list_id), pct(task_id)))
             .header("Authorization", format!("Bearer {token}"))
-            .send_json(serde_json::json!({ "title": title }))?
+            .send_json(fields)?
             .body_mut()
             .read_json()?;
         Ok(task)

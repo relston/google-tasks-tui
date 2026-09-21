@@ -10,8 +10,8 @@ It uses your active [Omarchy](https://omarchy.org) theme and
 Omarchy it falls back to plain ANSI colors, so it picks up your terminal's
 own palette.
 
-Press `i` to rename a task. Creating, deleting and editing the other fields
-is next.
+Press `Space` to tick a task off and `i` to rename it. Creating, deleting and
+editing the other fields is next.
 
 ## Features
 
@@ -21,8 +21,10 @@ is next.
   through at the bottom of their list.
 - Due dates are relative ("Today", "Friday", "3d overdue"). Overdue dates are
   red and today's are yellow.
-- The details shelf shows status, due date, completed/updated times, the
-  parent task, subtask progress, notes, links and the web link.
+- The details shelf shows status, due date, completion time, the parent task,
+  subtask progress, notes, links, and the last-updated time at the bottom.
+- `Space` ticks or unticks the selected task. It moves to or from the
+  completed group straight away, and the selection follows it.
 - API calls run on a background thread, so the UI never blocks. Lists fill in
   as they load.
 - `i` turns the title in the shelf into a text input (opening the shelf if
@@ -84,6 +86,7 @@ google-tasks-tui
 | `j` / `↓`      | Next task                       |
 | `k` / `↑`      | Previous task                   |
 | `g` / `G`      | First / last task               |
+| `Space`        | Tick / untick the task          |
 | `Enter`        | Open / close the details shelf  |
 | `i`            | Edit the task title             |
 | `r`            | Refresh from Google             |
@@ -141,7 +144,7 @@ real theme.
 
 ## Roadmap
 
-- Create, complete and delete tasks; edit notes and due dates; manage lists.
+- Create and delete tasks; edit notes and due dates; manage lists.
 - A `theme-set.d` hook (for example through an `--install-hook` flag) that
   signals running instances for instant reload, with polling kept as a
   fallback.

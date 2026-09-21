@@ -21,6 +21,8 @@ use ratatui::{
     DefaultTerminal, Frame,
 };
 
+use serde_json::{json, Value};
+
 use api::{Client, Task, TaskList};
 use theme::Theme;
 
@@ -33,7 +35,7 @@ const SHELF_W: u16 = 52;
 /// Requests to the network thread.
 enum Cmd {
     Refresh,
-    SetTitle { list_id: String, task_id: String, title: String },
+    Patch { list_id: String, task_id: String, fields: Value },
 }
 
 /// Results from the network thread.
@@ -209,8 +211,31 @@ impl App {
             row.task.title = title.clone();
         }
         self.error = None;
+        self.send_patch(e.list_id, e.task_id, json!({ "title": title }));
+    }
+
+    /// Tick or untick the selected task.
+    fn toggle_done(&mut self) {
+        let Some(col) = self.columns.get_mut(self.focus) else { return };
+        let list_id = col.list.id.clone();
+        let Some(i) = col.state.selected() else { return };
+        let Some(row) = col.rows.get_mut(i) else { return };
+        let task_id = row.task.id.clone();
+        // Show the new state now; Google's copy replaces it when it answers.
+        let fields = if row.task.is_done() {
+            row.task.status = "needsAction".into();
+            row.task.completed = None;
+            json!({ "status": "needsAction", "completed": null })
+        } else {
+            row.task.status = "completed".into();
+            json!({ "status": "completed" })
+        };
+        self.send_patch(list_id, task_id, fields);
+    }
+
+    fn send_patch(&mut self, list_id: String, task_id: String, fields: Value) {
         self.saving += 1;
-        let _ = self.cmds.send(Cmd::SetTitle { list_id: e.list_id, task_id: e.task_id, title });
+        let _ = self.cmds.send(Cmd::Patch { list_id, task_id, fields });
     }
 
     /// Reload the palette only when the fingerprint changes (cheap stat calls).
@@ -269,13 +294,20 @@ impl App {
                 self.saving = self.saving.saturating_sub(1);
                 match res {
                     Ok(task) => {
-                        if let Some(row) = self
-                            .columns
-                            .iter_mut()
-                            .find(|c| c.list.id == list_id)
-                            .and_then(|c| c.rows.iter_mut().find(|r| r.task.id == task.id))
-                        {
-                            row.task = task;
+                        let Some(col) = self.columns.iter_mut().find(|c| c.list.id == list_id)
+                        else {
+                            return;
+                        };
+                        // Re-sort: ticking a task moves it down to the completed group.
+                        let id = task.id.clone();
+                        let tasks = col
+                            .rows
+                            .iter()
+                            .map(|r| if r.task.id == id { task.clone() } else { r.task.clone() })
+                            .collect();
+                        col.rows = order(tasks);
+                        if let Some(i) = col.rows.iter().position(|r| r.task.id == id) {
+                            col.state.select(Some(i));
                         }
                     }
                     Err(e) => {
@@ -319,6 +351,7 @@ impl App {
             KeyCode::Char('G') | KeyCode::End => self.move_task(isize::MAX / 2),
             KeyCode::Enter => self.shelf = !self.shelf && self.selected_task().is_some(),
             KeyCode::Char('i') => self.start_edit(),
+            KeyCode::Char(' ') => self.toggle_done(),
             KeyCode::Char('r') => self.refresh(),
             KeyCode::Char('t') => self.transparent = !self.transparent,
             _ => {}
@@ -384,7 +417,7 @@ impl App {
         let hints = if self.edit.is_some() {
             " ⏎ save · Esc cancel · ^W delete word · ^U clear"
         } else {
-            " h/l list · j/k task · ⏎ details · i edit title · r refresh · t transparent · q quit"
+            " h/l list · j/k task · ␣ done · ⏎ details · i edit · r refresh · t transparent · q quit"
         };
         let status_line = match &self.error {
             Some(e) => Line::styled(format!(" {e}"), Style::default().fg(t.red)),
@@ -504,8 +537,6 @@ impl App {
         if let Some(c) = &task.completed {
             lines.push(field("Completed", fmt_time(c).into(), t));
         }
-        lines.push(field("Updated", fmt_time(&task.updated).into(), t));
-        lines.push(field("List", col.list.title.clone().into(), t));
         if let Some(p) = task.parent.as_deref().and_then(|p| col.rows.iter().find(|r| r.task.id == p)) {
             lines.push(field("Parent", title_of(&p.task).to_string().into(), t));
         }
@@ -535,10 +566,7 @@ impl App {
             }
         }
         lines.push(Line::default());
-        if let Some(url) = &task.web_view_link {
-            lines.push(Line::styled(url.clone(), muted));
-        }
-        lines.push(Line::styled(format!("id {}", task.id), muted));
+        lines.push(field("Updated", fmt_time(&task.updated).into(), t));
 
         let block = Block::bordered()
             .border_type(BorderType::Rounded)
@@ -645,8 +673,8 @@ fn order(tasks: Vec<Task>) -> Vec<Row> {
 fn worker(mut client: Client, cmds: Receiver<Cmd>, out: Sender<Msg>) {
     for cmd in cmds {
         match cmd {
-            Cmd::SetTitle { list_id, task_id, title } => {
-                let res = client.set_title(&list_id, &task_id, &title).map_err(|e| e.to_string());
+            Cmd::Patch { list_id, task_id, fields } => {
+                let res = client.patch(&list_id, &task_id, &fields).map_err(|e| e.to_string());
                 if out.send(Msg::Updated(list_id, res)).is_err() {
                     return;
                 }
