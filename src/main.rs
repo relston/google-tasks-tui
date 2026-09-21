@@ -44,6 +44,7 @@ enum Cmd {
     Refresh,
     Patch { list_id: String, task_id: String, fields: Value },
     Delete { list_id: String, task_id: String },
+    Create { list_id: String, title: String },
 }
 
 /// Results from the network thread.
@@ -52,6 +53,7 @@ enum Msg {
     Tasks(String, Result<Vec<Task>, String>),
     Updated(String, Result<Task, String>),
     Deleted(Result<(), String>),
+    Created(String, Result<Task, String>),
 }
 
 /// A delete waiting on a y/n answer in the status bar.
@@ -203,6 +205,8 @@ struct App {
     shelf: bool,
     /// Which shelf field the keyboard is on.
     field: FieldId,
+    /// The shelf is holding a not-yet-created task.
+    creating: bool,
     edit: Option<Edit>,
     pending: Option<Pending>,
     fetching: bool,
@@ -224,6 +228,7 @@ impl App {
             scroll: 0,
             shelf: false,
             field: FieldId::Title,
+            creating: false,
             edit: None,
             pending: None,
             fetching: false,
@@ -244,6 +249,21 @@ impl App {
 
     fn loading(&self) -> bool {
         self.fetching || self.columns.iter().any(|c| !c.loaded)
+    }
+
+    /// Start a new task in the focused list: an empty title input in the shelf.
+    fn start_create(&mut self) {
+        let Some(col) = self.columns.get(self.focus) else { return };
+        self.edit = Some(Edit {
+            list_id: col.list.id.clone(),
+            task_id: String::new(), // no id yet: commit POSTs instead of PATCHing
+            field: FieldId::Title,
+            buf: String::new(),
+            cursor: 0,
+        });
+        self.creating = true;
+        self.shelf = true;
+        self.field = FieldId::Title;
     }
 
     /// Edit the focused shelf field, opening the shelf on the title if it's shut.
@@ -272,6 +292,19 @@ impl App {
 
     fn commit_edit(&mut self) {
         let Some(e) = self.edit.take() else { return };
+        if self.creating {
+            let title = e.buf.trim().to_string();
+            if title.is_empty() {
+                self.error = Some("A task needs a title".into());
+                self.edit = Some(e);
+                return;
+            }
+            self.creating = false;
+            self.error = None;
+            self.saving += 1;
+            let _ = self.cmds.send(Cmd::Create { list_id: e.list_id, title });
+            return;
+        }
         // Show the change straight away; Google confirms it a moment later.
         let fields = match e.field {
             FieldId::Title => {
@@ -410,6 +443,25 @@ impl App {
                     Err(e) => self.error = Some(format!("{}: {e}", col.list.title)),
                 }
             }
+            Msg::Created(list_id, res) => {
+                self.saving = self.saving.saturating_sub(1);
+                match res {
+                    Ok(task) => {
+                        let Some(col) = self.columns.iter_mut().find(|c| c.list.id == list_id)
+                        else {
+                            return;
+                        };
+                        let id = task.id.clone();
+                        let mut tasks: Vec<Task> = col.rows.iter().map(|r| r.task.clone()).collect();
+                        tasks.push(task);
+                        col.rows = order(tasks);
+                        if let Some(i) = col.rows.iter().position(|r| r.task.id == id) {
+                            col.state.select(Some(i));
+                        }
+                    }
+                    Err(e) => self.error = Some(format!("create failed: {e}")),
+                }
+            }
             Msg::Deleted(res) => {
                 self.saving = self.saving.saturating_sub(1);
                 if let Err(e) = res {
@@ -499,6 +551,7 @@ impl App {
             KeyCode::Char('i') => self.start_edit(),
             KeyCode::Char(' ') => self.toggle_done(),
             KeyCode::Char('d') => self.ask_delete(),
+            KeyCode::Char('c') => self.start_create(),
             KeyCode::Char('r') => self.refresh(),
             KeyCode::Char('t') => self.transparent = !self.transparent,
             _ => {}
@@ -515,6 +568,7 @@ impl App {
         match k.code {
             KeyCode::Esc => {
                 self.edit = None;
+                self.creating = false;
                 return;
             }
             KeyCode::Enter if !(notes && newline) => {
@@ -569,14 +623,16 @@ impl App {
 
         self.draw_board(f, body, &t);
 
-        let hints = if self.edit.as_ref().is_some_and(|e| e.field == FieldId::Notes) {
+        let hints = if self.creating {
+            " ⏎ create · Esc cancel"
+        } else if self.edit.as_ref().is_some_and(|e| e.field == FieldId::Notes) {
             " ⏎ save · ⇧⏎ new line · Esc cancel · ^W delete word"
         } else if self.edit.is_some() {
             " ⏎ save · Esc cancel · ^W delete word · ^U clear"
         } else if self.shelf {
-            " Tab field · i edit · ␣ done · j/k task · d delete · r refresh · q quit"
+            " Tab field · i edit · c new · ␣ done · j/k task · d delete · q quit"
         } else {
-            " h/l list · j/k task · ␣ done · ⏎ details · i edit · d delete · r refresh · q quit"
+            " h/l list · j/k task · ␣ done · ⏎ details · c new · i edit · d delete · q quit"
         };
         let status_line = match (&self.pending, &self.error) {
             (Some(p), _) => Line::styled(format!(" {}", p.prompt), Style::default().fg(t.yellow).bold()),
@@ -593,7 +649,7 @@ impl App {
             return;
         }
         self.focus = self.focus.min(self.columns.len() - 1);
-        if self.selected_task().is_none() {
+        if self.selected_task().is_none() && !self.creating {
             self.shelf = false;
             self.edit = None;
         }
@@ -661,7 +717,41 @@ impl App {
         f.render_stateful_widget(list, area, &mut col.state);
     }
 
+    /// The shelf while a new task is being typed: just a title input.
+    fn draw_new_shelf(&self, f: &mut Frame, area: Rect, t: &Theme) {
+        let col = &self.columns[self.focus];
+        let block = Block::bordered()
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(t.green))
+            .title(Line::styled(" New task ", Style::default().fg(t.green).bold()))
+            .padding(Padding::horizontal(1))
+            .style(Style::default().bg(self.bg(t.bg)));
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+        if inner.width < 8 || inner.height < 3 {
+            return;
+        }
+        let w = inner.width as usize - 2;
+        let Some(e) = self.edit.as_ref() else { return };
+        let (text, offset) = e.view(w);
+        let input = Line::styled(
+            format!("{text:<w$}"),
+            Style::default().fg(t.sel_fg).bg(t.sel_bg).bold(),
+        );
+        let lines = vec![
+            marked(vec![input], true, t).remove(0),
+            Line::default(),
+            Line::styled(format!("  in {}", col.list.title), Style::default().fg(t.muted)),
+        ];
+        f.render_widget(Paragraph::new(lines), inner);
+        f.set_cursor_position((inner.x + 2 + offset as u16, inner.y));
+    }
+
     fn draw_shelf(&self, f: &mut Frame, area: Rect, t: &Theme) {
+        if self.creating {
+            self.draw_new_shelf(f, area, t);
+            return;
+        }
         let col = &self.columns[self.focus];
         let Some(row) = col.selected() else { return };
         let task = &row.task;
@@ -928,6 +1018,12 @@ fn order(tasks: Vec<Task>) -> Vec<Row> {
 fn worker(mut client: Client, cmds: Receiver<Cmd>, out: Sender<Msg>) {
     for cmd in cmds {
         match cmd {
+            Cmd::Create { list_id, title } => {
+                let res = client.create(&list_id, &title).map_err(|e| e.to_string());
+                if out.send(Msg::Created(list_id, res)).is_err() {
+                    return;
+                }
+            }
             Cmd::Delete { list_id, task_id } => {
                 let res = client.delete(&list_id, &task_id).map_err(|e| e.to_string());
                 if out.send(Msg::Deleted(res)).is_err() {

@@ -10,8 +10,8 @@ It uses your active [Omarchy](https://omarchy.org) theme and
 Omarchy it falls back to plain ANSI colors, so it picks up your terminal's
 own palette.
 
-Press `Space` to tick a task off, `d` to delete it, and `Tab`/`i` in the shelf
-to edit its title or notes. Creating tasks and editing due dates are next.
+Press `c` to create a task, `Space` to tick one off, `d` to delete it, and
+`Tab`/`i` in the shelf to edit its title or notes. Due dates are next.
 
 ## Features
 
@@ -30,6 +30,9 @@ to edit its title or notes. Creating tasks and editing due dates are next.
   Google deletes those too.
 - API calls run on a background thread, so the UI never blocks. Lists fill in
   as they load.
+- `c` opens a "New task" shelf next to the focused list with an empty title
+  input ready to type. `Enter` creates it in that list and selects it; `Esc`
+  throws the draft away.
 - In the shelf, `Tab` moves between the title and the notes; the focused one
   carries a marker in the accent color. `i` turns it into a text input
   (opening the shelf first if needed) and `Enter` saves to Google, `Esc`
@@ -92,6 +95,7 @@ google-tasks-tui
 | `j` / `↓`      | Next task                       |
 | `k` / `↑`      | Previous task                   |
 | `g` / `G`      | First / last task               |
+| `c`            | Create a task in this list      |
 | `Tab`          | Move between shelf fields       |
 | `Space`        | Tick / untick the task          |
 | `Enter`        | Open / close the details shelf  |
@@ -157,7 +161,7 @@ real theme.
 
 ## Roadmap
 
-- Create tasks; edit due dates; manage lists.
+- Edit due dates; manage task lists; move tasks between lists.
 - A `theme-set.d` hook (for example through an `--install-hook` flag) that
   signals running instances for instant reload, with polling kept as a
   fallback.

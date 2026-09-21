@@ -2,7 +2,7 @@
 
 A fast Rust TUI (ratatui 0.29 + crossterm) for Google Tasks: one column per
 task list, tasks listed vertically, Enter opens a details shelf, Tab moves between shelf fields (title/notes), `i` edits one inline, Space
-ticks a task, `d` deletes it. Fully
+ticks a task, `c` creates one, `d` deletes it. Fully
 integrates with the Omarchy theming system and live-reloads when the user
 switches themes. Goal: full CRUD on tasks and task lists.
 
@@ -19,7 +19,8 @@ Work directly on `main`; no feature branches.
   from a sibling google-auth `token.json` if it has the tasks scope, else runs
   the loopback browser flow. Runs before the TUI starts.
 - `src/api.rs` — blocking Tasks v1 client on `ureq` 3; `get_all` follows
-  `nextPageToken`; `patch` PATCHes arbitrary fields of one task; `delete` removes one.
+  `nextPageToken`; `patch` PATCHes arbitrary fields of one task; `create` POSTs one; `delete`
+  removes one.
 - `src/main.rs` — board UI. A worker thread owns the `Client` and talks to the
   UI over `Cmd`/`Msg` channels; the event loop polls input every 100 ms,
   drains messages, and calls `check_theme()` every 500 ms. `order()` sorts
@@ -31,7 +32,9 @@ Work directly on `main`; no feature branches.
   through `App::pending` (a y/n prompt in the status bar), never straight to
   the API. The shelf lays out explicit sub-rects (title/meta/notes/updated) so
   `wrap()` + `cursor_rc()` can place the real terminal cursor; `App::field`
-  holds shelf focus. Startup pushes kitty keyboard flags when the terminal
+  holds shelf focus. `App::creating` swaps the shelf for a title-only draft
+  whose `Edit` has an empty `task_id`, so `commit_edit` POSTs instead of
+  PATCHing. Startup pushes kitty keyboard flags when the terminal
   supports them, so Shift+Enter reaches the notes editor (Alt+Enter and Ctrl-J
   are the fallbacks).
 

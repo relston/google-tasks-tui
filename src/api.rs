@@ -94,6 +94,20 @@ impl Client {
         Ok(task)
     }
 
+    /// Add a task to the top of a list.
+    pub fn create(&mut self, list_id: &str, title: &str) -> Result<Task> {
+        let token = self.auth.token()?;
+        let task = self
+            .auth
+            .agent
+            .post(format!("{BASE}/lists/{}/tasks", pct(list_id)))
+            .header("Authorization", format!("Bearer {token}"))
+            .send_json(serde_json::json!({ "title": title }))?
+            .body_mut()
+            .read_json()?;
+        Ok(task)
+    }
+
     /// Delete a task. Google deletes its subtasks along with it.
     pub fn delete(&mut self, list_id: &str, task_id: &str) -> Result<()> {
         let token = self.auth.token()?;
