@@ -1,10 +1,12 @@
 # google-tasks-tui
 
 A fast Rust TUI (ratatui 0.29 + crossterm) for Google Tasks: one column per
-task list, tasks listed vertically, Enter opens a details shelf, Tab moves between shelf fields (title/notes), `i` edits one inline, Space
-ticks a task, `c` creates one, `d` deletes it, `b` opens URLs from its notes, `m` moves it to another list, `?` lists the keys. Fully
-integrates with the Omarchy theming system and live-reloads when the user
-switches themes. Goal: full CRUD on tasks and task lists.
+task list, tasks listed vertically, Enter opens a details shelf, Tab moves
+between shelf fields (title/notes), `i` edits one inline, Space ticks a task,
+`c` creates one, `C` a subtask, `d` deletes it, `b` opens URLs from its notes,
+`m` moves it to another list, `?` lists the keys. Fully integrates with the
+Omarchy theming system and live-reloads when the user switches themes. Goal:
+full CRUD on tasks and task lists.
 
 Work directly on `main`; no feature branches.
 
@@ -37,8 +39,8 @@ Work directly on `main`; no feature branches.
   rewrites the snapshot after each successful mutation.
 - `src/api.rs` — blocking Tasks v1 client on `ureq` 3; `get_all` follows
   `nextPageToken`; `patch` PATCHes arbitrary fields of one task; `create` POSTs
-  a title (TUI); `insert` accepts a JSON body and optional `parent` query
-  (CLI); `delete` removes one; `relocate` POSTs `tasks.move` with
+  a title with an optional parent (TUI); `insert` accepts a JSON body and a
+  `parent` query (CLI); `delete` removes one; `relocate` POSTs `tasks.move` with
   `destinationTasklist` (TUI); `create_list` / `patch_list` / `delete_list`
   mutate task lists. `TasksApi` is the trait the CLI and tests call.
 - `src/tui.rs` — board UI. A worker thread owns the `Client` and talks to the
@@ -46,23 +48,27 @@ Work directly on `main`; no feature branches.
   drains messages, and calls `check_theme()` every 500 ms. `order()` sorts
   open tasks by position, then completed tasks newest first, with subtasks
   under their parent. `Edit` holds the title buffer + byte cursor; commits are
-  optimistic (local change first, then `Cmd::Patch`), and a failed save sets an
-  error and refreshes. `Msg::Updated` re-runs `order()` so a ticked task moves
-  to the completed group with the selection following it. Destructive keys go
-  through `App::pending` (a y/n prompt in the status bar), never straight to
-  the API. The shelf lays out explicit sub-rects (title/meta/notes/updated) so
-  `wrap()` + `cursor_rc()` can place the real terminal cursor; `App::field`
-  holds shelf focus. `App::creating` swaps the shelf for a title-only draft
-  whose `Edit` has an empty `task_id`, so `commit_edit` POSTs instead of
-  PATCHing. `b` extracts `http(s)` URLs from the selected task's notes
-  (`urls_in`) and opens a centered **Browse Link** overlay; `j`/`k` move,
-  Enter `spawn`s `open` / `xdg-open` for the selected URL and dismisses the
-  overlay, Shift+Enter opens every URL in the list then dismisses, Esc/`q`
-  close it. `m` opens a **Move** overlay of every list except the current
-  one; Enter POSTs `tasks.move` (`Cmd::Move` / `Client::relocate`) for the
-  selected task and its subtasks, then follows the selection to the dest
-  column. `?` opens a **Keyboard** overlay of `help_keys()`; `j`/`k` move,
-  Esc/`q`/`?` close it. Startup pushes kitty
+optimistic (local change first, then `Cmd::Patch`), and a failed save sets
+  an error and refreshes. `Msg::Updated` re-runs `order()` so a ticked task
+  moves to the completed group with the selection following it. Destructive
+  keys go through `App::pending` (a y/n prompt in the status bar), never
+  straight to the API. The shelf lays out explicit sub-rects
+  (title/meta/notes/updated) so `wrap()` + `cursor_rc()` can place the real
+  terminal cursor; `App::field` holds shelf focus. `App::creating` holds a
+  `Draft` that swaps the shelf for a title-only input whose `Edit` has an
+  empty `task_id`, so `commit_edit` POSTs instead of PATCHing. `C` fills the
+  draft's `parent` from `subtask_parent`: the selected row, or the row's own
+  parent when it is already a subtask, since Google Tasks nests exactly one
+  level deep. A row that draws at depth 0 because its parent is missing from
+  the list parents the new subtask itself. `b` extracts `http(s)` URLs from
+  the selected task's notes (`urls_in`) and opens a centered **Browse Link**
+  overlay; `j`/`k` move, Enter `spawn`s `open` / `xdg-open` for the selected
+  URL and dismisses the overlay, Shift+Enter opens every URL in the list then
+  dismisses, Esc/`q` close it. `m` opens a **Move** overlay of every list
+  except the current one; Enter POSTs `tasks.move` (`Cmd::Move` /
+  `Client::relocate`) for the selected task and its subtasks, then follows the
+  selection to the dest column. `?` opens a **Keyboard** overlay of
+  `help_keys()`; `j`/`k` move, Esc/`q`/`?` close it. Startup pushes kitty
   keyboard flags when the terminal supports them, so Shift+Enter reaches the
   notes editor (Alt+Enter and Ctrl-J are the fallbacks).
 

@@ -10,11 +10,12 @@ It uses your active [Omarchy](https://omarchy.org) theme and
 Omarchy it falls back to plain ANSI colors, so it picks up your terminal's
 own palette.
 
-Press `c` to create a task, `Space` to tick one off, `d` to delete it,
-`b` to open URLs from its notes, `m` to move it to another list, `?` for
-the keyboard list, and `Tab`/`i` in the shelf to edit its title or notes.
-Due dates are next. The same CRUD is available as subcommands for scripts
-and agents (`google-tasks-tui lists`, `create`, `done`, …).
+Press `c` to create a task, `C` to create a subtask under the selected one,
+`Space` to tick one off, `d` to delete it, `b` to open URLs from its notes,
+`m` to move it to another list, `?` for the keyboard list, and `Tab`/`i` in
+the shelf to edit its title or notes. Due dates are next. The same CRUD is
+available as subcommands for scripts and agents (`google-tasks-tui lists`,
+`create`, `done`, …).
 
 ## Features
 
@@ -51,6 +52,11 @@ and agents (`google-tasks-tui lists`, `create`, `done`, …).
 - `c` opens a "New task" shelf next to the focused list with an empty title
   input ready to type. `Enter` creates it in that list and selects it; `Esc`
   throws the draft away.
+- `C` does the same but as a subtask: the shelf says "New subtask" and names
+  the task it will hang under. On a top-level task that is the selection
+  itself; on a subtask it is that subtask's parent, because Google Tasks only
+  nests one level deep. On an empty list the status bar says there is nothing
+  to put it under.
 - In the shelf, `Tab` moves between the title and the notes; the focused one
   carries a marker in the accent color. `i` turns it into a text input
   (opening the shelf first if needed) and `Enter` saves to Google, `Esc`
@@ -160,6 +166,9 @@ requires `--yes` because Google removes every task in that list.
 | `k` / `↑`      | Previous task                   |
 | `g` / `G`      | First / last task               |
 | `c`            | Create a task in this list      |
+| `C`            | Create a subtask under this one |
+| `b`            | Open a link from the notes      |
+| `m`            | Move the task to another list   |
 | `Tab`          | Move between shelf fields       |
 | `Space`        | Tick / untick the task          |
 | `Enter`        | Open / close the details shelf  |
@@ -167,6 +176,7 @@ requires `--yes` because Google removes every task in that list.
 | `d`            | Delete the task (asks y/n)      |
 | `r`            | Refresh from Google             |
 | `t`            | Toggle transparent background   |
+| `?`            | List the keyboard commands      |
 | `Esc`          | Close the shelf, or quit        |
 | `q`            | Quit                            |
 

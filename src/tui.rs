@@ -44,7 +44,7 @@ enum Cmd {
     Refresh,
     Patch { list_id: String, task_id: String, fields: Value },
     Delete { list_id: String, task_id: String },
-    Create { list_id: String, title: String },
+    Create { list_id: String, title: String, parent: Option<String> },
     Move { from: String, to: String, ids: Vec<String> },
 }
 
@@ -69,6 +69,12 @@ struct Pending {
 struct Browse {
     urls: Vec<String>,
     state: ListState,
+}
+
+/// A task being typed into the shelf but not created yet.
+struct Draft {
+    /// Set when it will be a subtask of that task.
+    parent: Option<String>,
 }
 
 /// Overlay listing destination lists for a move.
@@ -225,7 +231,7 @@ struct App {
     /// Which shelf field the keyboard is on.
     field: FieldId,
     /// The shelf is holding a not-yet-created task.
-    creating: bool,
+    creating: Option<Draft>,
     edit: Option<Edit>,
     pending: Option<Pending>,
     browse: Option<Browse>,
@@ -264,7 +270,7 @@ impl App {
             scroll: 0,
             shelf: false,
             field: FieldId::Title,
-            creating: false,
+            creating: None,
             edit: None,
             pending: None,
             browse: None,
@@ -325,19 +331,30 @@ impl App {
     }
 
     /// Start a new task in the focused list: an empty title input in the shelf.
-    fn start_create(&mut self) {
+    /// `under` makes it a subtask of the selection (see `subtask_parent`).
+    fn start_create(&mut self, under: bool) {
         if !self.writable() {
             return;
         }
         let Some(col) = self.columns.get(self.focus) else { return };
+        let list_id = col.list.id.clone();
+        let selected = col.selected().map(subtask_parent);
+        let parent = match (under, selected) {
+            (false, _) => None,
+            (true, Some(p)) => p,
+            (true, None) => {
+                self.error = Some("select a task to put the subtask under".into());
+                return;
+            }
+        };
         self.edit = Some(Edit {
-            list_id: col.list.id.clone(),
+            list_id,
             task_id: String::new(), // no id yet: commit POSTs instead of PATCHing
             field: FieldId::Title,
             buf: String::new(),
             cursor: 0,
         });
-        self.creating = true;
+        self.creating = Some(Draft { parent });
         self.shelf = true;
         self.field = FieldId::Title;
     }
@@ -371,17 +388,21 @@ impl App {
 
     fn commit_edit(&mut self) {
         let Some(e) = self.edit.take() else { return };
-        if self.creating {
+        if let Some(draft) = self.creating.take() {
             let title = e.buf.trim().to_string();
             if title.is_empty() {
                 self.error = Some("A task needs a title".into());
                 self.edit = Some(e);
+                self.creating = Some(draft);
                 return;
             }
-            self.creating = false;
             self.error = None;
             self.saving += 1;
-            let _ = self.cmds.send(Cmd::Create { list_id: e.list_id, title });
+            let _ = self.cmds.send(Cmd::Create {
+                list_id: e.list_id,
+                title,
+                parent: draft.parent,
+            });
             return;
         }
         // Show the change straight away; Google confirms it a moment later.
@@ -812,7 +833,8 @@ impl App {
             KeyCode::Char('i') => self.start_edit(),
             KeyCode::Char(' ') => self.toggle_done(),
             KeyCode::Char('d') => self.ask_delete(),
-            KeyCode::Char('c') => self.start_create(),
+            KeyCode::Char('c') => self.start_create(false),
+            KeyCode::Char('C') => self.start_create(true),
             KeyCode::Char('r') => self.refresh(),
             KeyCode::Char('t') => self.transparent = !self.transparent,
             KeyCode::Char('b') => self.start_browse(),
@@ -832,7 +854,7 @@ impl App {
         match k.code {
             KeyCode::Esc => {
                 self.edit = None;
-                self.creating = false;
+                self.creating = None;
                 return;
             }
             KeyCode::Enter if !(notes && newline) => {
@@ -896,7 +918,7 @@ impl App {
             " j/k · ⏎ move · Esc close"
         } else if self.help.is_some() {
             " j/k · Esc close"
-        } else if self.creating {
+        } else if self.creating.is_some() {
             " ⏎ create · Esc cancel"
         } else if self.edit.as_ref().is_some_and(|e| e.field == FieldId::Notes) {
             " ⏎ save · ⇧⏎ new line · Esc cancel · ^W delete word"
@@ -905,9 +927,9 @@ impl App {
         } else if !self.synced {
             " syncing with Google… board is read-only until it lands"
         } else if self.shelf {
-            " Tab field · i edit · c new · ␣ done · j/k task · b link · m move · d delete · ? help · q quit"
+            " Tab field · i edit · c new · C subtask · ␣ done · j/k task · b link · m move · d delete · ? help · q quit"
         } else {
-            " h/l list · j/k task · ␣ done · ⏎ details · c new · i edit · b link · m move · d delete · ? help · q quit"
+            " h/l list · j/k task · ␣ done · ⏎ details · c new · C subtask · i edit · b link · m move · d delete · ? help · q quit"
         };
         let status_line = match (&self.pending, &self.error) {
             (Some(p), _) => Line::styled(format!(" {}", p.prompt), Style::default().fg(t.yellow).bold()),
@@ -924,7 +946,7 @@ impl App {
             return;
         }
         self.focus = self.focus.min(self.columns.len() - 1);
-        if self.selected_task().is_none() && !self.creating {
+        if self.selected_task().is_none() && self.creating.is_none() {
             self.shelf = false;
             self.edit = None;
         }
@@ -995,10 +1017,13 @@ impl App {
     /// The shelf while a new task is being typed: just a title input.
     fn draw_new_shelf(&self, f: &mut Frame, area: Rect, t: &Theme) {
         let col = &self.columns[self.focus];
+        let parent_id = self.creating.as_ref().and_then(|d| d.parent.as_deref());
+        let parent = parent_id.and_then(|id| col.rows.iter().find(|r| r.task.id == id));
+        let heading = if parent_id.is_some() { " New subtask " } else { " New task " };
         let block = Block::bordered()
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(t.green))
-            .title(Line::styled(" New task ", Style::default().fg(t.green).bold()))
+            .title(Line::styled(heading, Style::default().fg(t.green).bold()))
             .padding(Padding::horizontal(1))
             .style(Style::default().bg(self.bg(t.bg)));
         let inner = block.inner(area);
@@ -1013,17 +1038,22 @@ impl App {
             format!("{text:<w$}"),
             Style::default().fg(t.sel_fg).bg(t.sel_bg).bold(),
         );
+        let caption = match (parent, parent_id.is_some()) {
+            (Some(p), _) => format!("  under {}", title_of(&p.task)),
+            (None, true) => "  under the selected task".to_string(),
+            (None, false) => format!("  in {}", col.list.title),
+        };
         let lines = vec![
             marked(vec![input], true, t).remove(0),
             Line::default(),
-            Line::styled(format!("  in {}", col.list.title), Style::default().fg(t.muted)),
+            Line::styled(caption, Style::default().fg(t.muted)),
         ];
         f.render_widget(Paragraph::new(lines), inner);
         f.set_cursor_position((inner.x + 2 + offset as u16, inner.y));
     }
 
     fn draw_shelf(&self, f: &mut Frame, area: Rect, t: &Theme) {
-        if self.creating {
+        if self.creating.is_some() {
             self.draw_new_shelf(f, area, t);
             return;
         }
@@ -1247,6 +1277,7 @@ fn help_keys() -> Vec<(&'static str, &'static str)> {
         ("Tab", "title / notes (shelf)"),
         ("Space", "tick / untick"),
         ("c", "new task"),
+        ("C", "new subtask"),
         ("i", "edit focused field"),
         ("d", "delete task"),
         ("b", "browse links in notes"),
@@ -1275,6 +1306,17 @@ fn move_ids(rows: &[Row], task_id: &str) -> Vec<String> {
             .map(|r| r.task.id.clone()),
     );
     ids
+}
+
+/// Where a new subtask hangs: off the row itself when it is top-level, or
+/// off the row's own parent when it is already a subtask — Google Tasks nests
+/// exactly one level deep, so a subtask's sibling is the closest thing to a
+/// child of it.
+fn subtask_parent(row: &Row) -> Option<String> {
+    match row.depth {
+        0 => Some(row.task.id.clone()),
+        _ => row.task.parent.clone(),
+    }
 }
 
 /// http(s) URLs in notes, first-seen order, no duplicates.
@@ -1463,8 +1505,10 @@ fn order(tasks: Vec<Task>) -> Vec<Row> {
 fn worker(mut client: Client, cmds: Receiver<Cmd>, out: Sender<Msg>) {
     for cmd in cmds {
         match cmd {
-            Cmd::Create { list_id, title } => {
-                let res = client.create(&list_id, &title).map_err(|e| e.to_string());
+            Cmd::Create { list_id, title, parent } => {
+                let res = client
+                    .create(&list_id, &title, parent.as_deref())
+                    .map_err(|e| e.to_string());
                 if out.send(Msg::Created(list_id, res)).is_err() {
                     return;
                 }
@@ -1706,10 +1750,28 @@ mod tests {
     #[test]
     fn help_keys_lists_the_board_commands() {
         let keys: Vec<&str> = help_keys().iter().map(|(k, _)| *k).collect();
-        for need in ["h / l", "j / k", "Enter", "Space", "c", "i", "d", "b", "m", "?", "q"] {
+        for need in ["h / l", "j / k", "Enter", "Space", "c", "C", "i", "d", "b", "m", "?", "q"] {
             assert!(keys.iter().any(|k| k.contains(need)), "missing {need} in {keys:?}");
         }
         assert!(!help_keys().is_empty());
         assert!(help_keys().iter().all(|(k, d)| !k.is_empty() && !d.is_empty()));
+    }
+
+    #[test]
+    fn subtask_parent_is_the_row_or_its_own_parent() {
+        let rows = order(vec![
+            task("a", None, "1", false),
+            task("a1", Some("a"), "1", false),
+            task("b", None, "2", false),
+            task("orphan", Some("gone"), "3", false),
+        ]);
+        let row = |id: &str| rows.iter().find(|r| r.task.id == id).unwrap();
+        assert_eq!(subtask_parent(row("a")).as_deref(), Some("a"));
+        assert_eq!(subtask_parent(row("b")).as_deref(), Some("b"));
+        // A subtask hands over its own parent, so nesting stays one deep.
+        assert_eq!(subtask_parent(row("a1")).as_deref(), Some("a"));
+        // A task whose parent is missing from the list draws at depth 0, so it
+        // parents the new subtask itself instead of pointing at a stranger.
+        assert_eq!(subtask_parent(row("orphan")).as_deref(), Some("orphan"));
     }
 }

@@ -94,9 +94,9 @@ impl Client {
         Ok(task)
     }
 
-    /// Add a task to the top of a list.
-    pub fn create(&mut self, list_id: &str, title: &str) -> Result<Task> {
-        self.insert(list_id, &serde_json::json!({ "title": title }), None)
+    /// Add a task to the top of a list, under `parent` when given.
+    pub fn create(&mut self, list_id: &str, title: &str, parent: Option<&str>) -> Result<Task> {
+        self.insert(list_id, &serde_json::json!({ "title": title }), parent)
     }
 
     fn insert(&mut self, list_id: &str, body: &Value, parent: Option<&str>) -> Result<Task> {
