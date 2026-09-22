@@ -2,7 +2,7 @@
 
 A fast Rust TUI (ratatui 0.29 + crossterm) for Google Tasks: one column per
 task list, tasks listed vertically, Enter opens a details shelf, Tab moves between shelf fields (title/notes), `i` edits one inline, Space
-ticks a task, `c` creates one, `d` deletes it, `b` opens URLs from its notes, `m` moves it to another list. Fully
+ticks a task, `c` creates one, `d` deletes it, `b` opens URLs from its notes, `m` moves it to another list, `?` lists the keys. Fully
 integrates with the Omarchy theming system and live-reloads when the user
 switches themes. Goal: full CRUD on tasks and task lists.
 
@@ -61,7 +61,8 @@ Work directly on `main`; no feature branches.
   close it. `m` opens a **Move** overlay of every list except the current
   one; Enter POSTs `tasks.move` (`Cmd::Move` / `Client::relocate`) for the
   selected task and its subtasks, then follows the selection to the dest
-  column. Startup pushes kitty
+  column. `?` opens a **Keyboard** overlay of `help_keys()`; `j`/`k` move,
+  Esc/`q`/`?` close it. Startup pushes kitty
   keyboard flags when the terminal supports them, so Shift+Enter reaches the
   notes editor (Alt+Enter and Ctrl-J are the fallbacks).
 

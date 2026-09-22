@@ -77,6 +77,11 @@ struct MovePick {
     state: ListState,
 }
 
+/// Overlay listing keyboard commands.
+struct Help {
+    state: ListState,
+}
+
 /// The editable fields of the shelf.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum FieldId {
@@ -225,6 +230,7 @@ struct App {
     pending: Option<Pending>,
     browse: Option<Browse>,
     move_to: Option<MovePick>,
+    help: Option<Help>,
     fetching: bool,
     /// False while the board may still be stale: edits are blocked until the
     /// first sync of this run lands.
@@ -263,6 +269,7 @@ impl App {
             pending: None,
             browse: None,
             move_to: None,
+            help: None,
             fetching: false,
             synced: false,
             saving: 0,
@@ -724,6 +731,17 @@ impl App {
         let _ = self.cmds.send(Cmd::Move { from: from_id, to: dest_id, ids });
     }
 
+    fn start_help(&mut self) {
+        self.help = Some(Help { state: ListState::default().with_selected(Some(0)) });
+    }
+
+    fn step_help(&mut self, delta: isize) {
+        let Some(h) = self.help.as_mut() else { return };
+        let n = help_keys().len();
+        let i = h.state.selected().unwrap_or(0) as isize + delta;
+        h.state.select(Some(i.clamp(0, n.saturating_sub(1) as isize) as usize));
+    }
+
     fn on_key(&mut self, k: KeyEvent) {
         if self.edit.is_some() {
             self.edit_key(k);
@@ -760,6 +778,15 @@ impl App {
             }
             return;
         }
+        if self.help.is_some() {
+            match k.code {
+                KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('?') => self.help = None,
+                KeyCode::Char('j') | KeyCode::Down => self.step_help(1),
+                KeyCode::Char('k') | KeyCode::Up => self.step_help(-1),
+                _ => {}
+            }
+            return;
+        }
         match k.code {
             KeyCode::Char('q') => self.quit = true,
             KeyCode::Esc if self.shelf => self.shelf = false,
@@ -790,6 +817,7 @@ impl App {
             KeyCode::Char('t') => self.transparent = !self.transparent,
             KeyCode::Char('b') => self.start_browse(),
             KeyCode::Char('m') => self.start_move(),
+            KeyCode::Char('?') => self.start_help(),
             _ => {}
         }
     }
@@ -860,11 +888,14 @@ impl App {
         self.draw_board(f, body, &t);
         self.draw_browse(f, body, &t);
         self.draw_move(f, body, &t);
+        self.draw_help(f, body, &t);
 
         let hints = if self.browse.is_some() {
             " j/k · ⏎ open · ⇧⏎ all · Esc close"
         } else if self.move_to.is_some() {
             " j/k · ⏎ move · Esc close"
+        } else if self.help.is_some() {
+            " j/k · Esc close"
         } else if self.creating {
             " ⏎ create · Esc cancel"
         } else if self.edit.as_ref().is_some_and(|e| e.field == FieldId::Notes) {
@@ -874,9 +905,9 @@ impl App {
         } else if !self.synced {
             " syncing with Google… board is read-only until it lands"
         } else if self.shelf {
-            " Tab field · i edit · c new · ␣ done · j/k task · b link · m move · d delete · q quit"
+            " Tab field · i edit · c new · ␣ done · j/k task · b link · m move · d delete · ? help · q quit"
         } else {
-            " h/l list · j/k task · ␣ done · ⏎ details · c new · i edit · b link · m move · d delete · q quit"
+            " h/l list · j/k task · ␣ done · ⏎ details · c new · i edit · b link · m move · d delete · ? help · q quit"
         };
         let status_line = match (&self.pending, &self.error) {
             (Some(p), _) => Line::styled(format!(" {}", p.prompt), Style::default().fg(t.yellow).bold()),
@@ -1173,6 +1204,59 @@ impl App {
             .highlight_spacing(HighlightSpacing::Always);
         f.render_stateful_widget(list, rect, &mut pick.state);
     }
+
+    fn draw_help(&mut self, f: &mut Frame, area: Rect, t: &Theme) {
+        let bg = self.bg(t.bg);
+        let Some(help) = self.help.as_mut() else { return };
+        let keys = help_keys();
+        let key_w = keys.iter().map(|(k, _)| k.len()).max().unwrap_or(0);
+        let width = area.width.min(56).max(28);
+        let height = (keys.len() as u16 + 2).clamp(3, area.height.max(3));
+        let x = area.x + area.width.saturating_sub(width) / 2;
+        let y = area.y + area.height.saturating_sub(height) / 2;
+        let rect = Rect::new(x, y, width, height);
+        let block = Block::bordered()
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(t.accent))
+            .title(Line::styled(" Keyboard ", Style::default().fg(t.accent).bold()))
+            .style(Style::default().bg(bg));
+        let items: Vec<ListItem> = keys
+            .iter()
+            .map(|(k, d)| {
+                ListItem::new(Line::from(vec![
+                    Span::styled(format!(" {k:<key_w$}  "), Style::default().fg(t.accent).bold()),
+                    Span::styled(*d, Style::default().fg(t.fg)),
+                ]))
+            })
+            .collect();
+        let list = List::new(items)
+            .block(block)
+            .highlight_style(Style::default().fg(t.sel_fg).bg(t.sel_bg).add_modifier(Modifier::BOLD))
+            .highlight_symbol("▌")
+            .highlight_spacing(HighlightSpacing::Always);
+        f.render_stateful_widget(list, rect, &mut help.state);
+    }
+}
+
+fn help_keys() -> Vec<(&'static str, &'static str)> {
+    vec![
+        ("h / l", "previous / next list"),
+        ("j / k", "previous / next task"),
+        ("g / G", "first / last task"),
+        ("Enter", "open / close details"),
+        ("Tab", "title / notes (shelf)"),
+        ("Space", "tick / untick"),
+        ("c", "new task"),
+        ("i", "edit focused field"),
+        ("d", "delete task"),
+        ("b", "browse links in notes"),
+        ("m", "move to another list"),
+        ("r", "refresh from Google"),
+        ("t", "transparent background"),
+        ("?", "keyboard commands"),
+        ("q / Esc", "quit (Esc closes overlays)"),
+        ("⇧Enter", "new line (notes) / open all (browse)"),
+    ]
 }
 
 fn other_lists<'a>(lists: &'a [TaskList], current_id: &str) -> Vec<&'a TaskList> {
@@ -1617,5 +1701,15 @@ mod tests {
         assert_eq!(move_ids(&rows, "a"), ["a", "a1"]);
         assert_eq!(move_ids(&rows, "a1"), ["a1"]);
         assert!(move_ids(&rows, "gone").is_empty());
+    }
+
+    #[test]
+    fn help_keys_lists_the_board_commands() {
+        let keys: Vec<&str> = help_keys().iter().map(|(k, _)| *k).collect();
+        for need in ["h / l", "j / k", "Enter", "Space", "c", "i", "d", "b", "m", "?", "q"] {
+            assert!(keys.iter().any(|k| k.contains(need)), "missing {need} in {keys:?}");
+        }
+        assert!(!help_keys().is_empty());
+        assert!(help_keys().iter().all(|(k, d)| !k.is_empty() && !d.is_empty()));
     }
 }

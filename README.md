@@ -11,10 +11,10 @@ Omarchy it falls back to plain ANSI colors, so it picks up your terminal's
 own palette.
 
 Press `c` to create a task, `Space` to tick one off, `d` to delete it,
-`b` to open URLs from its notes, `m` to move it to another list, and
-`Tab`/`i` in the shelf to edit its title or notes. Due dates are next.
-The same CRUD is available as subcommands for scripts and agents
-(`google-tasks-tui lists`, `create`, `done`, …).
+`b` to open URLs from its notes, `m` to move it to another list, `?` for
+the keyboard list, and `Tab`/`i` in the shelf to edit its title or notes.
+Due dates are next. The same CRUD is available as subcommands for scripts
+and agents (`google-tasks-tui lists`, `create`, `done`, …).
 
 ## Features
 
@@ -40,6 +40,8 @@ The same CRUD is available as subcommands for scripts and agents
   `j`/`k` choose a list, `Enter` assigns the selected task to it (and its
   subtasks, the same way Google deletes them together) and closes the overlay.
   `Esc` cancels. If there is only one list, the status bar says so.
+- `?` opens a **Keyboard** overlay listing the board commands. The first row
+  is selected; `j`/`k` move, `Esc`/`q`/`?` close it.
 - API calls run on a background thread, so the UI never blocks. Lists fill in
   as they load.
 - Startup is instant: the board is painted from a local snapshot before any
