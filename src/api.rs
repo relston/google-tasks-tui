@@ -123,6 +123,31 @@ impl Client {
         Ok(())
     }
 
+    /// Move a task into another list. Omit `parent` to make it top-level.
+    pub fn relocate(
+        &mut self,
+        list_id: &str,
+        task_id: &str,
+        dest_list: &str,
+        parent: Option<&str>,
+    ) -> Result<Task> {
+        let token = self.auth.token()?;
+        let mut req = self
+            .auth
+            .agent
+            .post(format!(
+                "{BASE}/lists/{}/tasks/{}/move",
+                pct(list_id),
+                pct(task_id)
+            ))
+            .header("Authorization", format!("Bearer {token}"))
+            .query("destinationTasklist", dest_list);
+        if let Some(p) = parent {
+            req = req.query("parent", p);
+        }
+        Ok(req.send_empty()?.body_mut().read_json()?)
+    }
+
     /// Create a task list.
     pub fn create_list(&mut self, title: &str) -> Result<TaskList> {
         let token = self.auth.token()?;

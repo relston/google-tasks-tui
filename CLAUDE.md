@@ -2,7 +2,7 @@
 
 A fast Rust TUI (ratatui 0.29 + crossterm) for Google Tasks: one column per
 task list, tasks listed vertically, Enter opens a details shelf, Tab moves between shelf fields (title/notes), `i` edits one inline, Space
-ticks a task, `c` creates one, `d` deletes it, `b` opens URLs from its notes. Fully
+ticks a task, `c` creates one, `d` deletes it, `b` opens URLs from its notes, `m` moves it to another list. Fully
 integrates with the Omarchy theming system and live-reloads when the user
 switches themes. Goal: full CRUD on tasks and task lists.
 
@@ -38,7 +38,8 @@ Work directly on `main`; no feature branches.
 - `src/api.rs` — blocking Tasks v1 client on `ureq` 3; `get_all` follows
   `nextPageToken`; `patch` PATCHes arbitrary fields of one task; `create` POSTs
   a title (TUI); `insert` accepts a JSON body and optional `parent` query
-  (CLI); `delete` removes one; `create_list` / `patch_list` / `delete_list`
+  (CLI); `delete` removes one; `relocate` POSTs `tasks.move` with
+  `destinationTasklist` (TUI); `create_list` / `patch_list` / `delete_list`
   mutate task lists. `TasksApi` is the trait the CLI and tests call.
 - `src/tui.rs` — board UI. A worker thread owns the `Client` and talks to the
   UI over `Cmd`/`Msg` channels; the event loop polls input every 100 ms,
@@ -57,7 +58,10 @@ Work directly on `main`; no feature branches.
   (`urls_in`) and opens a centered **Browse Link** overlay; `j`/`k` move,
   Enter `spawn`s `open` / `xdg-open` for the selected URL and dismisses the
   overlay, Shift+Enter opens every URL in the list then dismisses, Esc/`q`
-  close it. Startup pushes kitty
+  close it. `m` opens a **Move** overlay of every list except the current
+  one; Enter POSTs `tasks.move` (`Cmd::Move` / `Client::relocate`) for the
+  selected task and its subtasks, then follows the selection to the dest
+  column. Startup pushes kitty
   keyboard flags when the terminal supports them, so Shift+Enter reaches the
   notes editor (Alt+Enter and Ctrl-J are the fallbacks).
 

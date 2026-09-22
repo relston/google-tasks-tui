@@ -45,6 +45,7 @@ enum Cmd {
     Patch { list_id: String, task_id: String, fields: Value },
     Delete { list_id: String, task_id: String },
     Create { list_id: String, title: String },
+    Move { from: String, to: String, ids: Vec<String> },
 }
 
 /// Results from the network thread.
@@ -54,6 +55,7 @@ enum Msg {
     Updated(String, Result<Task, String>),
     Deleted(Result<(), String>),
     Created(String, Result<Task, String>),
+    Moved(Result<(), String>),
 }
 
 /// A delete waiting on a y/n answer in the status bar.
@@ -66,6 +68,12 @@ struct Pending {
 /// Overlay listing URLs found in the selected task's notes.
 struct Browse {
     urls: Vec<String>,
+    state: ListState,
+}
+
+/// Overlay listing destination lists for a move.
+struct MovePick {
+    lists: Vec<TaskList>,
     state: ListState,
 }
 
@@ -216,6 +224,7 @@ struct App {
     edit: Option<Edit>,
     pending: Option<Pending>,
     browse: Option<Browse>,
+    move_to: Option<MovePick>,
     fetching: bool,
     /// False while the board may still be stale: edits are blocked until the
     /// first sync of this run lands.
@@ -253,6 +262,7 @@ impl App {
             edit: None,
             pending: None,
             browse: None,
+            move_to: None,
             fetching: false,
             synced: false,
             saving: 0,
@@ -543,6 +553,15 @@ impl App {
                     let _ = self.cmds.send(Cmd::Refresh);
                 }
             }
+            Msg::Moved(res) => {
+                self.saving = self.saving.saturating_sub(1);
+                self.save_cache();
+                if let Err(e) = res {
+                    self.error = Some(format!("move failed: {e}"));
+                    self.fetching = true;
+                    let _ = self.cmds.send(Cmd::Refresh);
+                }
+            }
             Msg::Updated(list_id, res) => {
                 self.saving = self.saving.saturating_sub(1);
                 match res {
@@ -624,6 +643,87 @@ impl App {
         self.browse = None;
     }
 
+    fn start_move(&mut self) {
+        if !self.writable() {
+            return;
+        }
+        let Some(col) = self.columns.get(self.focus) else { return };
+        if col.selected().is_none() {
+            return;
+        }
+        let current = col.list.id.clone();
+        let all: Vec<TaskList> = self.columns.iter().map(|c| c.list.clone()).collect();
+        let lists: Vec<TaskList> = other_lists(&all, &current).into_iter().cloned().collect();
+        if lists.is_empty() {
+            self.error = Some("no other lists".into());
+            return;
+        }
+        self.error = None;
+        self.move_to = Some(MovePick {
+            lists,
+            state: ListState::default().with_selected(Some(0)),
+        });
+    }
+
+    fn step_move(&mut self, delta: isize) {
+        let Some(m) = self.move_to.as_mut() else { return };
+        let Some(last) = m.lists.len().checked_sub(1) else { return };
+        let cur = m.state.selected().unwrap_or(0) as isize;
+        m.state.select(Some((cur + delta).clamp(0, last as isize) as usize));
+    }
+
+    fn confirm_move(&mut self) {
+        let dest_id = {
+            let Some(m) = self.move_to.as_ref() else { return };
+            let Some(i) = m.state.selected() else { return };
+            let Some(list) = m.lists.get(i) else { return };
+            list.id.clone()
+        };
+        self.move_to = None;
+        let Some(src) = self.columns.get(self.focus) else { return };
+        let from_id = src.list.id.clone();
+        let Some(row) = src.selected() else { return };
+        let task_id = row.task.id.clone();
+        let ids = move_ids(&src.rows, &task_id);
+        if ids.is_empty() {
+            return;
+        }
+        let Some(dest_idx) = self.columns.iter().position(|c| c.list.id == dest_id) else {
+            return;
+        };
+        let id_set: HashSet<String> = ids.iter().cloned().collect();
+        let src = &mut self.columns[self.focus];
+        let mut taken = Vec::new();
+        src.rows.retain(|r| {
+            if id_set.contains(&r.task.id) {
+                taken.push(r.task.clone());
+                false
+            } else {
+                true
+            }
+        });
+        let last = src.rows.len().checked_sub(1);
+        let sel = src.state.selected().unwrap_or(0);
+        src.state.select(last.map(|l| sel.min(l)));
+        taken.sort_by_key(|t| ids.iter().position(|id| *id == t.id).unwrap_or(usize::MAX));
+        for t in &mut taken {
+            if t.parent.as_deref().is_some_and(|p| !id_set.contains(p)) {
+                t.parent = None;
+            }
+        }
+        let dest = &mut self.columns[dest_idx];
+        let mut tasks: Vec<Task> = dest.rows.iter().map(|r| r.task.clone()).collect();
+        tasks.extend(taken);
+        dest.rows = order(tasks);
+        if let Some(i) = dest.rows.iter().position(|r| r.task.id == task_id) {
+            dest.state.select(Some(i));
+        }
+        self.focus = dest_idx;
+        self.error = None;
+        self.saving += 1;
+        let _ = self.cmds.send(Cmd::Move { from: from_id, to: dest_id, ids });
+    }
+
     fn on_key(&mut self, k: KeyEvent) {
         if self.edit.is_some() {
             self.edit_key(k);
@@ -646,6 +746,16 @@ impl App {
                     self.open_browse(true)
                 }
                 KeyCode::Enter => self.open_browse(false),
+                _ => {}
+            }
+            return;
+        }
+        if self.move_to.is_some() {
+            match k.code {
+                KeyCode::Esc | KeyCode::Char('q') => self.move_to = None,
+                KeyCode::Char('j') | KeyCode::Down => self.step_move(1),
+                KeyCode::Char('k') | KeyCode::Up => self.step_move(-1),
+                KeyCode::Enter => self.confirm_move(),
                 _ => {}
             }
             return;
@@ -679,6 +789,7 @@ impl App {
             KeyCode::Char('r') => self.refresh(),
             KeyCode::Char('t') => self.transparent = !self.transparent,
             KeyCode::Char('b') => self.start_browse(),
+            KeyCode::Char('m') => self.start_move(),
             _ => {}
         }
     }
@@ -748,9 +859,12 @@ impl App {
 
         self.draw_board(f, body, &t);
         self.draw_browse(f, body, &t);
+        self.draw_move(f, body, &t);
 
         let hints = if self.browse.is_some() {
             " j/k · ⏎ open · ⇧⏎ all · Esc close"
+        } else if self.move_to.is_some() {
+            " j/k · ⏎ move · Esc close"
         } else if self.creating {
             " ⏎ create · Esc cancel"
         } else if self.edit.as_ref().is_some_and(|e| e.field == FieldId::Notes) {
@@ -760,9 +874,9 @@ impl App {
         } else if !self.synced {
             " syncing with Google… board is read-only until it lands"
         } else if self.shelf {
-            " Tab field · i edit · c new · ␣ done · j/k task · b link · d delete · q quit"
+            " Tab field · i edit · c new · ␣ done · j/k task · b link · m move · d delete · q quit"
         } else {
-            " h/l list · j/k task · ␣ done · ⏎ details · c new · i edit · b link · d delete · q quit"
+            " h/l list · j/k task · ␣ done · ⏎ details · c new · i edit · b link · m move · d delete · q quit"
         };
         let status_line = match (&self.pending, &self.error) {
             (Some(p), _) => Line::styled(format!(" {}", p.prompt), Style::default().fg(t.yellow).bold()),
@@ -1033,6 +1147,50 @@ impl App {
             .highlight_spacing(HighlightSpacing::Always);
         f.render_stateful_widget(list, rect, &mut browse.state);
     }
+
+    fn draw_move(&mut self, f: &mut Frame, area: Rect, t: &Theme) {
+        let bg = self.bg(t.bg);
+        let Some(pick) = self.move_to.as_mut() else { return };
+        let width = area.width.min(72).max(24);
+        let height = (pick.lists.len() as u16 + 2).clamp(3, area.height.max(3));
+        let x = area.x + area.width.saturating_sub(width) / 2;
+        let y = area.y + area.height.saturating_sub(height) / 2;
+        let rect = Rect::new(x, y, width, height);
+        let block = Block::bordered()
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(t.accent))
+            .title(Line::styled(" Move ", Style::default().fg(t.accent).bold()))
+            .style(Style::default().bg(bg));
+        let items: Vec<ListItem> = pick
+            .lists
+            .iter()
+            .map(|l| ListItem::new(Line::styled(l.title.clone(), Style::default().fg(t.fg))))
+            .collect();
+        let list = List::new(items)
+            .block(block)
+            .highlight_style(Style::default().fg(t.sel_fg).bg(t.sel_bg).add_modifier(Modifier::BOLD))
+            .highlight_symbol("▌")
+            .highlight_spacing(HighlightSpacing::Always);
+        f.render_stateful_widget(list, rect, &mut pick.state);
+    }
+}
+
+fn other_lists<'a>(lists: &'a [TaskList], current_id: &str) -> Vec<&'a TaskList> {
+    lists.iter().filter(|l| l.id != current_id).collect()
+}
+
+/// The selected task, then its subtasks. Those go with it to the dest list.
+fn move_ids(rows: &[Row], task_id: &str) -> Vec<String> {
+    if !rows.iter().any(|r| r.task.id == task_id) {
+        return Vec::new();
+    }
+    let mut ids = vec![task_id.to_string()];
+    ids.extend(
+        rows.iter()
+            .filter(|r| r.task.parent.as_deref() == Some(task_id))
+            .map(|r| r.task.id.clone()),
+    );
+    ids
 }
 
 /// http(s) URLs in notes, first-seen order, no duplicates.
@@ -1104,15 +1262,18 @@ fn wrap(text: &str, width: usize) -> Vec<(usize, usize)> {
     out
 }
 
-/// Where `cursor` lands in the wrapped layout, as (line, column).
+/// Where `cursor` lands in the wrapped layout, as (line, column). The last
+/// row starting at or before the cursor wins, so a cursor sitting at the end
+/// of a line (no segment covers the '\n') stays on that line.
 fn cursor_rc(segs: &[(usize, usize)], text: &str, cursor: usize) -> (usize, usize) {
-    let col = |start: usize| text[start..cursor].chars().count();
+    let mut out = (0, 0);
     for (row, (s, e)) in segs.iter().enumerate() {
-        if cursor >= *s && (cursor < *e || row + 1 == segs.len()) {
-            return (row, col(*s));
+        if cursor < *s {
+            break;
         }
+        out = (row, text[*s..cursor.min(*e)].chars().count());
     }
-    segs.last().map_or((0, 0), |(s, _)| (segs.len() - 1, col(*s)))
+    out
 }
 
 /// Prefix each line with the focus marker so focused fields stand out.
@@ -1233,6 +1394,21 @@ fn worker(mut client: Client, cmds: Receiver<Cmd>, out: Sender<Msg>) {
             Cmd::Patch { list_id, task_id, fields } => {
                 let res = client.patch(&list_id, &task_id, &fields).map_err(|e| e.to_string());
                 if out.send(Msg::Updated(list_id, res)).is_err() {
+                    return;
+                }
+            }
+            Cmd::Move { from, to, ids } => {
+                let res = (|| {
+                    let root = ids.first().ok_or_else(|| "no task".to_string())?;
+                    for (i, id) in ids.iter().enumerate() {
+                        let parent = (i > 0).then_some(root.as_str());
+                        client
+                            .relocate(&from, id, &to, parent)
+                            .map_err(|e| e.to_string())?;
+                    }
+                    Ok(())
+                })();
+                if out.send(Msg::Moved(res)).is_err() {
                     return;
                 }
             }
@@ -1395,5 +1571,51 @@ mod tests {
             urls_in("https://dup.test then https://dup.test again"),
             vec!["https://dup.test"]
         );
+    }
+
+    #[test]
+    fn cursor_rc_places_the_cursor_at_the_end_of_a_wrapped_line() {
+        let text = "aaa\nbbb";
+        let segs = wrap(text, 10);
+        assert_eq!(cursor_rc(&segs, text, 1), (0, 1));
+        // End of a line that is not the last one: no segment contains it.
+        assert_eq!(cursor_rc(&segs, text, 3), (0, 3));
+        assert_eq!(cursor_rc(&segs, text, 4), (1, 0));
+        assert_eq!(cursor_rc(&segs, text, 7), (1, 3));
+
+        // A soft wrap shares the boundary, so the cursor belongs to the next row.
+        let soft = "abcdefgh";
+        let segs = wrap(soft, 4);
+        assert_eq!(cursor_rc(&segs, soft, 4), (1, 0));
+
+        // Trailing newline, and an empty buffer.
+        let trail = "ab\n";
+        let segs = wrap(trail, 10);
+        assert_eq!(cursor_rc(&segs, trail, 3), (1, 0));
+        assert_eq!(cursor_rc(&wrap("", 10), "", 0), (0, 0));
+    }
+
+    #[test]
+    fn other_lists_skip_the_current_one() {
+        let lists = [
+            TaskList { id: "a".into(), title: "Inbox".into() },
+            TaskList { id: "b".into(), title: "Work".into() },
+            TaskList { id: "c".into(), title: "Home".into() },
+        ];
+        let got: Vec<&str> = other_lists(&lists, "b").iter().map(|l| l.id.as_str()).collect();
+        assert_eq!(got, ["a", "c"]);
+        assert!(other_lists(&lists, "missing").iter().map(|l| l.id.as_str()).eq(["a", "b", "c"]));
+    }
+
+    #[test]
+    fn move_ids_are_the_task_and_its_subtasks() {
+        let rows = order(vec![
+            task("a", None, "1", false),
+            task("a1", Some("a"), "1", false),
+            task("b", None, "2", false),
+        ]);
+        assert_eq!(move_ids(&rows, "a"), ["a", "a1"]);
+        assert_eq!(move_ids(&rows, "a1"), ["a1"]);
+        assert!(move_ids(&rows, "gone").is_empty());
     }
 }
