@@ -10,10 +10,11 @@ It uses your active [Omarchy](https://omarchy.org) theme and
 Omarchy it falls back to plain ANSI colors, so it picks up your terminal's
 own palette.
 
-Press `c` to create a task, `Space` to tick one off, `d` to delete it, and
-`Tab`/`i` in the shelf to edit its title or notes. Due dates are next.
-The same CRUD is available as subcommands for scripts and agents
-(`google-tasks-tui lists`, `create`, `done`, …).
+Press `c` to create a task, `Space` to tick one off, `d` to delete it,
+`b` to open URLs from its notes, and `Tab`/`i` in the shelf to edit its
+title or notes. Due dates are next. The same CRUD is available as
+subcommands for scripts and agents (`google-tasks-tui lists`, `create`,
+`done`, …).
 
 ## Features
 
@@ -30,6 +31,11 @@ The same CRUD is available as subcommands for scripts and agents
 - `d` deletes the selected task after a y/n confirmation in the status bar.
   The prompt names the task and counts the subtasks that go with it, since
   Google deletes those too.
+- `b` opens a **Browse Link** overlay listing `http://` / `https://` URLs
+  found in the selected task's notes. The first link is selected; `j`/`k`
+  move, `Enter` opens the selected URL and closes the overlay, `Shift+Enter`
+  opens every URL in the list (selection does not matter) and closes,
+  `Esc` closes without opening. If there are none, the status bar says so.
 - API calls run on a background thread, so the UI never blocks. Lists fill in
   as they load.
 - Startup is instant: the board is painted from a local snapshot before any

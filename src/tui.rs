@@ -1,6 +1,7 @@
 use std::{
     collections::HashSet,
     io,
+    process::{Command, Stdio},
     sync::mpsc::{self, Receiver, Sender},
     thread,
     time::{Duration, Instant},
@@ -60,6 +61,12 @@ struct Pending {
     list_id: String,
     task_id: String,
     prompt: String,
+}
+
+/// Overlay listing URLs found in the selected task's notes.
+struct Browse {
+    urls: Vec<String>,
+    state: ListState,
 }
 
 /// The editable fields of the shelf.
@@ -208,6 +215,7 @@ struct App {
     creating: bool,
     edit: Option<Edit>,
     pending: Option<Pending>,
+    browse: Option<Browse>,
     fetching: bool,
     /// False while the board may still be stale: edits are blocked until the
     /// first sync of this run lands.
@@ -244,6 +252,7 @@ impl App {
             creating: false,
             edit: None,
             pending: None,
+            browse: None,
             fetching: false,
             synced: false,
             saving: 0,
@@ -577,6 +586,44 @@ impl App {
         self.columns.get(self.focus)?.selected()
     }
 
+    fn start_browse(&mut self) {
+        let Some(row) = self.selected_task() else { return };
+        let urls = urls_in(row.task.notes.as_deref().unwrap_or(""));
+        if urls.is_empty() {
+            self.error = Some("no links in notes".into());
+            return;
+        }
+        self.error = None;
+        self.browse = Some(Browse {
+            urls,
+            state: ListState::default().with_selected(Some(0)),
+        });
+    }
+
+    fn move_browse(&mut self, delta: isize) {
+        let Some(b) = self.browse.as_mut() else { return };
+        let Some(last) = b.urls.len().checked_sub(1) else { return };
+        let cur = b.state.selected().unwrap_or(0) as isize;
+        b.state.select(Some((cur + delta).clamp(0, last as isize) as usize));
+    }
+
+    fn open_browse(&mut self, all: bool) {
+        let urls = {
+            let Some(b) = self.browse.as_ref() else { return };
+            if all {
+                b.urls.clone()
+            } else {
+                let Some(i) = b.state.selected() else { return };
+                let Some(url) = b.urls.get(i) else { return };
+                vec![url.clone()]
+            }
+        };
+        for url in &urls {
+            open_url(url);
+        }
+        self.browse = None;
+    }
+
     fn on_key(&mut self, k: KeyEvent) {
         if self.edit.is_some() {
             self.edit_key(k);
@@ -587,6 +634,19 @@ impl App {
             match k.code {
                 KeyCode::Char('y') | KeyCode::Char('Y') => self.confirm_delete(),
                 _ => self.pending = None,
+            }
+            return;
+        }
+        if self.browse.is_some() {
+            match k.code {
+                KeyCode::Esc | KeyCode::Char('q') => self.browse = None,
+                KeyCode::Char('j') | KeyCode::Down => self.move_browse(1),
+                KeyCode::Char('k') | KeyCode::Up => self.move_browse(-1),
+                KeyCode::Enter if k.modifiers.contains(KeyModifiers::SHIFT) => {
+                    self.open_browse(true)
+                }
+                KeyCode::Enter => self.open_browse(false),
+                _ => {}
             }
             return;
         }
@@ -618,6 +678,7 @@ impl App {
             KeyCode::Char('c') => self.start_create(),
             KeyCode::Char('r') => self.refresh(),
             KeyCode::Char('t') => self.transparent = !self.transparent,
+            KeyCode::Char('b') => self.start_browse(),
             _ => {}
         }
     }
@@ -686,8 +747,11 @@ impl App {
         f.render_widget(Line::from(head), header);
 
         self.draw_board(f, body, &t);
+        self.draw_browse(f, body, &t);
 
-        let hints = if self.creating {
+        let hints = if self.browse.is_some() {
+            " j/k · ⏎ open · ⇧⏎ all · Esc close"
+        } else if self.creating {
             " ⏎ create · Esc cancel"
         } else if self.edit.as_ref().is_some_and(|e| e.field == FieldId::Notes) {
             " ⏎ save · ⇧⏎ new line · Esc cancel · ^W delete word"
@@ -696,9 +760,9 @@ impl App {
         } else if !self.synced {
             " syncing with Google… board is read-only until it lands"
         } else if self.shelf {
-            " Tab field · i edit · c new · ␣ done · j/k task · d delete · q quit"
+            " Tab field · i edit · c new · ␣ done · j/k task · b link · d delete · q quit"
         } else {
-            " h/l list · j/k task · ␣ done · ⏎ details · c new · i edit · d delete · q quit"
+            " h/l list · j/k task · ␣ done · ⏎ details · c new · i edit · b link · d delete · q quit"
         };
         let status_line = match (&self.pending, &self.error) {
             (Some(p), _) => Line::styled(format!(" {}", p.prompt), Style::default().fg(t.yellow).bold()),
@@ -943,6 +1007,76 @@ impl App {
             f.set_cursor_position(pos);
         }
     }
+
+    fn draw_browse(&mut self, f: &mut Frame, area: Rect, t: &Theme) {
+        let bg = self.bg(t.bg);
+        let Some(browse) = self.browse.as_mut() else { return };
+        let width = area.width.min(72).max(24);
+        let height = (browse.urls.len() as u16 + 2).clamp(3, area.height.max(3));
+        let x = area.x + area.width.saturating_sub(width) / 2;
+        let y = area.y + area.height.saturating_sub(height) / 2;
+        let rect = Rect::new(x, y, width, height);
+        let block = Block::bordered()
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(t.accent))
+            .title(Line::styled(" Browse Link ", Style::default().fg(t.accent).bold()))
+            .style(Style::default().bg(bg));
+        let items: Vec<ListItem> = browse
+            .urls
+            .iter()
+            .map(|u| ListItem::new(Line::styled(u.clone(), Style::default().fg(t.blue))))
+            .collect();
+        let list = List::new(items)
+            .block(block)
+            .highlight_style(Style::default().fg(t.sel_fg).bg(t.sel_bg).add_modifier(Modifier::BOLD))
+            .highlight_symbol("▌")
+            .highlight_spacing(HighlightSpacing::Always);
+        f.render_stateful_widget(list, rect, &mut browse.state);
+    }
+}
+
+/// http(s) URLs in notes, first-seen order, no duplicates.
+fn urls_in(notes: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < notes.len() {
+        let rest = &notes[i..];
+        let scheme = if rest.starts_with("https://") {
+            "https://"
+        } else if rest.starts_with("http://") {
+            "http://"
+        } else {
+            i += rest.chars().next().map(char::len_utf8).unwrap_or(1);
+            continue;
+        };
+        let after = &rest[scheme.len()..];
+        let end = after.find(char::is_whitespace).unwrap_or(after.len());
+        let mut url = format!("{}{}", scheme, &after[..end]);
+        while url
+            .chars()
+            .last()
+            .is_some_and(|c| matches!(c, '.' | ',' | ';' | ':' | '!' | '?' | ')' | ']' | '>' | '\'' | '"'))
+        {
+            url.pop();
+        }
+        if url.len() > scheme.len() && !out.iter().any(|u| u == &url) {
+            out.push(url);
+        }
+        i += scheme.len() + end;
+    }
+    out
+}
+
+fn open_url(url: &str) {
+    #[cfg(target_os = "macos")]
+    let bin = "open";
+    #[cfg(not(target_os = "macos"))]
+    let bin = "xdg-open";
+    let _ = Command::new(bin)
+        .arg(url)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
 }
 
 /// Greedy word wrap. Returns the byte range of each display line, so the
@@ -1237,5 +1371,29 @@ mod tests {
         ]);
         let got: Vec<(&str, u8)> = rows.iter().map(|r| (r.task.id.as_str(), r.depth)).collect();
         assert_eq!(got, [("a", 0), ("a1", 1), ("b", 0), ("orphan", 0), ("done", 0)]);
+    }
+
+    #[test]
+    fn urls_in_finds_http_and_https_and_skips_the_rest() {
+        assert_eq!(urls_in(""), Vec::<String>::new());
+        assert_eq!(urls_in("no links here"), Vec::<String>::new());
+        assert_eq!(
+            urls_in("see https://example.com/a"),
+            vec!["https://example.com/a"]
+        );
+        assert_eq!(
+            urls_in("http://a.test https://b.test/x"),
+            vec!["http://a.test", "https://b.test/x"]
+        );
+        assert_eq!(
+            urls_in("read [PR](https://github.com/org/repo/pull/1)."),
+            vec!["https://github.com/org/repo/pull/1"]
+        );
+        assert_eq!(urls_in("visit https://ex.com."), vec!["https://ex.com"]);
+        assert_eq!(urls_in("www.example.com"), Vec::<String>::new());
+        assert_eq!(
+            urls_in("https://dup.test then https://dup.test again"),
+            vec!["https://dup.test"]
+        );
     }
 }

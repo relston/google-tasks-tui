@@ -2,7 +2,7 @@
 
 A fast Rust TUI (ratatui 0.29 + crossterm) for Google Tasks: one column per
 task list, tasks listed vertically, Enter opens a details shelf, Tab moves between shelf fields (title/notes), `i` edits one inline, Space
-ticks a task, `c` creates one, `d` deletes it. Fully
+ticks a task, `c` creates one, `d` deletes it, `b` opens URLs from its notes. Fully
 integrates with the Omarchy theming system and live-reloads when the user
 switches themes. Goal: full CRUD on tasks and task lists.
 
@@ -53,9 +53,13 @@ Work directly on `main`; no feature branches.
   `wrap()` + `cursor_rc()` can place the real terminal cursor; `App::field`
   holds shelf focus. `App::creating` swaps the shelf for a title-only draft
   whose `Edit` has an empty `task_id`, so `commit_edit` POSTs instead of
-  PATCHing. Startup pushes kitty keyboard flags when the terminal
-  supports them, so Shift+Enter reaches the notes editor (Alt+Enter and Ctrl-J
-  are the fallbacks).
+  PATCHing. `b` extracts `http(s)` URLs from the selected task's notes
+  (`urls_in`) and opens a centered **Browse Link** overlay; `j`/`k` move,
+  Enter `spawn`s `open` / `xdg-open` for the selected URL and dismisses the
+  overlay, Shift+Enter opens every URL in the list then dismisses, Esc/`q`
+  close it. Startup pushes kitty
+  keyboard flags when the terminal supports them, so Shift+Enter reaches the
+  notes editor (Alt+Enter and Ctrl-J are the fallbacks).
 
 ## Omarchy theming facts (verified Sept 2026)
 - Active theme dir, current releases: `$XDG_STATE_HOME/omarchy/current`
