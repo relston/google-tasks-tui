@@ -121,18 +121,18 @@ routing application paths through the authentication module.
 
 Centralize OS integration and make failures visible.
 
-- [ ] a) Extract browser and clipboard operations from
+- [x] a) Extract browser and clipboard operations from
   [`src/tui.rs`](src/tui.rs) into a platform module returning typed results.
-- [ ] b) Reuse the platform browser opener for OAuth so macOS uses `open` and
+- [x] b) Reuse the platform browser opener for OAuth so macOS uses `open` and
   Linux uses `xdg-open`.
-- [ ] c) Add S256 PKCE to the installed-app OAuth flow.
-- [ ] d) Add bounded reads and timeouts to the loopback callback listener.
-- [ ] e) Replace `/dev/urandom` with an OS-backed random source.
-- [ ] f) Select clipboard helpers by platform. Distinguish a confirmed helper
+- [x] c) Add S256 PKCE to the installed-app OAuth flow.
+- [x] d) Add bounded reads and timeouts to the loopback callback listener.
+- [x] e) Replace `/dev/urandom` with an OS-backed random source.
+- [x] f) Select clipboard helpers by platform. Distinguish a confirmed helper
   copy from an unacknowledged OSC 52 sequence in the status message.
-- [ ] g) Keep the Browse overlay open and show an error when opening a URL
+- [x] g) Keep the Browse overlay open and show an error when opening a URL
   fails.
-- [ ] h) Either conditionally support non-Unix platforms or state the
+- [x] h) Either conditionally support non-Unix platforms or state the
   supported operating systems explicitly.
 
 ## Phase 7: Correct terminal layout and rendering

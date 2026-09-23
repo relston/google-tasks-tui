@@ -11,14 +11,14 @@ use std::{
     io::{BufRead, BufReader, Read, Write},
     net::TcpListener,
     path::PathBuf,
-    process::{Command, Stdio},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    thread,
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::{paths::Paths, storage};
+use crate::{paths::Paths, platform, storage};
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
@@ -267,28 +267,44 @@ fn now() -> u64 {
 /// port, and trade the code for tokens.
 fn authorize(agent: &ureq::Agent, c: &ClientSecret) -> Result<Cached> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
+    listener.set_nonblocking(true)?;
     let redirect = format!("http://127.0.0.1:{}", listener.local_addr()?.port());
-    let state = random_hex()?;
+    let state = random_urlsafe(16)?;
+    let verifier = random_urlsafe(32)?;
+    let challenge = pkce_challenge(&verifier);
     let url = format!(
-        "{}?client_id={}&redirect_uri={}&response_type=code&scope={}&access_type=offline&prompt=consent&state={}",
+        "{}?client_id={}&redirect_uri={}&response_type=code&scope={}&access_type=offline&prompt=consent&state={}&code_challenge={}&code_challenge_method=S256",
         c.auth_uri,
         pct(&c.client_id),
         pct(&redirect),
         pct(SCOPE),
         state,
+        challenge,
     );
     eprintln!("Authorize Google Tasks access in your browser. If it doesn't open, visit:\n\n  {url}\n");
-    let _ = Command::new("xdg-open")
-        .arg(&url)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn();
+    if let Err(error) = platform::open_url(&url) {
+        eprintln!("Could not open the browser: {error}");
+    }
 
     // Browsers may open speculative connections; wait for the real redirect.
+    let deadline = Instant::now() + Duration::from_secs(300);
     let params = loop {
-        let (mut stream, _) = listener.accept()?;
+        let (mut stream, _) = match listener.accept() {
+            Ok(connection) => connection,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                if Instant::now() >= deadline {
+                    return Err("authorization timed out after 5 minutes".into());
+                }
+                thread::sleep(Duration::from_millis(50));
+                continue;
+            }
+            Err(error) => return Err(error.into()),
+        };
+        stream.set_read_timeout(Some(Duration::from_secs(5)))?;
         let mut line = String::new();
-        BufReader::new(&stream).read_line(&mut line)?;
+        BufReader::new(&stream)
+            .take(8192)
+            .read_line(&mut line)?;
         let query = line
             .split_whitespace()
             .nth(1)
@@ -330,6 +346,7 @@ fn authorize(agent: &ureq::Agent, c: &ClientSecret) -> Result<Cached> {
             ("client_secret", c.client_secret.as_str()),
             ("redirect_uri", redirect.as_str()),
             ("grant_type", "authorization_code"),
+            ("code_verifier", verifier.as_str()),
         ])?
         .body_mut()
         .read_json()?;
@@ -341,10 +358,34 @@ fn authorize(agent: &ureq::Agent, c: &ClientSecret) -> Result<Cached> {
     })
 }
 
-fn random_hex() -> Result<String> {
-    let mut buf = [0u8; 16];
-    fs::File::open("/dev/urandom")?.read_exact(&mut buf)?;
-    Ok(buf.iter().map(|b| format!("{b:02x}")).collect())
+fn random_urlsafe(bytes: usize) -> Result<String> {
+    let mut data = vec![0; bytes];
+    getrandom::getrandom(&mut data)
+        .map_err(|error| format!("OS random source failed: {error}"))?;
+    Ok(base64_url(&data))
+}
+
+fn pkce_challenge(verifier: &str) -> String {
+    base64_url(&Sha256::digest(verifier.as_bytes()))
+}
+
+fn base64_url(data: &[u8]) -> String {
+    const SET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for chunk in data.chunks(3) {
+        let bytes = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
+        let value =
+            u32::from(bytes[0]) << 16 | u32::from(bytes[1]) << 8 | u32::from(bytes[2]);
+        let count = chunk.len() + 1;
+        for index in 0..count {
+            out.push(SET[(value >> (18 - index * 6)) as usize & 63] as char);
+        }
+    }
+    out
 }
 
 pub fn pct(s: &str) -> String {
@@ -401,6 +442,15 @@ mod tests {
         let s = "4/0Ab_c+d e/f?g=h&é";
         assert_eq!(decode(&pct(s)), s);
         assert_eq!(decode("a+b%2Fc%"), "a b/c%");
+    }
+
+    #[test]
+    fn pkce_matches_the_rfc_7636_vector() {
+        let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+        assert_eq!(
+            pkce_challenge(verifier),
+            "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
+        );
     }
 
     #[test]

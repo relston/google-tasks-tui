@@ -490,6 +490,7 @@ dependencies = [
  "chrono",
  "clap",
  "fs2",
+ "getrandom",
  "ratatui",
  "serde",
  "serde_json",

@@ -1,7 +1,6 @@
 use std::{
     borrow::Cow,
-    io::{self, Write},
-    process::{Command, Stdio},
+    io,
     sync::mpsc::{self, Receiver, Sender, TryRecvError},
     thread,
     time::{Duration, Instant},
@@ -36,6 +35,7 @@ use crate::board::ordered as order;
 use crate::cache;
 use crate::config::{self, Config};
 use crate::paths::Paths;
+use crate::platform::{self, Clipboard};
 use crate::theme::{self, Theme};
 
 const THEME_POLL: Duration = Duration::from_millis(500);
@@ -1270,12 +1270,19 @@ impl App {
         // The same control characters that would wreck a row would paste badly.
         let md = clean(&crate::cli::md_yank(&row.task)).into_owned();
         let title = title_of(&row.task).into_owned();
-        if copy(&md) {
-            self.error = None;
-            self.notice = Some(format!("copied \"{title}\" as markdown"));
-        } else {
-            self.notice = None;
-            self.error = Some("no clipboard: install wl-copy, xclip or xsel".into());
+        match platform::copy(&md) {
+            Ok(Clipboard::Confirmed) => {
+                self.error = None;
+                self.notice = Some(format!("copied \"{title}\" as markdown"));
+            }
+            Ok(Clipboard::SequenceSent) => {
+                self.error = None;
+                self.notice = Some(format!("sent \"{title}\" to the terminal clipboard"));
+            }
+            Err(error) => {
+                self.notice = None;
+                self.error = Some(format!("clipboard failed: {error}"));
+            }
         }
     }
 
@@ -1312,7 +1319,10 @@ impl App {
             }
         };
         for url in &urls {
-            open_url(url);
+            if let Err(error) = platform::open_url(url) {
+                self.error = Some(format!("could not open {url}: {error}"));
+                return;
+            }
         }
         self.interaction = Interaction::Idle;
     }
@@ -2112,73 +2122,6 @@ fn urls_in(notes: &str) -> Vec<String> {
         i += scheme.len() + end;
     }
     out
-}
-
-/// Helpers that take the text on stdin. Each of these either exits or detaches
-/// once it has read the selection, so waiting on one does not stall the UI.
-const CLIPBOARD: &[(&str, &[&str])] = &[
-    ("wl-copy", &[]),
-    ("xclip", &["-selection", "clipboard"]),
-    ("xsel", &["--clipboard", "--input"]),
-    ("pbcopy", &[]),
-];
-
-/// Put `text` on the system clipboard. Falls back to OSC 52, which asks the
-/// terminal itself, so a yank still works over SSH or with no helper installed.
-fn copy(text: &str) -> bool {
-    for (bin, args) in CLIPBOARD {
-        let Ok(mut child) = Command::new(bin)
-            .args(*args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-        else {
-            continue;
-        };
-        // Dropping the pipe closes stdin, which is what tells them to finish.
-        let wrote = child
-            .stdin
-            .take()
-            .is_some_and(|mut pipe| pipe.write_all(text.as_bytes()).is_ok());
-        let ok = child.wait().is_ok_and(|s| s.success());
-        if wrote && ok {
-            return true;
-        }
-    }
-    let mut out = io::stdout();
-    write!(out, "\x1b]52;c;{}\x07", base64(text.as_bytes()))
-        .and_then(|()| out.flush())
-        .is_ok()
-}
-
-/// Standard base64, for the OSC 52 payload.
-fn base64(data: &[u8]) -> String {
-    const SET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
-    for chunk in data.chunks(3) {
-        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
-        let n = u32::from(b[0]) << 16 | u32::from(b[1]) << 8 | u32::from(b[2]);
-        for i in 0..4 {
-            match i <= chunk.len() {
-                true => out.push(SET[(n >> (18 - i * 6)) as usize & 63] as char),
-                false => out.push('='),
-            }
-        }
-    }
-    out
-}
-
-fn open_url(url: &str) {
-    #[cfg(target_os = "macos")]
-    let bin = "open";
-    #[cfg(not(target_os = "macos"))]
-    let bin = "xdg-open";
-    let _ = Command::new(bin)
-        .arg(url)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn();
 }
 
 /// Greedy word wrap. Returns the byte range of each display line, so the
@@ -3250,24 +3193,6 @@ mod tests {
         for raw in ["print \r and", "a\u{7}b\u{1b}c", "\r\n\r\n", "héllo\rwörld"] {
             assert_eq!(clean(raw).len(), raw.len(), "{raw:?}");
         }
-    }
-
-    #[test]
-    fn base64_matches_the_rfc_vectors() {
-        for (raw, want) in [
-            ("", ""),
-            ("f", "Zg=="),
-            ("fo", "Zm8="),
-            ("foo", "Zm9v"),
-            ("foob", "Zm9vYg=="),
-            ("fooba", "Zm9vYmE="),
-            ("foobar", "Zm9vYmFy"),
-        ] {
-            assert_eq!(base64(raw.as_bytes()), want, "{raw:?}");
-        }
-        // Bytes above ASCII and a NUL round-trip through the same table.
-        assert_eq!(base64("héllo".as_bytes()), "aMOpbGxv");
-        assert_eq!(base64(&[0, 0, 0]), "AAAA");
     }
 
     #[test]

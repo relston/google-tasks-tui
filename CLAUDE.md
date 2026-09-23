@@ -35,6 +35,9 @@ Work directly on `main`; no feature branches.
   inject a temporary `Paths` without mutating process-wide environment.
 - `src/storage.rs` — exclusive file locking plus unique same-directory atomic
   writes with `0600`, file/directory sync, and rename.
+- `src/platform.rs` — typed macOS/Linux URL opening and clipboard integration.
+  Clipboard helpers are platform-specific; OSC 52 is reported as sent rather
+  than confirmed.
 - `src/config.rs` — user settings at `<config dir>/config.toml`. `load()`
   writes `TEMPLATE` only on `NotFound`. Parse, read, and write errors fall back
   safely but return a visible warning; unknown fields are rejected.
@@ -50,7 +53,9 @@ Work directly on `main`; no feature branches.
   instead of retrying it forever. Token writes are atomic and errors propagate;
   the cache records and validates the OAuth client ID. `Auth::fingerprint`
   scopes the board cache without storing token material. The shared ureq agent
-  bounds connect, send, response, body, and whole-call time.
+  bounds connect, send, response, body, and whole-call time. Authorization uses
+  S256 PKCE, OS randomness, the shared platform opener, a five-minute callback
+  deadline, five-second request reads, and an 8 KiB request-line cap.
 - `src/cache.rs` — a versioned, account-scoped board preview. Locked
   generation checks reject stale cross-process writers; `Board::from_cache`
   paints before any network call and `Board::snapshot` is its data payload.
@@ -119,7 +124,8 @@ Work directly on `main`; no feature branches.
   as a title, then `urls_in` over the notes, deduped by URL — and `b` opens a
   centered **Browse Link** overlay showing each title with its URL beneath
   (`ellipsize` trims to the overlay width); `j`/`k` move, Enter `spawn`s
-  `open` / `xdg-open` for the selected URL and dismisses the overlay,
+  `open` / `xdg-open` for the selected URL and dismisses the overlay only when
+  launch succeeds,
   Shift+Enter opens every URL in the list then dismisses, Esc/`q` close it. It
   renders `Clear` first, since a `Block` restyles the cells under it but
   leaves their text (`draw_move` and `draw_help` still have that bleed-

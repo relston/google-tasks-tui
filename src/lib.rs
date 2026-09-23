@@ -4,6 +4,7 @@ pub mod board;
 pub mod cache;
 pub mod config;
 pub mod paths;
+pub mod platform;
 pub mod storage;
 pub mod cli;
 pub mod theme;

@@ -47,10 +47,10 @@ available as subcommands for scripts and agents (`google-tasks-tui lists`,
   links Google hung off the task, such as the Gmail thread it was made from. No
   id, status or parent; those identify a task to the API and mean nothing in a
   note, and `google-tasks-tui get` is still there when you want them. No link
-  back to the task itself either. The status bar confirms in green until your next
-  keypress. It uses `wl-copy`, `xclip`, `xsel` or `pbcopy`, whichever it finds
-  first, and falls back to the terminal's own OSC 52 clipboard so a yank still
-  works over SSH.
+  back to the task itself either. The status bar confirms in green until your
+  next keypress. macOS uses `pbcopy`; Linux tries `wl-copy`, `xclip`, then
+  `xsel`. The OSC 52 fallback works over supported terminals and is reported as
+  “sent” because terminals do not acknowledge whether they accepted it.
 
   ```markdown
   # Check In For Yearly Checkup
@@ -145,7 +145,9 @@ changes need a restart.
 
 ## Install and run
 
-Requires a recent stable Rust toolchain.
+Supports macOS and Linux and requires a recent stable Rust toolchain. Windows
+is not currently supported because private file permissions and platform
+launch/clipboard integration use Unix APIs.
 
 ```sh
 cargo run --release
@@ -273,6 +275,7 @@ src/
 ├── cache.rs   # board snapshot on disk for instant startup
 ├── config.rs  # config.toml: defaults, first-run bootstrap, parsing
 ├── paths.rs   # injectable credential/config paths
+├── platform.rs # macOS/Linux browser and clipboard effects
 ├── storage.rs # locking and secure atomic writes
 ├── auth.rs    # OAuth: client secret, token cache, refresh, loopback sign-in
 └── theme.rs   # theme discovery, colors.toml parsing, role mapping, fingerprint
