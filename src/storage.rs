@@ -91,7 +91,10 @@ mod tests {
         atomic_private_write(&path, b"two").unwrap();
 
         assert_eq!(fs::read(&path).unwrap(), b"two");
-        assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
         assert_eq!(
             fs::read_dir(&root)
                 .unwrap()

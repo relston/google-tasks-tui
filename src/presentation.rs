@@ -158,14 +158,10 @@ pub fn urls_in(notes: &str) -> Vec<String> {
 
 fn trim_url_punctuation(mut value: &str) -> &str {
     value = value.trim_end_matches(['.', ',', ';', ':', '!', '?']);
-    while value.ends_with(')')
-        && value.matches(')').count() > value.matches('(').count()
-    {
+    while value.ends_with(')') && value.matches(')').count() > value.matches('(').count() {
         value = &value[..value.len() - 1];
     }
-    while value.ends_with(']')
-        && value.matches(']').count() > value.matches('[').count()
-    {
+    while value.ends_with(']') && value.matches(']').count() > value.matches('[').count() {
         value = &value[..value.len() - 1];
     }
     value
@@ -202,8 +198,7 @@ fn markdown_text(value: &str) -> String {
     for character in value.chars() {
         if matches!(
             character,
-            '\\' | '`' | '*' | '_' | '[' | ']' | '<' | '>' | '#'
-                | '+' | '-' | '!' | '|'
+            '\\' | '`' | '*' | '_' | '[' | ']' | '<' | '>' | '#' | '+' | '-' | '!' | '|'
         ) {
             output.push('\\');
         }

@@ -8,6 +8,21 @@ use std::{collections::HashMap, env, fs, path::PathBuf, time::SystemTime};
 
 use ratatui::style::Color;
 
+struct Roots {
+    home: PathBuf,
+    state: PathBuf,
+}
+
+impl Roots {
+    fn from_env() -> Option<Self> {
+        let home = PathBuf::from(env::var_os("HOME")?);
+        let state = env::var_os("XDG_STATE_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join(".local/state"));
+        Some(Self { home, state })
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Theme {
     pub name: String,
@@ -46,18 +61,17 @@ impl Default for Theme {
 
 /// The directory Omarchy points at the active theme. Prefers the XDG state
 /// location used by current releases, falling back to the legacy config path.
-fn current_dir() -> Option<PathBuf> {
-    let home = PathBuf::from(env::var_os("HOME")?);
-    let state = env::var_os("XDG_STATE_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home.join(".local/state"));
-    [state.join("omarchy/current"), home.join(".config/omarchy/current")]
-        .into_iter()
-        .find(|p| p.exists())
+fn current_dir(roots: &Roots) -> Option<PathBuf> {
+    [
+        roots.state.join("omarchy/current"),
+        roots.home.join(".config/omarchy/current"),
+    ]
+    .into_iter()
+    .find(|p| p.exists())
 }
 
-fn colors_path() -> Option<PathBuf> {
-    Some(current_dir()?.join("theme/colors.toml"))
+fn colors_path(roots: &Roots) -> Option<PathBuf> {
+    Some(current_dir(roots)?.join("theme/colors.toml"))
 }
 
 /// Cheap change fingerprint: the theme symlink's target plus the palette's
@@ -65,11 +79,15 @@ fn colors_path() -> Option<PathBuf> {
 pub type Fingerprint = Option<(Option<PathBuf>, Option<SystemTime>)>;
 
 pub fn fingerprint() -> Fingerprint {
-    let dir = current_dir()?;
+    fingerprint_with(&Roots::from_env()?)
+}
+
+fn fingerprint_with(roots: &Roots) -> Fingerprint {
+    let dir = current_dir(roots)?;
     let link = fs::read_link(dir.join("theme"))
         .or_else(|_| fs::read_link(&dir))
         .ok();
-    let mtime = colors_path()
+    let mtime = colors_path(roots)
         .and_then(|p| fs::metadata(p).ok())
         .and_then(|m| m.modified().ok());
     Some((link, mtime))
@@ -85,11 +103,13 @@ fn hex(s: &str) -> Option<Color> {
 }
 
 pub fn load() -> Theme {
-    try_load().unwrap_or_default()
+    Roots::from_env()
+        .and_then(|roots| try_load(&roots))
+        .unwrap_or_default()
 }
 
-fn try_load() -> Option<Theme> {
-    let raw = fs::read_to_string(colors_path()?).ok()?;
+fn try_load(roots: &Roots) -> Option<Theme> {
+    let raw = fs::read_to_string(colors_path(roots)?).ok()?;
     let table: toml::Table = raw.parse().ok()?;
     let map: HashMap<&str, Color> = table
         .iter()
@@ -98,20 +118,22 @@ fn try_load() -> Option<Theme> {
 
     // First key present wins: canonical name, then legacy name, then default.
     let pick = |keys: &[&str], default: Color| {
-        keys.iter().find_map(|k| map.get(k).copied()).unwrap_or(default)
+        keys.iter()
+            .find_map(|k| map.get(k).copied())
+            .unwrap_or(default)
     };
 
     let d = Theme::default();
     let bg = pick(&["background", "color0"], d.bg);
     let fg = pick(&["foreground", "color7"], d.fg);
-    let name = fingerprint()
+    let name = fingerprint_with(roots)
         .and_then(|(link, _)| link)
         .and_then(|p| {
             // `.../themes/<name>` or `.../themes/<name>/...`
             p.components()
                 .skip_while(|c| c.as_os_str() != "themes")
                 .nth(1)
-                .or_else(|| p.components().last())
+                .or_else(|| p.components().next_back())
                 .map(|c| c.as_os_str().to_string_lossy().into_owned())
         })
         .unwrap_or_else(|| "omarchy".into());
@@ -124,7 +146,10 @@ fn try_load() -> Option<Theme> {
         accent: pick(&["accent", "color4"], d.accent),
         muted: pick(&["muted", "dark_foreground", "color8"], d.muted),
         sel_bg: pick(&["selection", "selection_background"], d.sel_bg),
-        sel_fg: pick(&["selection_foreground", "bright_foreground", "foreground"], fg),
+        sel_fg: pick(
+            &["selection_foreground", "bright_foreground", "foreground"],
+            fg,
+        ),
         red: pick(&["red", "color1"], d.red),
         green: pick(&["green", "color2"], d.green),
         yellow: pick(&["yellow", "color3"], d.yellow),
@@ -138,7 +163,11 @@ mod tests {
 
     #[test]
     fn loads_named_and_legacy_keys() {
-        let root = env::temp_dir().join(format!("google-tasks-tui-test-{}", std::process::id()));
+        let root = env::temp_dir().join(format!(
+            "google-tasks-tui-test-{}-{:?}",
+            std::process::id(),
+            SystemTime::now()
+        ));
         let theme_dir = root.join("state/omarchy/themes/nord");
         fs::create_dir_all(&theme_dir).unwrap();
         fs::create_dir_all(root.join("state/omarchy/current")).unwrap();
@@ -148,10 +177,11 @@ mod tests {
             "accent = \"#81a1c1\"\nbackground = \"#2e3440\"\nforeground = \"#d8dee9\"\nred = \"#bf616a\"\ncolor2 = \"#a3be8c\"\n",
         )
         .unwrap();
-        env::set_var("HOME", root.join("home"));
-        env::set_var("XDG_STATE_HOME", root.join("state"));
-
-        let t = load();
+        let t = try_load(&Roots {
+            home: root.join("home"),
+            state: root.join("state"),
+        })
+        .unwrap();
         assert_eq!(t.name, "nord");
         assert_eq!(t.accent, Color::Rgb(0x81, 0xa1, 0xc1));
         assert_eq!(t.red, Color::Rgb(0xbf, 0x61, 0x6a)); // named key

@@ -2,12 +2,12 @@ pub mod api;
 pub mod auth;
 pub mod board;
 pub mod cache;
+pub mod cli;
 pub mod config;
 pub mod paths;
 pub mod platform;
 pub mod presentation;
 pub mod storage;
-pub mod cli;
 pub mod theme;
 pub mod tui;
 

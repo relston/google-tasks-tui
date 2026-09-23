@@ -74,8 +74,7 @@ fn base64(data: &[u8]) -> String {
             *chunk.get(1).unwrap_or(&0),
             *chunk.get(2).unwrap_or(&0),
         ];
-        let value =
-            u32::from(bytes[0]) << 16 | u32::from(bytes[1]) << 8 | u32::from(bytes[2]);
+        let value = u32::from(bytes[0]) << 16 | u32::from(bytes[1]) << 8 | u32::from(bytes[2]);
         for index in 0..4 {
             if index <= chunk.len() {
                 out.push(SET[(value >> (18 - index * 6)) as usize & 63] as char);

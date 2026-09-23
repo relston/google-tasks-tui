@@ -104,6 +104,31 @@ pub struct Auth {
 }
 
 impl Auth {
+    #[cfg(test)]
+    pub(crate) fn for_test(
+        agent: ureq::Agent,
+        token_uri: String,
+        token_path: PathBuf,
+        access_token: &str,
+    ) -> Self {
+        Self {
+            client: ClientSecret {
+                client_id: "test-client".into(),
+                client_secret: "test-secret".into(),
+                auth_uri: String::new(),
+                token_uri,
+            },
+            tok: Cached {
+                client_id: "test-client".into(),
+                refresh_token: "test-refresh".into(),
+                access_token: access_token.into(),
+                expires_at: u64::MAX,
+            },
+            agent,
+            token_path,
+        }
+    }
+
     /// Load credentials and make sure we hold a working token. May open a
     /// browser, so call this before the TUI takes over the terminal.
     pub fn new() -> Result<Self> {
@@ -136,10 +161,10 @@ impl Auth {
             Some(mut tok) => {
                 tok.client_id = client.client_id.clone();
                 Self {
-                client,
-                tok,
-                agent,
-                token_path,
+                    client,
+                    tok,
+                    agent,
+                    token_path,
                 }
             }
             None => {
@@ -221,7 +246,10 @@ impl Auth {
         hash.update(self.client.client_id.as_bytes());
         hash.update([0]);
         hash.update(self.tok.refresh_token.as_bytes());
-        hash.finalize().iter().map(|byte| format!("{byte:02x}")).collect()
+        hash.finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
     }
 
     fn save(&self) -> Result<()> {
@@ -260,7 +288,9 @@ fn borrow_existing(credentials: &std::path::Path, client_id: &str) -> Option<Str
 }
 
 fn now() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs())
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
 }
 
 /// Loopback OAuth flow: open the consent page, catch the redirect on a local
@@ -281,7 +311,9 @@ fn authorize(agent: &ureq::Agent, c: &ClientSecret) -> Result<Cached> {
         state,
         challenge,
     );
-    eprintln!("Authorize Google Tasks access in your browser. If it doesn't open, visit:\n\n  {url}\n");
+    eprintln!(
+        "Authorize Google Tasks access in your browser. If it doesn't open, visit:\n\n  {url}\n"
+    );
     if let Err(error) = platform::open_url(&url) {
         eprintln!("Could not open the browser: {error}");
     }
@@ -302,9 +334,7 @@ fn authorize(agent: &ureq::Agent, c: &ClientSecret) -> Result<Cached> {
         };
         stream.set_read_timeout(Some(Duration::from_secs(5)))?;
         let mut line = String::new();
-        BufReader::new(&stream)
-            .take(8192)
-            .read_line(&mut line)?;
+        BufReader::new(&stream).take(8192).read_line(&mut line)?;
         let query = line
             .split_whitespace()
             .nth(1)
@@ -316,7 +346,9 @@ fn authorize(agent: &ureq::Agent, c: &ClientSecret) -> Result<Cached> {
             .map(|(k, v)| (k.to_string(), decode(v)))
             .collect();
         if params.get("state") != Some(&state) {
-            let _ = stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            let _ = stream.write_all(
+                b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            );
             continue;
         }
         let body = if params.contains_key("code") {
@@ -335,7 +367,9 @@ fn authorize(agent: &ureq::Agent, c: &ClientSecret) -> Result<Cached> {
     let code = params.get("code").ok_or_else(|| {
         format!(
             "authorization failed: {}",
-            params.get("error").map_or("no code returned", String::as_str)
+            params
+                .get("error")
+                .map_or("no code returned", String::as_str)
         )
     })?;
     let r: TokenResponse = agent
@@ -360,8 +394,7 @@ fn authorize(agent: &ureq::Agent, c: &ClientSecret) -> Result<Cached> {
 
 fn random_urlsafe(bytes: usize) -> Result<String> {
     let mut data = vec![0; bytes];
-    getrandom::getrandom(&mut data)
-        .map_err(|error| format!("OS random source failed: {error}"))?;
+    getrandom::getrandom(&mut data).map_err(|error| format!("OS random source failed: {error}"))?;
     Ok(base64_url(&data))
 }
 
@@ -378,8 +411,7 @@ fn base64_url(data: &[u8]) -> String {
             *chunk.get(1).unwrap_or(&0),
             *chunk.get(2).unwrap_or(&0),
         ];
-        let value =
-            u32::from(bytes[0]) << 16 | u32::from(bytes[1]) << 8 | u32::from(bytes[2]);
+        let value = u32::from(bytes[0]) << 16 | u32::from(bytes[1]) << 8 | u32::from(bytes[2]);
         let count = chunk.len() + 1;
         for index in 0..count {
             out.push(SET[(value >> (18 - index * 6)) as usize & 63] as char);
@@ -391,7 +423,9 @@ fn base64_url(data: &[u8]) -> String {
 pub fn pct(s: &str) -> String {
     s.bytes()
         .map(|b| match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => (b as char).to_string(),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (b as char).to_string()
+            }
             _ => format!("%{b:02X}"),
         })
         .collect()
@@ -428,6 +462,7 @@ fn decode(s: &str) -> String {
 mod tests {
     use super::*;
     use std::env;
+    use std::os::unix::fs::PermissionsExt;
 
     fn test_root(label: &str) -> PathBuf {
         let nonce = SystemTime::now()
@@ -525,6 +560,67 @@ mod tests {
         .unwrap();
 
         assert!(Auth::cached_with_paths(&paths).is_none());
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn malformed_cached_tokens_are_rejected() {
+        let root = test_root("malformed");
+        fs::create_dir_all(&root).unwrap();
+        let paths = Paths {
+            credentials: root.join("credentials.json"),
+            config_dir: root.join("config"),
+        };
+        fs::write(
+            &paths.credentials,
+            r#"{"installed":{"client_id":"right","client_secret":"secret","auth_uri":"https://auth","token_uri":"https://token"}}"#,
+        )
+        .unwrap();
+        fs::create_dir_all(&paths.config_dir).unwrap();
+        fs::write(paths.token(), "{not json").unwrap();
+
+        assert!(Auth::cached_with_paths(&paths).is_none());
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn token_saves_are_atomic_private_and_report_failures() {
+        let root = test_root("save");
+        let token_path = root.join("config/token.json");
+        let auth = Auth::for_test(
+            http_agent(),
+            "https://token.invalid".into(),
+            token_path.clone(),
+            "access",
+        );
+
+        auth.save().unwrap();
+        auth.save().unwrap();
+        assert_eq!(
+            fs::metadata(&token_path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let saved: Cached = serde_json::from_slice(&fs::read(&token_path).unwrap()).unwrap();
+        assert_eq!(saved.client_id, "test-client");
+        assert_eq!(saved.refresh_token, "test-refresh");
+        assert_eq!(
+            fs::read_dir(token_path.parent().unwrap())
+                .unwrap()
+                .filter_map(std::result::Result::ok)
+                .filter(|entry| entry.file_name().to_string_lossy().ends_with(".tmp"))
+                .count(),
+            0
+        );
+
+        let blocked = root.join("blocked");
+        fs::write(&blocked, "not a directory").unwrap();
+        let auth = Auth::for_test(
+            http_agent(),
+            "https://token.invalid".into(),
+            blocked.join("token.json"),
+            "access",
+        );
+        assert!(auth.save().is_err());
         fs::remove_dir_all(root).ok();
     }
 }

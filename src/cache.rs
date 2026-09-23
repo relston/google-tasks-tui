@@ -100,11 +100,7 @@ pub fn load_for(paths: &Paths, account: &str) -> io::Result<(Cache, Meta)> {
     ))
 }
 
-pub fn save_for(
-    paths: &Paths,
-    cache: &Cache,
-    meta: &mut Meta,
-) -> Result<(), SaveError> {
+pub fn save_for(paths: &Paths, cache: &Cache, meta: &mut Meta) -> Result<(), SaveError> {
     let path = paths.cache();
     storage::with_exclusive_lock(&path, || {
         if let Ok(raw) = fs::read_to_string(&path) {
@@ -131,9 +127,7 @@ pub fn save_for(
         Ok(())
     })
     .map_err(|error| {
-        if error.kind() == io::ErrorKind::AlreadyExists
-            && error.to_string() == "stale cache"
-        {
+        if error.kind() == io::ErrorKind::AlreadyExists && error.to_string() == "stale cache" {
             SaveError::Stale
         } else {
             SaveError::Io(error)
@@ -159,6 +153,9 @@ pub fn save(cache: &Cache) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::{Arc, Barrier};
+    use std::thread;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn paths(label: &str) -> Paths {
@@ -199,6 +196,104 @@ mod tests {
         assert!(other.lists.is_empty());
         assert_eq!(meta.account, "account-b");
         assert_eq!(meta.generation, 0);
+        fs::remove_dir_all(paths.config_dir).ok();
+    }
+
+    #[test]
+    fn cache_writes_are_atomic_private_and_malformed_files_are_reported() {
+        let paths = paths("atomic");
+        let mut meta = Meta {
+            account: "account".into(),
+            generation: 0,
+        };
+        let cache = Cache {
+            lists: vec![CachedList {
+                list: TaskList {
+                    id: "list".into(),
+                    title: "Inbox".into(),
+                    ..Default::default()
+                },
+                tasks: vec![Task {
+                    id: "task".into(),
+                    title: "First".into(),
+                    ..Default::default()
+                }],
+            }],
+        };
+
+        save_for(&paths, &cache, &mut meta).unwrap();
+        assert_eq!(
+            fs::metadata(paths.cache()).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            fs::read_dir(&paths.config_dir)
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|entry| entry.file_name().to_string_lossy().ends_with(".tmp"))
+                .count(),
+            0
+        );
+
+        fs::write(paths.cache(), "{not json").unwrap();
+        let error = match load_for(&paths, "account") {
+            Ok(_) => panic!("malformed cache was accepted"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        fs::remove_dir_all(paths.config_dir).ok();
+    }
+
+    #[test]
+    fn cache_save_failures_are_returned() {
+        let paths = paths("failure");
+        fs::write(&paths.config_dir, "not a directory").unwrap();
+        let mut meta = Meta {
+            account: "account".into(),
+            generation: 0,
+        };
+
+        assert!(matches!(
+            save_for(&paths, &Cache::default(), &mut meta),
+            Err(SaveError::Io(_))
+        ));
+        fs::remove_file(paths.config_dir).ok();
+    }
+
+    #[test]
+    fn concurrent_writers_are_serialized_and_one_stale_writer_loses() {
+        let paths = paths("concurrent");
+        let barrier = Arc::new(Barrier::new(3));
+        let writers: Vec<_> = (0..2)
+            .map(|_| {
+                let paths = paths.clone();
+                let barrier = barrier.clone();
+                thread::spawn(move || {
+                    let mut meta = Meta {
+                        account: "account".into(),
+                        generation: 0,
+                    };
+                    barrier.wait();
+                    save_for(&paths, &Cache::default(), &mut meta)
+                })
+            })
+            .collect();
+        barrier.wait();
+        let results: Vec<_> = writers
+            .into_iter()
+            .map(|writer| writer.join().unwrap())
+            .collect();
+
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| matches!(result, Err(SaveError::Stale)))
+                .count(),
+            1
+        );
+        let (_, meta) = load_for(&paths, "account").unwrap();
+        assert_eq!(meta.generation, 1);
         fs::remove_dir_all(paths.config_dir).ok();
     }
 }

@@ -313,15 +313,10 @@ cargo test
 falls back to `Alt+Enter` / `Ctrl-J` elsewhere — inside tmux, that fallback is
 what you'll use unless `extended-keys` is on.
 
-The test in `theme.rs` builds a fake Omarchy state directory under the system
-temp dir and points `HOME` / `XDG_STATE_HOME` at it, so it doesn't touch your
-real theme.
+Tests inject temporary configuration and theme roots; they do not change
+process-wide environment variables or touch your real files.
 
 ## Roadmap
 
-- Edit due dates; manage task lists in the TUI; move tasks between lists.
-- A `theme-set.d` hook (for example through an `--install-hook` flag) that
-  signals running instances for instant reload, with polling kept as a
-  fallback.
-- Light-mode tweaks when the theme sets `mode = "light"`.
-- Move to `toml` 1.x and the latest ratatui if MSRV allows.
+Deferred feature work and architecture history are tracked in
+[`ROADMAP.md`](ROADMAP.md).

@@ -183,3 +183,273 @@ pub(super) fn worker<A: TasksApi>(mut client: A, commands: Receiver<Cmd>, output
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::{Error, ListPatch, MoveTask, Result};
+    use std::sync::{mpsc, Arc, Mutex};
+
+    #[derive(Clone, Default)]
+    struct Fake {
+        calls: Arc<Mutex<Vec<String>>>,
+        fail_move: Option<String>,
+    }
+
+    impl Fake {
+        fn calls(&self) -> Vec<String> {
+            self.calls.lock().unwrap().clone()
+        }
+
+        fn record(&self, call: String) {
+            self.calls.lock().unwrap().push(call);
+        }
+    }
+
+    impl TasksApi for Fake {
+        fn account_fingerprint(&self) -> String {
+            "worker-test".into()
+        }
+
+        fn tasklists(&mut self) -> Result<Vec<TaskList>> {
+            self.record("tasklists".into());
+            Ok(vec![TaskList {
+                id: "list".into(),
+                ..Default::default()
+            }])
+        }
+
+        fn tasks(&mut self, list_id: &str) -> Result<Vec<Task>> {
+            self.record(format!("tasks:{list_id}"));
+            Ok(vec![Task {
+                id: format!("{list_id}-task"),
+                ..Default::default()
+            }])
+        }
+
+        fn patch(
+            &mut self,
+            list_id: &str,
+            task_id: &str,
+            _patch: &TaskPatch,
+            etag: Option<&str>,
+        ) -> Result<Task> {
+            self.record(format!("patch:{list_id}:{task_id}:{}", etag.unwrap_or("")));
+            Ok(Task {
+                id: task_id.into(),
+                ..Default::default()
+            })
+        }
+
+        fn create(
+            &mut self,
+            list_id: &str,
+            task: &CreateTask,
+            parent: Option<&str>,
+        ) -> Result<Task> {
+            self.record(format!(
+                "create:{list_id}:{}:{}",
+                task.title,
+                parent.unwrap_or("")
+            ));
+            Ok(Task {
+                id: "created".into(),
+                title: task.title.clone(),
+                ..Default::default()
+            })
+        }
+
+        fn delete(&mut self, list_id: &str, task_id: &str, etag: Option<&str>) -> Result<()> {
+            self.record(format!("delete:{list_id}:{task_id}:{}", etag.unwrap_or("")));
+            Ok(())
+        }
+
+        fn move_task(&mut self, list_id: &str, task_id: &str, movement: &MoveTask) -> Result<Task> {
+            self.record(format!(
+                "move:{list_id}:{task_id}:{}:{}:{}",
+                movement.destination_list,
+                movement.parent.as_deref().unwrap_or(""),
+                movement.previous.as_deref().unwrap_or("")
+            ));
+            if self.fail_move.as_deref() == Some(task_id) {
+                return Err(Error::Transport(format!("{task_id} failed")));
+            }
+            Ok(Task {
+                id: task_id.into(),
+                parent: movement.parent.clone(),
+                ..Default::default()
+            })
+        }
+
+        fn create_list(&mut self, title: &str) -> Result<TaskList> {
+            Ok(TaskList {
+                id: "created-list".into(),
+                title: title.into(),
+                ..Default::default()
+            })
+        }
+
+        fn patch_list(
+            &mut self,
+            list_id: &str,
+            patch: &ListPatch,
+            _etag: Option<&str>,
+        ) -> Result<TaskList> {
+            Ok(TaskList {
+                id: list_id.into(),
+                title: patch.title.clone(),
+                ..Default::default()
+            })
+        }
+
+        fn delete_list(&mut self, _list_id: &str) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    fn run_one(fake: Fake, command: Cmd) -> Msg {
+        let (commands, input) = mpsc::channel();
+        let (output, messages) = mpsc::channel();
+        commands.send(command).unwrap();
+        drop(commands);
+        worker(fake, input, output);
+        messages.recv().unwrap()
+    }
+
+    #[test]
+    fn move_executes_parent_then_ordered_children_and_preserves_context() {
+        let fake = Fake::default();
+        let message = run_one(
+            fake.clone(),
+            Cmd::Move {
+                operation: 42,
+                from: "source".into(),
+                to: "destination".into(),
+                ids: vec!["parent".into(), "first".into(), "second".into()],
+            },
+        );
+
+        assert_eq!(
+            fake.calls(),
+            [
+                "move:source:parent:destination::",
+                "move:source:first:destination:parent:",
+                "move:source:second:destination:parent:first",
+                "tasks:source",
+                "tasks:destination",
+            ]
+        );
+        let Msg::Moved {
+            operation,
+            from,
+            to,
+            ids,
+            result,
+        } = message
+        else {
+            panic!("expected move result");
+        };
+        assert_eq!(operation, 42);
+        assert_eq!(from, "source");
+        assert_eq!(to, "destination");
+        assert_eq!(ids, ["parent", "first", "second"]);
+        assert_eq!(result.moved.len(), 3);
+        assert!(result.failure.is_none());
+        assert!(result.source.is_ok());
+        assert!(result.destination.is_ok());
+    }
+
+    #[test]
+    fn partial_move_stops_at_failure_and_still_reconciles_both_lists() {
+        let fake = Fake {
+            fail_move: Some("first".into()),
+            ..Default::default()
+        };
+        let message = run_one(
+            fake.clone(),
+            Cmd::Move {
+                operation: 7,
+                from: "source".into(),
+                to: "destination".into(),
+                ids: vec!["parent".into(), "first".into(), "never".into()],
+            },
+        );
+
+        let Msg::Moved { result, .. } = message else {
+            panic!("expected move result");
+        };
+        assert_eq!(
+            result
+                .moved
+                .iter()
+                .map(|task| task.id.as_str())
+                .collect::<Vec<_>>(),
+            ["parent"]
+        );
+        let failure = result.failure.unwrap();
+        assert_eq!(failure.task_id, "first");
+        assert!(failure.error.contains("first failed"));
+        assert_eq!(
+            fake.calls(),
+            [
+                "move:source:parent:destination::",
+                "move:source:first:destination:parent:",
+                "tasks:source",
+                "tasks:destination",
+            ]
+        );
+    }
+
+    #[test]
+    fn mutation_responses_echo_operation_and_resource_context() {
+        let message = run_one(
+            Fake::default(),
+            Cmd::Patch {
+                operation: 99,
+                list_id: "list".into(),
+                task_id: "task".into(),
+                patch: TaskPatch {
+                    title: Some("changed".into()),
+                    ..Default::default()
+                },
+                etag: "\"v1\"".into(),
+            },
+        );
+
+        let Msg::Updated {
+            operation,
+            list_id,
+            task_id,
+            result,
+        } = message
+        else {
+            panic!("expected update result");
+        };
+        assert_eq!(
+            (operation, list_id.as_str(), task_id.as_str()),
+            (99, "list", "task")
+        );
+        assert_eq!(result.unwrap().id, "task");
+    }
+
+    #[test]
+    fn channel_closure_terminates_without_extra_api_work() {
+        let fake = Fake::default();
+        let (commands, input) = mpsc::channel();
+        let (output, messages) = mpsc::channel();
+        drop(messages);
+        commands.send(Cmd::Refresh(1)).unwrap();
+        commands.send(Cmd::Refresh(2)).unwrap();
+        drop(commands);
+
+        worker(fake.clone(), input, output);
+
+        assert_eq!(fake.calls(), ["tasklists"]);
+
+        let (commands, input) = mpsc::channel();
+        let (output, messages) = mpsc::channel();
+        drop(commands);
+        worker(Fake::default(), input, output);
+        assert!(messages.try_recv().is_err());
+    }
+}

@@ -127,14 +127,10 @@ impl Board {
         };
         let ids: Vec<String> = tasks
             .values()
-            .filter(|task| {
-                task.id == task_id || task.parent.as_deref() == Some(task_id)
-            })
+            .filter(|task| task.id == task_id || task.parent.as_deref() == Some(task_id))
             .map(|task| task.id.clone())
             .collect();
-        ids.into_iter()
-            .filter_map(|id| tasks.remove(&id))
-            .collect()
+        ids.into_iter().filter_map(|id| tasks.remove(&id)).collect()
     }
 
     pub fn restore(&mut self, list_id: &str, tasks: Vec<Task>) {
@@ -188,11 +184,12 @@ pub fn ordered(tasks: Vec<Task>) -> Vec<Row> {
             }
         })
     });
-    let ids: std::collections::HashSet<String> =
-        tasks.iter().map(|task| task.id.clone()).collect();
-    let (children, top): (Vec<Task>, Vec<Task>) = tasks
-        .into_iter()
-        .partition(|task| task.parent.as_ref().is_some_and(|parent| ids.contains(parent)));
+    let ids: std::collections::HashSet<String> = tasks.iter().map(|task| task.id.clone()).collect();
+    let (children, top): (Vec<Task>, Vec<Task>) = tasks.into_iter().partition(|task| {
+        task.parent
+            .as_ref()
+            .is_some_and(|parent| ids.contains(parent))
+    });
 
     let mut rows = Vec::with_capacity(top.len() + children.len());
     for task in top {
@@ -288,7 +285,9 @@ mod tests {
         assert_eq!(moved.len(), 2);
         assert!(board.task("from", "parent").is_none());
         assert_eq!(
-            board.task("to", "child").and_then(|task| task.parent.as_deref()),
+            board
+                .task("to", "child")
+                .and_then(|task| task.parent.as_deref()),
             Some("parent")
         );
 

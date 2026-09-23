@@ -200,22 +200,22 @@ service or repository layers that own no rule or external contract.
 Add tests around the boundaries that currently have no meaningful coverage,
 then make them required checks.
 
-- [ ] a) Add reducer tests for sync failures, mutation rollback, stale refresh
+- [x] a) Add reducer tests for sync failures, mutation rollback, stale refresh
   generations, delayed responses, draft recovery, and graceful shutdown.
-- [ ] b) Add worker tests for ordered moves, partial moves, operation context,
+- [x] b) Add worker tests for ordered moves, partial moves, operation context,
   and channel closure.
-- [ ] c) Add scripted HTTP tests for paths, query parameters, pagination,
+- [x] c) Add scripted HTTP tests for paths, query parameters, pagination,
   assigned tasks, encoding, token refresh, 401, 429, 5xx, timeouts, and
   malformed responses.
-- [ ] d) Add filesystem tests for atomic token/cache writes, permissions,
+- [x] d) Add filesystem tests for atomic token/cache writes, permissions,
   malformed files, account mismatch, save failures, and concurrent writers.
-- [ ] e) Add render tests for every modal, narrow terminals, metadata overflow,
+- [x] e) Add render tests for every modal, narrow terminals, metadata overflow,
   CJK, emoji, combining characters, and control characters during editing.
-- [ ] f) Stop tests from mutating process-wide environment variables without
+- [x] f) Stop tests from mutating process-wide environment variables without
   restoration or isolation.
-- [ ] g) Make `cargo fmt --check`, strict Clippy, and the complete test suite
+- [x] g) Make `cargo fmt --check`, strict Clippy, and the complete test suite
   required CI checks; fix the current formatting and lint failures.
-- [ ] h) Remove completed work from the roadmap in [`README.md`](README.md),
+- [x] h) Remove completed work from the roadmap in [`README.md`](README.md),
   link this document there, and reduce [`CLAUDE.md`](CLAUDE.md) to durable
   architecture and safety invariants.
 

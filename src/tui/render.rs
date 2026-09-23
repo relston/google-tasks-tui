@@ -757,9 +757,50 @@ mod render_tests {
     use crate::api::{Task, TaskList};
     use crate::cache;
     use crate::config::Config;
-    use crate::tui::app::{App, SyncState};
-    use ratatui::{backend::TestBackend, Terminal};
+    use crate::tui::app::{App, Browse, BrowseLink, Interaction, MovePick, SyncState};
+    use ratatui::{
+        backend::TestBackend,
+        crossterm::event::{KeyCode, KeyEvent, KeyModifiers},
+        widgets::ListState,
+        Terminal,
+    };
     use std::sync::mpsc;
+
+    fn render_app(app: &mut App, w: u16, h: u16) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..h)
+            .flat_map(|y| {
+                (0..w)
+                    .map(move |x| buffer[(x, y)].symbol())
+                    .chain(std::iter::once("\n"))
+            })
+            .collect()
+    }
+
+    fn one_list_app() -> App {
+        let (tx, _rx) = mpsc::channel();
+        App::new(
+            tx,
+            cache::Cache {
+                lists: vec![cache::CachedList {
+                    list: TaskList {
+                        id: "list".into(),
+                        title: "Underlying board".into(),
+                        ..Default::default()
+                    },
+                    tasks: vec![Task {
+                        id: "task".into(),
+                        title: "Underlying task".into(),
+                        status: "needsAction".into(),
+                        ..Default::default()
+                    }],
+                }],
+            },
+            Config::default(),
+        )
+    }
 
     /// Render a board of `(list title, task titles)` and return the screen.
     fn screen(w: u16, h: u16, lists: &[(&str, &[&str])], wrap_titles: bool) -> Vec<String> {
@@ -938,5 +979,75 @@ mod render_tests {
             })
             .collect();
         assert!(screen.contains("New task"), "{screen}");
+    }
+
+    #[test]
+    fn every_overlay_renders_on_a_cleared_bounded_surface() {
+        let mut browse = one_list_app();
+        browse.interaction = Interaction::Browse(Browse {
+            links: vec![BrowseLink {
+                name: Some("Example".into()),
+                url: "https://example.test".into(),
+            }],
+            state: ListState::default().with_selected(Some(0)),
+        });
+        let screen = render_app(&mut browse, 50, 14);
+        assert!(screen.contains("Browse Link"), "{screen}");
+        assert!(screen.contains("Example"), "{screen}");
+
+        let mut movement = one_list_app();
+        movement.interaction = Interaction::Move(MovePick {
+            lists: vec![TaskList {
+                id: "destination".into(),
+                title: "Destination".into(),
+                ..Default::default()
+            }],
+            state: ListState::default().with_selected(Some(0)),
+        });
+        let screen = render_app(&mut movement, 50, 14);
+        assert!(screen.contains("Move"), "{screen}");
+        assert!(screen.contains("Destination"), "{screen}");
+
+        let mut help = one_list_app();
+        help.interaction = Interaction::Help;
+        let screen = render_app(&mut help, 50, 20);
+        assert!(screen.contains("Keyboard"), "{screen}");
+        assert!(screen.contains("new task"), "{screen}");
+    }
+
+    #[test]
+    fn extremely_narrow_terminals_render_without_panics_or_out_of_bounds_rows() {
+        for (width, height) in [(1, 1), (2, 3), (8, 4), (12, 6)] {
+            let mut app = one_list_app();
+            let screen = render_app(&mut app, width, height);
+            assert_eq!(
+                screen.lines().count(),
+                usize::from(height),
+                "{width}x{height}: {screen:?}"
+            );
+            assert!(screen
+                .lines()
+                .all(|line| line.chars().count() <= width.into()));
+        }
+    }
+
+    #[test]
+    fn editing_renders_cjk_emoji_combining_text_and_sanitizes_controls() {
+        let mut app = one_list_app();
+        app.sync = SyncState::Ready;
+        app.start_create(false);
+        render_app(&mut app, 60, 10);
+        for character in "任务🙂e\u{301}\u{7}".chars() {
+            app.on_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
+        }
+
+        let screen = render_app(&mut app, 60, 10);
+
+        assert!(screen.contains('任') && screen.contains('务'), "{screen}");
+        assert!(screen.contains('🙂'), "{screen}");
+        assert!(screen.contains("e\u{301}"), "{screen}");
+        assert!(!screen
+            .chars()
+            .any(|character| { character.is_ascii_control() && character != '\n' }));
     }
 }
