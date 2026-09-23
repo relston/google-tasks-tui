@@ -45,11 +45,12 @@ Work directly on `main`; no feature branches.
   response, body, and whole-call time.
 - `src/cache.rs` — board snapshot at `<config dir>/cache.json` (0600, written
   via temp + rename). `App::new` paints from it before any network call;
-  `App::synced` gates every write until every list succeeds in the active
-  refresh generation. Failed list loads and mutation recovery remain
-  read-only and never save optimistic failure state. `check_synced()` rewrites
-  the snapshot after a complete sync; successful mutations update it. The CLI
-  rewrites the snapshot after each successful mutation.
+  `App::sync` is `Cached`, `Refreshing`, `Ready`, or `Failed`; writes require
+  `Ready` after every list succeeds in the active refresh generation. Failed
+  list loads and mutation recovery never save optimistic state.
+  `check_synced()` rewrites the snapshot after a complete sync; confirmed
+  mutations update it. The CLI rewrites the snapshot after each successful
+  mutation.
 - `src/api.rs` — blocking Tasks v1 client on `ureq` 3; `get_all` follows
   `nextPageToken`; `patch` PATCHes arbitrary fields of one task; `create` POSTs
   a title with an optional parent (TUI); `insert` accepts a JSON body and a
@@ -58,9 +59,12 @@ Work directly on `main`; no feature branches.
   mutate task lists. `TasksApi` is the trait the CLI and tests call.
 - `src/tui.rs` — board UI. A worker thread owns the `Client` and talks to the
   UI over `Cmd`/`Msg` channels. Refresh messages carry a generation so old
-  responses cannot complete a newer sync. The event loop polls input every
-  100 ms, drains messages, and calls `check_theme()` every 500 ms. A quit
-  request waits for pending saves; a second request force-quits. `task_item` wraps a
+  responses cannot complete a newer sync. Mutations are serialized through
+  one `PendingOperation`; commands and responses carry its id and context, so
+  stale or mismatched responses are ignored. Navigation remains available
+  while mutation keys are blocked. The event loop polls input every 100 ms,
+  drains messages, and calls `check_theme()` every 500 ms. A quit request
+  waits for the pending operation; a second request force-quits. `task_item` wraps a
   title over as many lines as it needs when `config.wrap_titles` is on,
   trimming the leading space `wrap()` leaves when a break lands on a run of
   them. Everything Google sends goes through `clean()` first: task text can
@@ -77,13 +81,15 @@ Work directly on `main`; no feature branches.
   `Msg::Updated` re-runs `order()` so a ticked task moves to the completed
   group while preserving the user's current selection by task ID. Delayed
   create responses select the new task only when selection has not moved and
-  no other editor is active. Destructive keys go through
-  `App::pending` (a y/n prompt in the status bar), never straight to the API.
+  no other editor is active. `App::interaction` is the single exclusive
+  `Idle` / editor / delete confirmation / Browse / Move / Help state.
+  Destructive keys go through `Interaction::ConfirmDelete`, never straight to the API.
   The shelf lays out explicit sub-rects (title/meta/notes/updated) so `wrap()`
   + `cursor_rc()` can place the real terminal cursor; `App::field` holds shelf
-  focus. `App::creating` holds a `Draft` that swaps the shelf for a title-only
-  input whose `Edit` has an empty `task_id`, so `commit_edit` POSTs instead of
-  PATCHing. `C` fills the draft's `parent` from `subtask_parent`: the selected
+  focus. `EditTarget::New` swaps the shelf for a title-only input and makes
+  `commit_edit` POST instead of PATCH; its full draft lives in the pending
+  operation until Google confirms it and reopens unchanged after failure.
+  `C` fills its `parent` from `subtask_parent`: the selected
   row, or the row's own parent when it is already a subtask, since Google
   Tasks nests exactly one level deep. A row that draws at depth 0 because its
   parent is missing from the list parents the new subtask itself. `y` yanks

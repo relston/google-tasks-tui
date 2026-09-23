@@ -34,17 +34,17 @@ changing the broader architecture.
 Remove the combinations of booleans and optional values that currently encode
 exclusive UI and synchronization states.
 
-- [ ] a) Replace `edit`, `creating`, `pending`, `browse`, `move_to`, and `help`
+- [x] a) Replace `edit`, `creating`, `pending`, `browse`, `move_to`, and `help`
   with one `Interaction` enum.
-- [ ] b) Replace the empty-task-ID creation sentinel with an `EditTarget` enum
+- [x] b) Replace the empty-task-ID creation sentinel with an `EditTarget` enum
   for existing tasks and new tasks.
-- [ ] c) Replace `fetching` and `synced` with a `SyncState` that distinguishes
+- [x] c) Replace `fetching` and `synced` with a `SyncState` that distinguishes
   cached, refreshing, ready, and failed states.
-- [ ] d) Permit navigation while saving but serialize mutations to one
+- [x] d) Permit navigation while saving but serialize mutations to one
   in-flight write. Block conflicting mutation keys until it resolves.
-- [ ] e) Carry operation context through worker responses so success, failure,
+- [x] e) Carry operation context through worker responses so success, failure,
   rollback, selection, and status messages apply to the correct task.
-- [ ] f) Retain new-task drafts until Google confirms creation; reopen the
+- [x] f) Retain new-task drafts until Google confirms creation; reopen the
   editor with the original text after failure.
 
 ## Phase 3: Separate canonical board data from rendering

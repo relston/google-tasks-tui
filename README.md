@@ -72,15 +72,17 @@ available as subcommands for scripts and agents (`google-tasks-tui lists`,
 - `?` opens a **Keyboard** overlay listing the board commands. The first row
   is selected; `j`/`k` move, `Esc`/`q`/`?` close it.
 - API calls run on a background thread, so the UI never blocks. Lists fill in
-  as they load. If you quit while writes are pending, the app waits for them;
-  press `q` or `Esc` again to force quit.
+  as they load. One write runs at a time; navigation stays available while
+  other mutation keys wait. If you quit while a write is pending, the app
+  waits for it; press `q` or `Esc` again to force quit.
 - Startup is instant: the board is painted from a local snapshot before any
   network call, then Google's copy replaces it in the background. The board is
   read-only until every list in the current sync succeeds, so you never edit
   stale data; the status bar says so while you wait.
 - `c` opens a "New task" shelf next to the focused list with an empty title
   input ready to type. `Enter` creates it in that list and selects it; `Esc`
-  throws the draft away.
+  throws the draft away. If creation fails, the same draft reopens after the
+  board starts resynchronizing.
 - `C` does the same but as a subtask: the shelf says "New subtask" and names
   the task it will hang under. On a top-level task that is the selection
   itself; on a subtask it is that subtask's parent, because Google Tasks only

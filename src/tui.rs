@@ -45,25 +45,61 @@ const READ_ONLY: &str = "Syncing with Google — read-only for a moment";
 /// Requests to the network thread.
 enum Cmd {
     Refresh(u64),
-    Patch { list_id: String, task_id: String, fields: Value },
-    Delete { list_id: String, task_id: String },
+    Patch {
+        operation: u64,
+        list_id: String,
+        task_id: String,
+        fields: Value,
+    },
+    Delete {
+        operation: u64,
+        list_id: String,
+        task_id: String,
+    },
     Create {
+        operation: u64,
         list_id: String,
         title: String,
         parent: Option<String>,
         selection: Option<String>,
     },
-    Move { from: String, to: String, ids: Vec<String> },
+    Move {
+        operation: u64,
+        from: String,
+        to: String,
+        ids: Vec<String>,
+    },
 }
 
 /// Results from the network thread.
 enum Msg {
     Lists(u64, Result<Vec<TaskList>, String>),
     Tasks(u64, String, Result<Vec<Task>, String>),
-    Updated(String, Result<Task, String>),
-    Deleted(Result<(), String>),
-    Created(String, Option<String>, Result<Task, String>),
-    Moved(Result<(), String>),
+    Updated {
+        operation: u64,
+        list_id: String,
+        task_id: String,
+        result: Result<Task, String>,
+    },
+    Deleted {
+        operation: u64,
+        list_id: String,
+        task_id: String,
+        result: Result<(), String>,
+    },
+    Created {
+        operation: u64,
+        list_id: String,
+        selection: Option<String>,
+        result: Result<Task, String>,
+    },
+    Moved {
+        operation: u64,
+        from: String,
+        to: String,
+        ids: Vec<String>,
+        result: Result<(), String>,
+    },
 }
 
 /// A delete waiting on a y/n answer in the status bar.
@@ -87,12 +123,6 @@ struct Browse {
     state: ListState,
 }
 
-/// A task being typed into the shelf but not created yet.
-struct Draft {
-    /// Set when it will be a subtask of that task.
-    parent: Option<String>,
-}
-
 /// Overlay listing destination lists for a move.
 struct MovePick {
     lists: Vec<TaskList>,
@@ -111,16 +141,49 @@ enum FieldId {
     Notes,
 }
 
+enum EditTarget {
+    Existing {
+        list_id: String,
+        task_id: String,
+        field: FieldId,
+    },
+    New {
+        list_id: String,
+        parent: Option<String>,
+        selection: Option<String>,
+    },
+}
+
 /// An in-progress edit. `cursor` is a byte offset into `buf`.
 struct Edit {
-    list_id: String,
-    task_id: String,
-    field: FieldId,
+    target: EditTarget,
     buf: String,
     cursor: usize,
 }
 
 impl Edit {
+    fn field(&self) -> FieldId {
+        match self.target {
+            EditTarget::Existing { field, .. } => field,
+            EditTarget::New { .. } => FieldId::Title,
+        }
+    }
+
+    fn existing(&self) -> Option<(&str, &str, FieldId)> {
+        match &self.target {
+            EditTarget::Existing {
+                list_id,
+                task_id,
+                field,
+            } => Some((list_id, task_id, *field)),
+            EditTarget::New { .. } => None,
+        }
+    }
+
+    fn is_new(&self) -> bool {
+        matches!(self.target, EditTarget::New { .. })
+    }
+
     fn insert(&mut self, c: char) {
         self.buf.insert(self.cursor, c);
         self.cursor += c.len_utf8();
@@ -217,6 +280,27 @@ impl Edit {
     }
 }
 
+enum Interaction {
+    Idle,
+    Editing(Edit),
+    ConfirmDelete(Pending),
+    Browse(Browse),
+    Move(MovePick),
+    Help(Help),
+}
+
+enum MutationContext {
+    Create(Edit),
+    Patch { list_id: String, task_id: String },
+    Delete { list_id: String, task_id: String },
+    Move { from: String, to: String, ids: Vec<String> },
+}
+
+struct PendingOperation {
+    id: u64,
+    context: MutationContext,
+}
+
 struct Row {
     task: Task,
     depth: u8,
@@ -227,6 +311,14 @@ enum LoadState {
     Cached,
     Loading,
     Loaded,
+    Failed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SyncState {
+    Cached,
+    Refreshing,
+    Ready,
     Failed,
 }
 
@@ -255,21 +347,12 @@ struct App {
     shelf: bool,
     /// Which shelf field the keyboard is on.
     field: FieldId,
-    /// The shelf is holding a not-yet-created task.
-    creating: Option<Draft>,
-    edit: Option<Edit>,
-    pending: Option<Pending>,
-    browse: Option<Browse>,
-    move_to: Option<MovePick>,
-    help: Option<Help>,
+    interaction: Interaction,
     /// Identifies the only refresh whose responses may update the board.
     refresh_generation: u64,
-    fetching: bool,
-    /// False while the board may still be stale: edits are blocked until the
-    /// first sync of this run lands.
-    synced: bool,
-    /// Edits sent to Google that haven't come back yet.
-    saving: usize,
+    sync: SyncState,
+    next_operation: u64,
+    pending_operation: Option<PendingOperation>,
     error: Option<String>,
     /// A one-off confirmation, cleared by the next keypress.
     notice: Option<String>,
@@ -303,16 +386,11 @@ impl App {
             scroll: 0,
             shelf: false,
             field: FieldId::Title,
-            creating: None,
-            edit: None,
-            pending: None,
-            browse: None,
-            move_to: None,
-            help: None,
+            interaction: Interaction::Idle,
             refresh_generation: 0,
-            fetching: false,
-            synced: false,
-            saving: 0,
+            sync: SyncState::Cached,
+            next_operation: 0,
+            pending_operation: None,
             error: None,
             notice: None,
             cmds,
@@ -324,14 +402,31 @@ impl App {
         app
     }
 
+    fn edit(&self) -> Option<&Edit> {
+        match &self.interaction {
+            Interaction::Editing(edit) => Some(edit),
+            _ => None,
+        }
+    }
+
+    fn edit_mut(&mut self) -> Option<&mut Edit> {
+        match &mut self.interaction {
+            Interaction::Editing(edit) => Some(edit),
+            _ => None,
+        }
+    }
+
+    fn is_creating(&self) -> bool {
+        self.edit().is_some_and(Edit::is_new)
+    }
+
     fn refresh(&mut self) {
         self.begin_refresh(None);
     }
 
     fn begin_refresh(&mut self, error: Option<String>) {
         self.error = error;
-        self.fetching = true;
-        self.synced = false;
+        self.sync = SyncState::Refreshing;
         for col in &mut self.columns {
             col.load = LoadState::Cached;
         }
@@ -341,7 +436,7 @@ impl App {
             .send(Cmd::Refresh(self.refresh_generation))
             .is_err()
         {
-            self.fetching = false;
+            self.sync = SyncState::Failed;
             self.error = Some(match self.error.take() {
                 Some(error) => format!("{error}; network worker stopped"),
                 None => "network worker stopped".into(),
@@ -352,7 +447,7 @@ impl App {
     fn recover(&mut self, error: String) {
         if self.quitting {
             self.error = Some(error);
-            self.synced = false;
+            self.sync = SyncState::Failed;
         } else {
             self.begin_refresh(Some(error));
         }
@@ -362,39 +457,59 @@ impl App {
         if self.quitting {
             self.force_quit = true;
             self.quit = true;
-        } else if self.saving > 0 {
+        } else if self.pending_operation.is_some() {
             self.quitting = true;
-            self.notice = Some(format!(
-                "waiting for {} pending save{} · q again to force quit",
-                self.saving,
-                if self.saving == 1 { "" } else { "s" }
-            ));
+            self.notice = Some("waiting for pending save · q again to force quit".into());
         } else {
             self.quit = true;
         }
     }
 
-    fn mutation_finished(&mut self) {
-        self.saving = self.saving.saturating_sub(1);
-        if self.quitting && self.saving == 0 {
+    fn mutation_finished(&mut self, operation: u64) -> Option<MutationContext> {
+        if self.pending_operation.as_ref().map(|pending| pending.id) != Some(operation) {
+            return None;
+        }
+        let context = self.pending_operation.take().map(|pending| pending.context);
+        if self.quitting {
             self.quit = true;
         }
+        context
     }
 
-    fn send_mutation(&mut self, cmd: Cmd) {
+    fn send_mutation(
+        &mut self,
+        context: MutationContext,
+        build: impl FnOnce(u64) -> Cmd,
+    ) -> bool {
+        if self.pending_operation.is_some() {
+            self.error = Some("wait for the current save to finish".into());
+            return false;
+        }
+        self.next_operation = self.next_operation.wrapping_add(1);
+        let operation = self.next_operation;
+        let cmd = build(operation);
         match self.cmds.send(cmd) {
-            Ok(()) => self.saving += 1,
+            Ok(()) => {
+                self.pending_operation = Some(PendingOperation {
+                    id: operation,
+                    context,
+                });
+                true
+            }
             Err(_) => {
-                self.synced = false;
+                if let MutationContext::Create(edit) = context {
+                    self.interaction = Interaction::Editing(edit);
+                }
+                self.sync = SyncState::Failed;
                 self.error = Some("network worker stopped; change was not sent".into());
+                false
             }
         }
     }
 
     fn worker_disconnected(&mut self) {
-        self.fetching = false;
-        self.synced = false;
-        self.saving = 0;
+        self.sync = SyncState::Failed;
+        self.pending_operation = None;
         self.error = Some("network worker stopped".into());
         if self.quitting {
             self.quit = true;
@@ -403,17 +518,26 @@ impl App {
 
     /// Editing waits until this run has seen Google's copy of every list.
     fn writable(&mut self) -> bool {
-        if !self.synced {
+        if self.sync != SyncState::Ready {
             self.error = Some(READ_ONLY.into());
+            return false;
         }
-        self.synced
+        if self.pending_operation.is_some() {
+            self.error = Some("wait for the current save to finish".into());
+            return false;
+        }
+        true
     }
 
     fn check_synced(&mut self) {
-        if self.fetching || !self.columns.iter().all(|c| c.load == LoadState::Loaded) {
+        if self.columns.iter().any(|c| c.load == LoadState::Failed) {
+            self.sync = SyncState::Failed;
             return;
         }
-        self.synced = true;
+        if !self.columns.iter().all(|c| c.load == LoadState::Loaded) {
+            return;
+        }
+        self.sync = SyncState::Ready;
         if self.error.as_deref() == Some(READ_ONLY) {
             self.error = None;
         }
@@ -421,7 +545,7 @@ impl App {
     }
 
     fn save_cache(&self) -> bool {
-        if !self.synced || self.saving > 0 {
+        if self.sync != SyncState::Ready || self.pending_operation.is_some() {
             return false;
         }
         cache::save(&cache::Cache {
@@ -438,7 +562,7 @@ impl App {
     }
 
     fn loading(&self) -> bool {
-        self.fetching || self.columns.iter().any(|c| c.load == LoadState::Loading)
+        self.sync == SyncState::Refreshing
     }
 
     /// Start a new task in the focused list: an empty title input in the shelf.
@@ -449,8 +573,8 @@ impl App {
         }
         let Some(col) = self.columns.get(self.focus) else { return };
         let list_id = col.list.id.clone();
-        let selected = col.selected().map(subtask_parent);
-        let parent = match (under, selected) {
+        let selected = col.selected().map(|row| row.task.id.clone());
+        let parent = match (under, col.selected().map(subtask_parent)) {
             (false, _) => None,
             (true, Some(p)) => p,
             (true, None) => {
@@ -458,14 +582,15 @@ impl App {
                 return;
             }
         };
-        self.edit = Some(Edit {
-            list_id,
-            task_id: String::new(), // no id yet: commit POSTs instead of PATCHing
-            field: FieldId::Title,
+        self.interaction = Interaction::Editing(Edit {
+            target: EditTarget::New {
+                list_id,
+                parent,
+                selection: selected,
+            },
             buf: String::new(),
             cursor: 0,
         });
-        self.creating = Some(Draft { parent });
         self.shelf = true;
         self.field = FieldId::Title;
     }
@@ -487,7 +612,15 @@ impl App {
             FieldId::Title => title,
             FieldId::Notes => notes,
         };
-        self.edit = Some(Edit { list_id, task_id, field: self.field, cursor: buf.len(), buf });
+        self.interaction = Interaction::Editing(Edit {
+            target: EditTarget::Existing {
+                list_id,
+                task_id,
+                field: self.field,
+            },
+            cursor: buf.len(),
+            buf,
+        });
     }
 
     fn row_mut(&mut self, list_id: &str, task_id: &str) -> Option<&mut Row> {
@@ -498,54 +631,69 @@ impl App {
     }
 
     fn commit_edit(&mut self) {
-        let Some(e) = self.edit.take() else { return };
-        if let Some(draft) = self.creating.take() {
+        if !self.writable() {
+            return;
+        }
+        let interaction = std::mem::replace(&mut self.interaction, Interaction::Idle);
+        let Interaction::Editing(e) = interaction else {
+            self.interaction = interaction;
+            return;
+        };
+        if let EditTarget::New {
+            list_id,
+            parent,
+            selection,
+        } = &e.target
+        {
             let title = e.buf.trim().to_string();
             if title.is_empty() {
                 self.error = Some("A task needs a title".into());
-                self.edit = Some(e);
-                self.creating = Some(draft);
+                self.interaction = Interaction::Editing(e);
                 return;
             }
             self.error = None;
-            let selection = self
-                .columns
-                .iter()
-                .find(|c| c.list.id == e.list_id)
-                .and_then(Column::selected)
-                .map(|r| r.task.id.clone());
-            self.send_mutation(Cmd::Create {
-                list_id: e.list_id,
-                title,
-                parent: draft.parent,
-                selection,
-            });
+            let (list_id, parent, selection) =
+                (list_id.clone(), parent.clone(), selection.clone());
+            self.send_mutation(
+                MutationContext::Create(e),
+                |operation| Cmd::Create {
+                    operation,
+                    list_id,
+                    title,
+                    parent,
+                    selection,
+                },
+            );
             return;
         }
         // Show the change straight away; Google confirms it a moment later.
-        let fields = match e.field {
+        let Some((list_id, task_id, field)) = e.existing() else {
+            return;
+        };
+        let (list_id, task_id) = (list_id.to_string(), task_id.to_string());
+        let fields = match field {
             FieldId::Title => {
                 let title = e.buf.trim().to_string();
                 if title.is_empty() {
                     self.error = Some("A task needs a title".into());
-                    self.edit = Some(e);
+                    self.interaction = Interaction::Editing(e);
                     return;
                 }
-                if let Some(row) = self.row_mut(&e.list_id, &e.task_id) {
+                if let Some(row) = self.row_mut(&list_id, &task_id) {
                     row.task.title = title.clone();
                 }
                 json!({ "title": title })
             }
             FieldId::Notes => {
                 let notes = e.buf.trim_end().to_string();
-                if let Some(row) = self.row_mut(&e.list_id, &e.task_id) {
+                if let Some(row) = self.row_mut(&list_id, &task_id) {
                     row.task.notes = Some(notes.clone()).filter(|n| !n.is_empty());
                 }
                 json!({ "notes": notes })
             }
         };
         self.error = None;
-        self.send_patch(e.list_id, e.task_id, fields);
+        self.send_patch(list_id, task_id, fields);
     }
 
     /// Tick or untick the selected task.
@@ -587,7 +735,7 @@ impl App {
             1 => " and its subtask".into(),
             n => format!(" and its {n} subtasks"),
         };
-        self.pending = Some(Pending {
+        self.interaction = Interaction::ConfirmDelete(Pending {
             list_id: col.list.id.clone(),
             task_id: row.task.id.clone(),
             prompt: format!("Delete \"{}\"{also}?  y/n", title_of(&row.task)),
@@ -595,7 +743,11 @@ impl App {
     }
 
     fn confirm_delete(&mut self) {
-        let Some(p) = self.pending.take() else { return };
+        let interaction = std::mem::replace(&mut self.interaction, Interaction::Idle);
+        let Interaction::ConfirmDelete(p) = interaction else {
+            self.interaction = interaction;
+            return;
+        };
         if let Some(col) = self.columns.iter_mut().find(|c| c.list.id == p.list_id) {
             // Drop the task and its subtasks locally; Google cascades the same way.
             col.rows
@@ -605,18 +757,33 @@ impl App {
             col.state.select(last.map(|l| sel.min(l)));
         }
         self.error = None;
-        self.send_mutation(Cmd::Delete {
-            list_id: p.list_id,
-            task_id: p.task_id,
-        });
+        let (list_id, task_id) = (p.list_id, p.task_id);
+        self.send_mutation(
+            MutationContext::Delete {
+                list_id: list_id.clone(),
+                task_id: task_id.clone(),
+            },
+            |operation| Cmd::Delete {
+                operation,
+                list_id,
+                task_id,
+            },
+        );
     }
 
     fn send_patch(&mut self, list_id: String, task_id: String, fields: Value) {
-        self.send_mutation(Cmd::Patch {
-            list_id,
-            task_id,
-            fields,
-        });
+        self.send_mutation(
+            MutationContext::Patch {
+                list_id: list_id.clone(),
+                task_id: task_id.clone(),
+            },
+            |operation| Cmd::Patch {
+                operation,
+                list_id,
+                task_id,
+                fields,
+            },
+        );
     }
 
     /// Reload the palette only when the fingerprint changes (cheap stat calls).
@@ -643,11 +810,10 @@ impl App {
         }
         match msg {
             Msg::Lists(_, Err(e)) => {
-                self.fetching = false;
+                self.sync = SyncState::Failed;
                 self.error = Some(e);
             }
             Msg::Lists(_, Ok(lists)) => {
-                self.fetching = false;
                 // Keep existing columns (and their selection) until fresh tasks arrive.
                 let focused = self.columns.get(self.focus).map(|c| c.list.id.clone());
                 let mut old = std::mem::take(&mut self.columns);
@@ -693,13 +859,37 @@ impl App {
                 }
                 self.check_synced();
             }
-            Msg::Created(list_id, selection_at_send, res) => {
-                self.mutation_finished();
-                match res {
+            Msg::Created {
+                operation,
+                list_id,
+                selection: selection_at_send,
+                result,
+            } => {
+                let Some(context) = self.mutation_finished(operation) else {
+                    return;
+                };
+                let MutationContext::Create(draft) = context else {
+                    self.recover("create response did not match the pending operation".into());
+                    return;
+                };
+                let EditTarget::New {
+                    list_id: draft_list,
+                    selection: draft_selection,
+                    ..
+                } = &draft.target
+                else {
+                    self.recover("create response did not match its draft".into());
+                    return;
+                };
+                if draft_list != &list_id || draft_selection != &selection_at_send {
+                    self.recover("create response did not match its draft".into());
+                    return;
+                }
+                match result {
                     Ok(task) => {
                         let focused_list =
                             self.columns.get(self.focus).map(|c| c.list.id.as_str());
-                        let may_follow = self.edit.is_none()
+                        let may_follow = self.edit().is_none()
                             && focused_list == Some(list_id.as_str());
                         let Some(col_index) =
                             self.columns.iter().position(|c| c.list.id == list_id)
@@ -728,33 +918,101 @@ impl App {
                         }
                         self.save_cache();
                     }
-                    Err(e) => self.recover(format!("create failed: {e}")),
+                    Err(e) => {
+                        if let Some(index) =
+                            self.columns.iter().position(|column| column.list.id == *draft_list)
+                        {
+                            self.focus = index;
+                        }
+                        self.shelf = true;
+                        self.field = FieldId::Title;
+                        self.interaction = Interaction::Editing(draft);
+                        self.recover(format!("create failed: {e}"));
+                    }
                 }
             }
-            Msg::Deleted(res) => {
-                self.mutation_finished();
-                match res {
+            Msg::Deleted {
+                operation,
+                list_id,
+                task_id,
+                result,
+            } => {
+                let Some(context) = self.mutation_finished(operation) else {
+                    return;
+                };
+                if !matches!(
+                    context,
+                    MutationContext::Delete {
+                        list_id: ref expected_list,
+                        task_id: ref expected_task,
+                    } if expected_list == &list_id && expected_task == &task_id
+                ) {
+                    self.recover("delete response did not match the pending operation".into());
+                    return;
+                }
+                match result {
                     Ok(()) => {
                         self.save_cache();
                     }
                     Err(e) => {
                         // The task is still there, so put the board back.
-                        self.recover(format!("delete failed: {e}"));
+                        self.recover(format!(
+                            "delete failed for {list_id}/{task_id}: {e}"
+                        ));
                     }
                 }
             }
-            Msg::Moved(res) => {
-                self.mutation_finished();
-                match res {
+            Msg::Moved {
+                operation,
+                from,
+                to,
+                ids,
+                result,
+            } => {
+                let Some(context) = self.mutation_finished(operation) else {
+                    return;
+                };
+                if !matches!(
+                    context,
+                    MutationContext::Move {
+                        from: ref expected_from,
+                        to: ref expected_to,
+                        ids: ref expected_ids,
+                    } if expected_from == &from && expected_to == &to && expected_ids == &ids
+                ) {
+                    self.recover("move response did not match the pending operation".into());
+                    return;
+                }
+                match result {
                     Ok(()) => {
                         self.save_cache();
                     }
-                    Err(e) => self.recover(format!("move failed: {e}")),
+                    Err(e) => self.recover(format!(
+                        "move failed from {from} to {to} for {}: {e}",
+                        ids.join(", ")
+                    )),
                 }
             }
-            Msg::Updated(list_id, res) => {
-                self.mutation_finished();
-                match res {
+            Msg::Updated {
+                operation,
+                list_id,
+                task_id,
+                result,
+            } => {
+                let Some(context) = self.mutation_finished(operation) else {
+                    return;
+                };
+                if !matches!(
+                    context,
+                    MutationContext::Patch {
+                        list_id: ref expected_list,
+                        task_id: ref expected_task,
+                    } if expected_list == &list_id && expected_task == &task_id
+                ) {
+                    self.recover("save response did not match the pending operation".into());
+                    return;
+                }
+                match result {
                     Ok(task) => {
                         let Some(col_index) =
                             self.columns.iter().position(|c| c.list.id == list_id)
@@ -762,10 +1020,11 @@ impl App {
                             self.recover("save succeeded but its list disappeared".into());
                             return;
                         };
-                        if !self.columns[col_index]
+                        if task.id != task_id
+                            || !self.columns[col_index]
                             .rows
                             .iter()
-                            .any(|row| row.task.id == task.id)
+                            .any(|row| row.task.id == task_id)
                         {
                             self.recover("save succeeded but its task disappeared".into());
                             return;
@@ -833,14 +1092,14 @@ impl App {
             return;
         }
         self.error = None;
-        self.browse = Some(Browse {
+        self.interaction = Interaction::Browse(Browse {
             links,
             state: ListState::default().with_selected(Some(0)),
         });
     }
 
     fn move_browse(&mut self, delta: isize) {
-        let Some(b) = self.browse.as_mut() else { return };
+        let Interaction::Browse(b) = &mut self.interaction else { return };
         let Some(last) = b.links.len().checked_sub(1) else { return };
         let cur = b.state.selected().unwrap_or(0) as isize;
         b.state.select(Some((cur + delta).clamp(0, last as isize) as usize));
@@ -848,7 +1107,7 @@ impl App {
 
     fn open_browse(&mut self, all: bool) {
         let urls = {
-            let Some(b) = self.browse.as_ref() else { return };
+            let Interaction::Browse(b) = &self.interaction else { return };
             if all {
                 b.links.iter().map(|l| l.url.clone()).collect()
             } else {
@@ -860,7 +1119,7 @@ impl App {
         for url in &urls {
             open_url(url);
         }
-        self.browse = None;
+        self.interaction = Interaction::Idle;
     }
 
     fn start_move(&mut self) {
@@ -879,14 +1138,14 @@ impl App {
             return;
         }
         self.error = None;
-        self.move_to = Some(MovePick {
+        self.interaction = Interaction::Move(MovePick {
             lists,
             state: ListState::default().with_selected(Some(0)),
         });
     }
 
     fn step_move(&mut self, delta: isize) {
-        let Some(m) = self.move_to.as_mut() else { return };
+        let Interaction::Move(m) = &mut self.interaction else { return };
         let Some(last) = m.lists.len().checked_sub(1) else { return };
         let cur = m.state.selected().unwrap_or(0) as isize;
         m.state.select(Some((cur + delta).clamp(0, last as isize) as usize));
@@ -894,12 +1153,12 @@ impl App {
 
     fn confirm_move(&mut self) {
         let dest_id = {
-            let Some(m) = self.move_to.as_ref() else { return };
+            let Interaction::Move(m) = &self.interaction else { return };
             let Some(i) = m.state.selected() else { return };
             let Some(list) = m.lists.get(i) else { return };
             list.id.clone()
         };
-        self.move_to = None;
+        self.interaction = Interaction::Idle;
         let Some(src) = self.columns.get(self.focus) else { return };
         let from_id = src.list.id.clone();
         let Some(row) = src.selected() else { return };
@@ -940,19 +1199,28 @@ impl App {
         }
         self.focus = dest_idx;
         self.error = None;
-        self.send_mutation(Cmd::Move {
-            from: from_id,
-            to: dest_id,
-            ids,
-        });
+        self.send_mutation(
+            MutationContext::Move {
+                from: from_id.clone(),
+                to: dest_id.clone(),
+                ids: ids.clone(),
+            },
+            |operation| Cmd::Move {
+                operation,
+                from: from_id,
+                to: dest_id,
+                ids,
+            },
+        );
     }
 
     fn start_help(&mut self) {
-        self.help = Some(Help { state: ListState::default().with_selected(Some(0)) });
+        self.interaction =
+            Interaction::Help(Help { state: ListState::default().with_selected(Some(0)) });
     }
 
     fn step_help(&mut self, delta: isize) {
-        let Some(h) = self.help.as_mut() else { return };
+        let Interaction::Help(h) = &mut self.interaction else { return };
         let n = help_keys().len();
         let i = h.state.selected().unwrap_or(0) as isize + delta;
         h.state.select(Some(i.clamp(0, n.saturating_sub(1) as isize) as usize));
@@ -967,21 +1235,21 @@ impl App {
             }
             return;
         }
-        if self.edit.is_some() {
+        if matches!(self.interaction, Interaction::Editing(_)) {
             self.edit_key(k);
             return;
         }
-        if self.pending.is_some() {
+        if matches!(self.interaction, Interaction::ConfirmDelete(_)) {
             // Only "y" deletes; every other key cancels.
             match k.code {
                 KeyCode::Char('y') | KeyCode::Char('Y') => self.confirm_delete(),
-                _ => self.pending = None,
+                _ => self.interaction = Interaction::Idle,
             }
             return;
         }
-        if self.browse.is_some() {
+        if matches!(self.interaction, Interaction::Browse(_)) {
             match k.code {
-                KeyCode::Esc | KeyCode::Char('q') => self.browse = None,
+                KeyCode::Esc | KeyCode::Char('q') => self.interaction = Interaction::Idle,
                 KeyCode::Char('j') | KeyCode::Down => self.move_browse(1),
                 KeyCode::Char('k') | KeyCode::Up => self.move_browse(-1),
                 KeyCode::Enter if k.modifiers.contains(KeyModifiers::SHIFT) => {
@@ -992,9 +1260,9 @@ impl App {
             }
             return;
         }
-        if self.move_to.is_some() {
+        if matches!(self.interaction, Interaction::Move(_)) {
             match k.code {
-                KeyCode::Esc | KeyCode::Char('q') => self.move_to = None,
+                KeyCode::Esc | KeyCode::Char('q') => self.interaction = Interaction::Idle,
                 KeyCode::Char('j') | KeyCode::Down => self.step_move(1),
                 KeyCode::Char('k') | KeyCode::Up => self.step_move(-1),
                 KeyCode::Enter => self.confirm_move(),
@@ -1002,9 +1270,11 @@ impl App {
             }
             return;
         }
-        if self.help.is_some() {
+        if matches!(self.interaction, Interaction::Help(_)) {
             match k.code {
-                KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('?') => self.help = None,
+                KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('?') => {
+                    self.interaction = Interaction::Idle
+                }
                 KeyCode::Char('j') | KeyCode::Down => self.step_help(1),
                 KeyCode::Char('k') | KeyCode::Up => self.step_help(-1),
                 _ => {}
@@ -1054,11 +1324,10 @@ impl App {
     fn edit_key(&mut self, k: KeyEvent) {
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         let newline = k.modifiers.intersects(KeyModifiers::SHIFT | KeyModifiers::ALT);
-        let notes = self.edit.as_ref().is_some_and(|e| e.field == FieldId::Notes);
+        let notes = self.edit().is_some_and(|e| e.field() == FieldId::Notes);
         match k.code {
             KeyCode::Esc => {
-                self.edit = None;
-                self.creating = None;
+                self.interaction = Interaction::Idle;
                 return;
             }
             KeyCode::Enter if !(notes && newline) => {
@@ -1067,7 +1336,7 @@ impl App {
             }
             _ => {}
         }
-        let Some(e) = self.edit.as_mut() else { return };
+        let Some(e) = self.edit_mut() else { return };
         match k.code {
             KeyCode::Enter => e.insert('\n'),
             KeyCode::Char('j') if ctrl && notes => e.insert('\n'),
@@ -1104,7 +1373,7 @@ impl App {
             Span::styled(" Tasks ", Style::default().fg(t.bg).bg(t.accent).bold()),
             Span::styled(format!("  theme: {}", t.name), Style::default().fg(t.muted)),
         ];
-        if self.saving > 0 {
+        if self.pending_operation.is_some() {
             head.push(Span::styled("  saving…", Style::default().fg(t.yellow)));
         } else if self.loading() {
             head.push(Span::styled("  syncing…", Style::default().fg(t.yellow)));
@@ -1118,26 +1387,30 @@ impl App {
 
         let hints = if self.quitting {
             " waiting for pending saves… q again to force quit"
-        } else if self.browse.is_some() {
+        } else if matches!(self.interaction, Interaction::Browse(_)) {
             " j/k · ⏎ open · ⇧⏎ all · Esc close"
-        } else if self.move_to.is_some() {
+        } else if matches!(self.interaction, Interaction::Move(_)) {
             " j/k · ⏎ move · Esc close"
-        } else if self.help.is_some() {
+        } else if matches!(self.interaction, Interaction::Help(_)) {
             " j/k · Esc close"
-        } else if self.creating.is_some() {
+        } else if self.is_creating() {
             " ⏎ create · Esc cancel"
-        } else if self.edit.as_ref().is_some_and(|e| e.field == FieldId::Notes) {
+        } else if self.edit().is_some_and(|e| e.field() == FieldId::Notes) {
             " ⏎ save · ⇧⏎ new line · Esc cancel · ^W delete word"
-        } else if self.edit.is_some() {
+        } else if self.edit().is_some() {
             " ⏎ save · Esc cancel · ^W delete word · ^U clear"
-        } else if !self.synced {
+        } else if self.sync != SyncState::Ready {
             " syncing with Google… board is read-only until it lands"
         } else if self.shelf {
             " Tab field · i edit · c new · C subtask · ␣ done · y copy · b link · m move · d delete · ? help · q quit"
         } else {
             " h/l list · j/k task · ␣ done · ⏎ details · c new · C subtask · i edit · y copy · b link · m move · d delete · ? help · q quit"
         };
-        let status_line = match (&self.pending, &self.error, &self.notice) {
+        let pending = match &self.interaction {
+            Interaction::ConfirmDelete(pending) => Some(pending),
+            _ => None,
+        };
+        let status_line = match (pending, &self.error, &self.notice) {
             (Some(p), _, _) => {
                 Line::styled(format!(" {}", p.prompt), Style::default().fg(t.yellow).bold())
             }
@@ -1155,9 +1428,17 @@ impl App {
             return;
         }
         self.focus = self.focus.min(self.columns.len() - 1);
-        if self.selected_task().is_none() && self.creating.is_none() {
+        if self.selected_task().is_none() && !self.is_creating() {
             self.shelf = false;
-            self.edit = None;
+            if matches!(
+                self.interaction,
+                Interaction::Editing(Edit {
+                    target: EditTarget::Existing { .. },
+                    ..
+                })
+            ) {
+                self.interaction = Interaction::Idle;
+            }
         }
 
         // Columns share the width evenly within limits; the shelf takes a fixed slot.
@@ -1239,7 +1520,9 @@ impl App {
     /// The shelf while a new task is being typed: just a title input.
     fn draw_new_shelf(&self, f: &mut Frame, area: Rect, t: &Theme) {
         let col = &self.columns[self.focus];
-        let parent_id = self.creating.as_ref().and_then(|d| d.parent.as_deref());
+        let Some(e) = self.edit() else { return };
+        let EditTarget::New { parent, .. } = &e.target else { return };
+        let parent_id = parent.as_deref();
         let parent = parent_id.and_then(|id| col.rows.iter().find(|r| r.task.id == id));
         let heading = if parent_id.is_some() { " New subtask " } else { " New task " };
         let block = Block::bordered()
@@ -1254,7 +1537,6 @@ impl App {
             return;
         }
         let w = inner.width as usize - 2;
-        let Some(e) = self.edit.as_ref() else { return };
         let (text, offset) = e.view(w);
         let input = Line::styled(
             format!("{text:<w$}"),
@@ -1275,7 +1557,7 @@ impl App {
     }
 
     fn draw_shelf(&self, f: &mut Frame, area: Rect, t: &Theme) {
-        if self.creating.is_some() {
+        if self.is_creating() {
             self.draw_new_shelf(f, area, t);
             return;
         }
@@ -1298,11 +1580,11 @@ impl App {
         }
         // Two columns go to the focus marker.
         let w = inner.width as usize - 2;
-        let editing = self
-            .edit
-            .as_ref()
-            .filter(|e| e.task_id == task.id && e.list_id == col.list.id);
-        let editing_field = editing.map(|e| e.field);
+        let editing = self.edit().filter(|e| {
+            e.existing()
+                .is_some_and(|(list_id, task_id, _)| task_id == task.id && list_id == col.list.id)
+        });
+        let editing_field = editing.map(Edit::field);
         let input = Style::default().fg(t.sel_fg).bg(t.sel_bg);
         let mut cursor = None;
 
@@ -1358,7 +1640,7 @@ impl App {
         .areas(inner);
 
         let title = title_of(task);
-        let title_lines = match editing.filter(|e| e.field == FieldId::Title) {
+        let title_lines = match editing.filter(|e| e.field() == FieldId::Title) {
             Some(e) => {
                 let (text, offset) = e.view(w);
                 cursor = Some((title_a.x + 2 + offset as u16, title_a.y));
@@ -1376,7 +1658,9 @@ impl App {
         f.render_widget(Line::styled("  Notes", muted.bold()), notes_label_a);
 
         let stored = task.notes.as_deref().unwrap_or("");
-        let raw = editing.filter(|e| e.field == FieldId::Notes).map_or(stored, |e| &e.buf);
+        let raw = editing
+            .filter(|e| e.field() == FieldId::Notes)
+            .map_or(stored, |e| &e.buf);
         let cleaned = clean(raw);
         let notes_text = cleaned.as_ref();
         let rows = notes_a.height as usize;
@@ -1385,7 +1669,7 @@ impl App {
         } else {
             let segs = wrap(notes_text, w);
             let mut scroll = 0;
-            if let Some(e) = editing.filter(|e| e.field == FieldId::Notes) {
+            if let Some(e) = editing.filter(|e| e.field() == FieldId::Notes) {
                 let (row, col) = cursor_rc(&segs, notes_text, e.cursor);
                 scroll = (row + 1).saturating_sub(rows);
                 cursor = Some((notes_a.x + 2 + col as u16, notes_a.y + (row - scroll) as u16));
@@ -1414,7 +1698,7 @@ impl App {
     fn draw_browse(&mut self, f: &mut Frame, area: Rect, t: &Theme) {
         let bg = self.bg(t.bg);
         let wrap_titles = self.config.wrap_titles;
-        let Some(browse) = self.browse.as_mut() else { return };
+        let Interaction::Browse(browse) = &mut self.interaction else { return };
         let width = area.width.clamp(28, 80);
         // Two borders and the selection marker eat into the usable width.
         let text_w = (width as usize).saturating_sub(4);
@@ -1468,7 +1752,7 @@ impl App {
 
     fn draw_move(&mut self, f: &mut Frame, area: Rect, t: &Theme) {
         let bg = self.bg(t.bg);
-        let Some(pick) = self.move_to.as_mut() else { return };
+        let Interaction::Move(pick) = &mut self.interaction else { return };
         let width = area.width.min(72).max(24);
         let height = (pick.lists.len() as u16 + 2).clamp(3, area.height.max(3));
         let x = area.x + area.width.saturating_sub(width) / 2;
@@ -1499,7 +1783,7 @@ impl App {
 
     fn draw_help(&mut self, f: &mut Frame, area: Rect, t: &Theme) {
         let bg = self.bg(t.bg);
-        let Some(help) = self.help.as_mut() else { return };
+        let Interaction::Help(help) = &mut self.interaction else { return };
         let keys = help_keys();
         let key_w = keys.iter().map(|(k, _)| k.len()).max().unwrap_or(0);
         let width = area.width.min(56).max(28);
@@ -1905,6 +2189,7 @@ fn worker(mut client: Client, cmds: Receiver<Cmd>, out: Sender<Msg>) {
     for cmd in cmds {
         match cmd {
             Cmd::Create {
+                operation,
                 list_id,
                 title,
                 parent,
@@ -1913,23 +2198,61 @@ fn worker(mut client: Client, cmds: Receiver<Cmd>, out: Sender<Msg>) {
                 let res = client
                     .create(&list_id, &title, parent.as_deref())
                     .map_err(|e| e.to_string());
-                if out.send(Msg::Created(list_id, selection, res)).is_err() {
+                if out
+                    .send(Msg::Created {
+                        operation,
+                        list_id,
+                        selection,
+                        result: res,
+                    })
+                    .is_err()
+                {
                     return;
                 }
             }
-            Cmd::Delete { list_id, task_id } => {
+            Cmd::Delete {
+                operation,
+                list_id,
+                task_id,
+            } => {
                 let res = client.delete(&list_id, &task_id).map_err(|e| e.to_string());
-                if out.send(Msg::Deleted(res)).is_err() {
+                if out
+                    .send(Msg::Deleted {
+                        operation,
+                        list_id,
+                        task_id,
+                        result: res,
+                    })
+                    .is_err()
+                {
                     return;
                 }
             }
-            Cmd::Patch { list_id, task_id, fields } => {
+            Cmd::Patch {
+                operation,
+                list_id,
+                task_id,
+                fields,
+            } => {
                 let res = client.patch(&list_id, &task_id, &fields).map_err(|e| e.to_string());
-                if out.send(Msg::Updated(list_id, res)).is_err() {
+                if out
+                    .send(Msg::Updated {
+                        operation,
+                        list_id,
+                        task_id,
+                        result: res,
+                    })
+                    .is_err()
+                {
                     return;
                 }
             }
-            Cmd::Move { from, to, ids } => {
+            Cmd::Move {
+                operation,
+                from,
+                to,
+                ids,
+            } => {
                 let res = (|| {
                     let root = ids.first().ok_or_else(|| "no task".to_string())?;
                     for (i, id) in ids.iter().enumerate() {
@@ -1940,7 +2263,16 @@ fn worker(mut client: Client, cmds: Receiver<Cmd>, out: Sender<Msg>) {
                     }
                     Ok(())
                 })();
-                if out.send(Msg::Moved(res)).is_err() {
+                if out
+                    .send(Msg::Moved {
+                        operation,
+                        from,
+                        to,
+                        ids,
+                        result: res,
+                    })
+                    .is_err()
+                {
                     return;
                 }
             }
@@ -2065,12 +2397,31 @@ mod tests {
 
     fn edit(buf: &str) -> Edit {
         Edit {
-            list_id: "l".into(),
-            task_id: "t".into(),
-            field: FieldId::Title,
+            target: EditTarget::Existing {
+                list_id: "l".into(),
+                task_id: "t".into(),
+                field: FieldId::Title,
+            },
             cursor: buf.len(),
             buf: buf.into(),
         }
+    }
+
+    fn new_edit(list_id: &str, selection: Option<&str>, buf: &str) -> Edit {
+        Edit {
+            target: EditTarget::New {
+                list_id: list_id.into(),
+                parent: None,
+                selection: selection.map(Into::into),
+            },
+            buf: buf.into(),
+            cursor: buf.len(),
+        }
+    }
+
+    fn pending(app: &mut App, context: MutationContext) -> u64 {
+        app.pending_operation = Some(PendingOperation { id: 1, context });
+        1
     }
 
     #[test]
@@ -2103,7 +2454,7 @@ mod tests {
         ));
         app.on_msg(Msg::Tasks(generation, "b".into(), Err("offline".into())));
 
-        assert!(!app.synced, "a partial sync must not enable writes");
+        assert_ne!(app.sync, SyncState::Ready, "a partial sync must not enable writes");
         assert!(!app.writable());
         assert_eq!(app.columns[1].rows[0].task.id, "b-cached");
     }
@@ -2112,15 +2463,25 @@ mod tests {
     fn a_failed_mutation_enters_read_only_recovery() {
         let (mut app, cmds) = app_with_lists(&["a"]);
         let _ = cmds.recv().unwrap(); // startup refresh
-        app.synced = true;
-        app.fetching = false;
-        app.saving = 1;
+        app.sync = SyncState::Ready;
+        let operation = pending(
+            &mut app,
+            MutationContext::Delete {
+                list_id: "a".into(),
+                task_id: "a-cached".into(),
+            },
+        );
 
-        app.on_msg(Msg::Deleted(Err("offline".into())));
+        app.on_msg(Msg::Deleted {
+            operation,
+            list_id: "a".into(),
+            task_id: "a-cached".into(),
+            result: Err("offline".into()),
+        });
 
-        assert!(!app.synced);
-        assert!(app.fetching);
-        assert_eq!(app.saving, 0);
+        assert_ne!(app.sync, SyncState::Ready);
+        assert_eq!(app.sync, SyncState::Refreshing);
+        assert!(app.pending_operation.is_none());
         assert!(app.error.as_deref().is_some_and(|e| e.contains("delete failed")));
         assert!(matches!(cmds.recv().unwrap(), Cmd::Refresh(_)));
     }
@@ -2129,18 +2490,21 @@ mod tests {
     fn a_failed_create_uses_the_same_read_only_recovery() {
         let (mut app, cmds) = app_with_lists(&["a"]);
         let _ = cmds.recv().unwrap(); // startup refresh
-        app.synced = true;
-        app.fetching = false;
-        app.saving = 1;
+        app.sync = SyncState::Ready;
+        let operation = pending(
+            &mut app,
+            MutationContext::Create(new_edit("a", Some("a-cached"), "draft")),
+        );
 
-        app.on_msg(Msg::Created(
-            "a".into(),
-            Some("a-cached".into()),
-            Err("offline".into()),
-        ));
+        app.on_msg(Msg::Created {
+            operation,
+            list_id: "a".into(),
+            selection: Some("a-cached".into()),
+            result: Err("offline".into()),
+        });
 
-        assert!(!app.synced);
-        assert!(app.fetching);
+        assert_ne!(app.sync, SyncState::Ready);
+        assert_eq!(app.sync, SyncState::Refreshing);
         assert!(app.error.as_deref().is_some_and(|e| e.contains("create failed")));
         assert!(matches!(cmds.recv().unwrap(), Cmd::Refresh(_)));
     }
@@ -2149,21 +2513,124 @@ mod tests {
     fn a_disconnected_worker_does_not_create_a_pending_save() {
         let (mut app, cmds) = app_with_lists(&["a"]);
         drop(cmds);
-        app.synced = true;
-        app.fetching = false;
+        app.sync = SyncState::Ready;
 
         app.send_patch("a".into(), "a-cached".into(), json!({ "title": "changed" }));
 
-        assert_eq!(app.saving, 0);
-        assert!(!app.synced);
+        assert!(app.pending_operation.is_none());
+        assert_eq!(app.sync, SyncState::Failed);
         assert!(app.error.as_deref().is_some_and(|e| e.contains("worker stopped")));
+    }
+
+    #[test]
+    fn only_one_mutation_can_be_in_flight() {
+        let (mut app, cmds) = app_with_lists(&["a"]);
+        let _ = cmds.recv().unwrap(); // startup refresh
+        app.sync = SyncState::Ready;
+
+        app.send_patch("a".into(), "one".into(), json!({ "title": "one" }));
+        app.send_patch("a".into(), "two".into(), json!({ "title": "two" }));
+
+        assert!(app.pending_operation.is_some());
+        let patches = cmds
+            .try_iter()
+            .filter(|cmd| matches!(cmd, Cmd::Patch { .. }))
+            .count();
+        assert_eq!(patches, 1);
+    }
+
+    #[test]
+    fn navigation_remains_available_while_mutations_are_blocked() {
+        let (mut app, cmds) = app_with_lists(&["a"]);
+        let _ = cmds.recv().unwrap(); // startup refresh
+        app.sync = SyncState::Ready;
+        app.columns[0].rows = order(vec![
+            task("a-one", None, "1", false),
+            task("a-two", None, "2", false),
+        ]);
+        app.columns[0].state.select(Some(0));
+
+        app.send_patch("a".into(), "a-one".into(), json!({ "title": "changed" }));
+        app.on_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+
+        assert_eq!(app.selected_task().map(|row| row.task.id.as_str()), Some("a-two"));
+        assert!(app.error.as_deref().is_some_and(|error| error.contains("current save")));
+        assert_eq!(
+            cmds.try_iter()
+                .filter(|command| matches!(command, Cmd::Patch { .. }))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_response_for_another_operation_is_ignored() {
+        let (mut app, _cmds) = app_with_lists(&["a"]);
+        app.sync = SyncState::Ready;
+        pending(
+            &mut app,
+            MutationContext::Patch {
+                list_id: "a".into(),
+                task_id: "a-cached".into(),
+            },
+        );
+
+        app.on_msg(Msg::Updated {
+            operation: 99,
+            list_id: "a".into(),
+            task_id: "a-cached".into(),
+            result: Ok(Task {
+                title: "wrong response".into(),
+                ..task("a-cached", None, "1", false)
+            }),
+        });
+
+        assert_eq!(app.pending_operation.as_ref().map(|pending| pending.id), Some(1));
+        assert_ne!(app.columns[0].rows[0].task.title, "wrong response");
+    }
+
+    #[test]
+    fn a_failed_create_restores_the_exact_draft() {
+        let (mut app, cmds) = app_with_lists(&["a", "b"]);
+        let _ = cmds.recv().unwrap(); // startup refresh
+        app.sync = SyncState::Ready;
+        app.start_create(false);
+        let edit = app.edit_mut().unwrap();
+        edit.buf = "keep this draft".into();
+        edit.cursor = edit.buf.len();
+
+        app.commit_edit();
+        let _ = cmds.recv().unwrap(); // create command
+        app.focus = 1; // navigation remains available while the create is pending
+        let operation = app.pending_operation.as_ref().unwrap().id;
+        app.on_msg(Msg::Created {
+            operation,
+            list_id: "a".into(),
+            selection: Some("a-cached".into()),
+            result: Err("offline".into()),
+        });
+
+        assert_eq!(app.edit().map(|e| e.buf.as_str()), Some("keep this draft"));
+        assert!(app.is_creating());
+        assert_eq!(app.columns[app.focus].list.id, "a");
+        let _ = cmds.recv().unwrap(); // recovery refresh
+        app.commit_edit();
+        assert!(cmds.try_recv().is_err(), "draft must wait for recovery sync");
+        assert_eq!(app.edit().map(|e| e.buf.as_str()), Some("keep this draft"));
     }
 
     #[test]
     fn pending_mutations_prevent_cache_snapshots() {
         let (mut app, _cmds) = app_with_lists(&["a"]);
-        app.synced = true;
-        app.saving = 1;
+        app.sync = SyncState::Ready;
+        pending(
+            &mut app,
+            MutationContext::Patch {
+                list_id: "a".into(),
+                task_id: "a-cached".into(),
+            },
+        );
 
         assert!(!app.save_cache());
     }
@@ -2180,7 +2647,7 @@ mod tests {
         let _ = cmds.recv().unwrap(); // second refresh
         app.on_msg(Msg::Lists(first, Ok(Vec::new()))); // late response from the first
 
-        assert!(!app.synced);
+        assert_ne!(app.sync, SyncState::Ready);
         assert_eq!(app.columns.len(), 1);
         assert_eq!(app.columns[0].list.id, "a");
     }
@@ -2193,25 +2660,40 @@ mod tests {
             task("a-two", None, "2", false),
         ]);
         app.columns[0].state.select(Some(1));
-        app.edit = Some(Edit {
-            list_id: "a".into(),
-            task_id: "a-two".into(),
-            field: FieldId::Title,
+        app.interaction = Interaction::Editing(Edit {
+            target: EditTarget::Existing {
+                list_id: "a".into(),
+                task_id: "a-two".into(),
+                field: FieldId::Title,
+            },
             buf: "editing two".into(),
             cursor: 11,
         });
-        app.saving = 1;
+        let operation = pending(
+            &mut app,
+            MutationContext::Patch {
+                list_id: "a".into(),
+                task_id: "a-one".into(),
+            },
+        );
 
-        app.on_msg(Msg::Updated(
-            "a".into(),
-            Ok(Task {
+        app.on_msg(Msg::Updated {
+            operation,
+            list_id: "a".into(),
+            task_id: "a-one".into(),
+            result: Ok(Task {
                 title: "updated one".into(),
                 ..task("a-one", None, "1", false)
             }),
-        ));
+        });
 
         assert_eq!(app.selected_task().map(|r| r.task.id.as_str()), Some("a-two"));
-        assert_eq!(app.edit.as_ref().map(|e| e.task_id.as_str()), Some("a-two"));
+        assert_eq!(
+            app.edit()
+                .and_then(Edit::existing)
+                .map(|(_, task_id, _)| task_id),
+            Some("a-two")
+        );
     }
 
     #[test]
@@ -2222,35 +2704,52 @@ mod tests {
             task("a-two", None, "2", false),
         ]);
         app.columns[0].state.select(Some(1));
-        app.edit = Some(Edit {
-            list_id: "a".into(),
-            task_id: "a-two".into(),
-            field: FieldId::Title,
+        app.interaction = Interaction::Editing(Edit {
+            target: EditTarget::Existing {
+                list_id: "a".into(),
+                task_id: "a-two".into(),
+                field: FieldId::Title,
+            },
             buf: "editing two".into(),
             cursor: 11,
         });
-        app.saving = 1;
+        let operation = pending(
+            &mut app,
+            MutationContext::Create(new_edit("a", Some("a-one"), "new task")),
+        );
 
-        app.on_msg(Msg::Created(
-            "a".into(),
-            Some("a-one".into()),
-            Ok(Task {
+        app.on_msg(Msg::Created {
+            operation,
+            list_id: "a".into(),
+            selection: Some("a-one".into()),
+            result: Ok(Task {
                 id: "new".into(),
                 title: "new task".into(),
                 status: "needsAction".into(),
                 position: "0".into(),
                 ..Default::default()
             }),
-        ));
+        });
 
         assert_eq!(app.selected_task().map(|r| r.task.id.as_str()), Some("a-two"));
-        assert_eq!(app.edit.as_ref().map(|e| e.task_id.as_str()), Some("a-two"));
+        assert_eq!(
+            app.edit()
+                .and_then(Edit::existing)
+                .map(|(_, task_id, _)| task_id),
+            Some("a-two")
+        );
     }
 
     #[test]
     fn quit_waits_for_writes_and_a_second_quit_forces_it() {
         let (mut app, _cmds) = app_with_lists(&["a"]);
-        app.saving = 1;
+        pending(
+            &mut app,
+            MutationContext::Patch {
+                list_id: "a".into(),
+                task_id: "a-cached".into(),
+            },
+        );
 
         app.on_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
         assert!(!app.quit, "the first quit must wait for the pending write");
@@ -2262,31 +2761,41 @@ mod tests {
     #[test]
     fn a_waiting_quit_finishes_when_the_last_write_returns() {
         let (mut app, _cmds) = app_with_lists(&["a"]);
-        app.saving = 1;
+        let operation = pending(
+            &mut app,
+            MutationContext::Create(new_edit("a", Some("a-cached"), "draft")),
+        );
 
         app.on_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
         assert!(!app.quit);
-        app.on_msg(Msg::Created(
-            "a".into(),
-            Some("a-cached".into()),
-            Err("offline".into()),
-        ));
+        app.on_msg(Msg::Created {
+            operation,
+            list_id: "a".into(),
+            selection: Some("a-cached".into()),
+            result: Err("offline".into()),
+        });
 
-        assert_eq!(app.saving, 0);
+        assert!(app.pending_operation.is_none());
         assert!(app.quit);
     }
 
     #[test]
     fn worker_disconnect_does_not_hang_a_waiting_quit() {
         let (mut app, _cmds) = app_with_lists(&["a"]);
-        app.saving = 2;
+        pending(
+            &mut app,
+            MutationContext::Patch {
+                list_id: "a".into(),
+                task_id: "a-cached".into(),
+            },
+        );
         app.quitting = true;
 
         app.worker_disconnected();
 
-        assert_eq!(app.saving, 0);
+        assert!(app.pending_operation.is_none());
         assert!(app.quit);
-        assert!(!app.synced);
+        assert_eq!(app.sync, SyncState::Failed);
         assert!(app.error.as_deref().is_some_and(|e| e.contains("worker stopped")));
     }
 
