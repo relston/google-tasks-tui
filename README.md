@@ -39,6 +39,23 @@ available as subcommands for scripts and agents (`google-tasks-tui lists`,
 - `d` deletes the selected task after a y/n confirmation in the status bar.
   The prompt names the task and counts the subtasks that go with it, since
   Google deletes those too.
+- `y` copies the selected task to the system clipboard as markdown, ready to
+  paste into a note: the title as a heading, the due date, the notes, and the
+  links Google hung off the task, such as the Gmail thread it was made from. No
+  id, status or parent; those identify a task to the API and mean nothing in a
+  note, and `google-tasks-tui get` is still there when you want them. No link
+  back to the task itself either. The status bar confirms in green until your next
+  keypress. It uses `wl-copy`, `xclip`, `xsel` or `pbcopy`, whichever it finds
+  first, and falls back to the terminal's own OSC 52 clipboard so a yank still
+  works over SSH.
+
+  ```markdown
+  # Check In For Yearly Checkup
+
+  Need my vax for newborns
+
+  - [Check In For Your Upcoming Visit](https://mail.google.com/mail/#all/1a0…)
+  ```
 - `b` opens a **Browse Link** overlay of everything the selected task links
   to. Links Google attached to the task — the Gmail thread a task was made
   from, a linked Doc — are listed first under the source's own title, with
@@ -192,6 +209,7 @@ requires `--yes` because Google removes every task in that list.
 | `g` / `G`      | First / last task               |
 | `c`            | Create a task in this list      |
 | `C`            | Create a subtask under this one |
+| `y`            | Copy the task as markdown       |
 | `b`            | Open a link from the notes      |
 | `m`            | Move the task to another list   |
 | `Tab`          | Move between shelf fields       |

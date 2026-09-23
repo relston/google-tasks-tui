@@ -1,7 +1,7 @@
 use std::{
     borrow::Cow,
     collections::HashSet,
-    io,
+    io::{self, Write},
     process::{Command, Stdio},
     sync::mpsc::{self, Receiver, Sender},
     thread,
@@ -256,6 +256,8 @@ struct App {
     /// Edits sent to Google that haven't come back yet.
     saving: usize,
     error: Option<String>,
+    /// A one-off confirmation, cleared by the next keypress.
+    notice: Option<String>,
     cmds: Sender<Cmd>,
     quit: bool,
 }
@@ -293,6 +295,7 @@ impl App {
             synced: false,
             saving: 0,
             error: None,
+            notice: None,
             cmds,
             quit: false,
         };
@@ -646,6 +649,21 @@ impl App {
         self.columns.get(self.focus)?.selected()
     }
 
+    /// Copy the selected task as markdown, ready to paste into a note.
+    fn yank(&mut self) {
+        let Some(row) = self.selected_task() else { return };
+        // The same control characters that would wreck a row would paste badly.
+        let md = clean(&crate::cli::md_yank(&row.task)).into_owned();
+        let title = title_of(&row.task).into_owned();
+        if copy(&md) {
+            self.error = None;
+            self.notice = Some(format!("copied \"{title}\" as markdown"));
+        } else {
+            self.notice = None;
+            self.error = Some("no clipboard: install wl-copy, xclip or xsel".into());
+        }
+    }
+
     fn start_browse(&mut self) {
         let Some(row) = self.selected_task() else { return };
         let links = task_links(&row.task);
@@ -777,6 +795,8 @@ impl App {
     }
 
     fn on_key(&mut self, k: KeyEvent) {
+        // A notice is for the keypress that earned it, and no longer.
+        self.notice = None;
         if self.edit.is_some() {
             self.edit_key(k);
             return;
@@ -850,6 +870,7 @@ impl App {
             KeyCode::Char('C') => self.start_create(true),
             KeyCode::Char('r') => self.refresh(),
             KeyCode::Char('t') => self.transparent = !self.transparent,
+            KeyCode::Char('y') => self.yank(),
             KeyCode::Char('b') => self.start_browse(),
             KeyCode::Char('m') => self.start_move(),
             KeyCode::Char('?') => self.start_help(),
@@ -940,14 +961,17 @@ impl App {
         } else if !self.synced {
             " syncing with Google… board is read-only until it lands"
         } else if self.shelf {
-            " Tab field · i edit · c new · C subtask · ␣ done · j/k task · b link · m move · d delete · ? help · q quit"
+            " Tab field · i edit · c new · C subtask · ␣ done · y copy · b link · m move · d delete · ? help · q quit"
         } else {
-            " h/l list · j/k task · ␣ done · ⏎ details · c new · C subtask · i edit · b link · m move · d delete · ? help · q quit"
+            " h/l list · j/k task · ␣ done · ⏎ details · c new · C subtask · i edit · y copy · b link · m move · d delete · ? help · q quit"
         };
-        let status_line = match (&self.pending, &self.error) {
-            (Some(p), _) => Line::styled(format!(" {}", p.prompt), Style::default().fg(t.yellow).bold()),
-            (None, Some(e)) => Line::styled(format!(" {e}"), Style::default().fg(t.red)),
-            (None, None) => Line::styled(hints, Style::default().fg(t.muted)),
+        let status_line = match (&self.pending, &self.error, &self.notice) {
+            (Some(p), _, _) => {
+                Line::styled(format!(" {}", p.prompt), Style::default().fg(t.yellow).bold())
+            }
+            (None, Some(e), _) => Line::styled(format!(" {e}"), Style::default().fg(t.red)),
+            (None, None, Some(n)) => Line::styled(format!(" {n}"), Style::default().fg(t.green)),
+            (None, None, None) => Line::styled(hints, Style::default().fg(t.muted)),
         };
         f.render_widget(status_line, status);
     }
@@ -1342,6 +1366,7 @@ fn help_keys() -> Vec<(&'static str, &'static str)> {
         ("C", "new subtask"),
         ("i", "edit focused field"),
         ("d", "delete task"),
+        ("y", "copy task as markdown"),
         ("b", "browse links in notes"),
         ("m", "move to another list"),
         ("r", "refresh from Google"),
@@ -1440,6 +1465,61 @@ fn urls_in(notes: &str) -> Vec<String> {
             out.push(url);
         }
         i += scheme.len() + end;
+    }
+    out
+}
+
+/// Helpers that take the text on stdin. Each of these either exits or detaches
+/// once it has read the selection, so waiting on one does not stall the UI.
+const CLIPBOARD: &[(&str, &[&str])] = &[
+    ("wl-copy", &[]),
+    ("xclip", &["-selection", "clipboard"]),
+    ("xsel", &["--clipboard", "--input"]),
+    ("pbcopy", &[]),
+];
+
+/// Put `text` on the system clipboard. Falls back to OSC 52, which asks the
+/// terminal itself, so a yank still works over SSH or with no helper installed.
+fn copy(text: &str) -> bool {
+    for (bin, args) in CLIPBOARD {
+        let Ok(mut child) = Command::new(bin)
+            .args(*args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        else {
+            continue;
+        };
+        // Dropping the pipe closes stdin, which is what tells them to finish.
+        let wrote = child
+            .stdin
+            .take()
+            .is_some_and(|mut pipe| pipe.write_all(text.as_bytes()).is_ok());
+        let ok = child.wait().is_ok_and(|s| s.success());
+        if wrote && ok {
+            return true;
+        }
+    }
+    let mut out = io::stdout();
+    write!(out, "\x1b]52;c;{}\x07", base64(text.as_bytes()))
+        .and_then(|()| out.flush())
+        .is_ok()
+}
+
+/// Standard base64, for the OSC 52 payload.
+fn base64(data: &[u8]) -> String {
+    const SET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for chunk in data.chunks(3) {
+        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+        let n = u32::from(b[0]) << 16 | u32::from(b[1]) << 8 | u32::from(b[2]);
+        for i in 0..4 {
+            match i <= chunk.len() {
+                true => out.push(SET[(n >> (18 - i * 6)) as usize & 63] as char),
+                false => out.push('='),
+            }
+        }
     }
     out
 }
@@ -1906,6 +1986,51 @@ mod tests {
         // Byte offsets have to survive, or wrap()/cursor_rc() slice mid-char.
         for raw in ["print \r and", "a\u{7}b\u{1b}c", "\r\n\r\n", "héllo\rwörld"] {
             assert_eq!(clean(raw).len(), raw.len(), "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn base64_matches_the_rfc_vectors() {
+        for (raw, want) in [
+            ("", ""),
+            ("f", "Zg=="),
+            ("fo", "Zm8="),
+            ("foo", "Zm9v"),
+            ("foob", "Zm9vYg=="),
+            ("fooba", "Zm9vYmE="),
+            ("foobar", "Zm9vYmFy"),
+        ] {
+            assert_eq!(base64(raw.as_bytes()), want, "{raw:?}");
+        }
+        // Bytes above ASCII and a NUL round-trip through the same table.
+        assert_eq!(base64("héllo".as_bytes()), "aMOpbGxv");
+        assert_eq!(base64(&[0, 0, 0]), "AAAA");
+    }
+
+    #[test]
+    fn a_yank_carries_the_links_and_drops_the_bookkeeping() {
+        let task = Task {
+            id: "t1".into(),
+            title: "Check In For Yearly Checkup".into(),
+            notes: Some("Need my vax\r\n".into()),
+            status: "needsAction".into(),
+            due: Some("2026-09-25T00:00:00.000Z".into()),
+            parent: Some("p9".into()),
+            links: vec![crate::api::Link {
+                description: "Check In For Your Upcoming Visit".into(),
+                link: "https://mail.google.com/mail/#all/1a0".into(),
+            }],
+            ..Default::default()
+        };
+        let md = clean(&crate::cli::md_yank(&task)).into_owned();
+        assert_eq!(
+            md,
+            "# Check In For Yearly Checkup\n\nDue: 2026-09-25\n\nNeed my vax\n\n\
+             - [Check In For Your Upcoming Visit](https://mail.google.com/mail/#all/1a0)\n"
+        );
+        // The things that identify a task to the API have no place in a note.
+        for noise in ["t1", "needsAction", "p9", "id:", "status:", "parent:"] {
+            assert!(!md.contains(noise), "{noise:?} is still in {md:?}");
         }
     }
 

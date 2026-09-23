@@ -474,7 +474,10 @@ fn md_task_section(list: &TaskList, tasks: &[Task]) -> String {
     s
 }
 
-fn md_task(task: &Task) -> String {
+/// One task as markdown for `get`: a record, ids and all, for scripts and
+/// agents that will act on it. `md_yank` is the version meant for a human to
+/// paste into a note.
+pub(crate) fn md_task(task: &Task) -> String {
     let mut s = format!("# {}\n\n- id: `{}`\n- status: {}", task.title, task.id, task.status);
     if let Some(d) = task.due_date() {
         s.push_str(&format!("\n- due: {d}"));
@@ -490,6 +493,46 @@ fn md_task(task: &Task) -> String {
     s
 }
 
+/// One task as markdown to paste somewhere: the title, when it is due, the
+/// notes, and the links Google hung off the task — the Gmail thread it was
+/// made from, the Doc it points at. No id, status or parent; those identify a
+/// task to the API and mean nothing in a note. No `web_view_link` either: a
+/// link back to the task you just copied is noise.
+pub(crate) fn md_yank(task: &Task) -> String {
+    let title = match task.title.trim() {
+        "" => "(untitled)",
+        t => t,
+    };
+    let mut s = format!("# {title}\n");
+    if let Some(d) = task.due_date() {
+        s.push_str(&format!("\nDue: {d}\n"));
+    }
+    if let Some(n) = task.notes.as_deref().map(str::trim).filter(|n| !n.is_empty()) {
+        s.push_str(&format!("\n{n}\n"));
+    }
+    let links = task
+        .links
+        .iter()
+        .filter(|l| !l.link.is_empty())
+        .map(|l| (l.description.trim(), l.link.as_str()));
+    let mut any = false;
+    for (text, url) in links {
+        if !any {
+            s.push('\n');
+            any = true;
+        }
+        // A bare URL is its own label when Google gives no description.
+        let label = if text.is_empty() { url } else { text };
+        s.push_str(&format!("- [{}]({url})\n", escape_label(label)));
+    }
+    s
+}
+
+/// Keep a link's text from closing the `[...]` early.
+fn escape_label(text: &str) -> String {
+    text.replace('\\', "\\\\").replace('[', "\\[").replace(']', "\\]")
+}
+
 fn api_fail(e: Box<dyn std::error::Error + Send + Sync>) -> Error {
     Error::Fail(e.to_string())
 }
@@ -501,6 +544,7 @@ fn io_fail(e: io::Error) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::Link;
     use std::collections::HashMap;
     use std::env;
     use std::fs;
@@ -820,6 +864,44 @@ mod tests {
         assert!(res.is_ok());
         assert!(out.is_empty());
         assert_eq!(api.deletes, vec![("lw".into(), "t2".into())]);
+    }
+
+    #[test]
+    fn md_yank_is_the_paste_shape() {
+        // Nothing but a title, even when Google sends a link to the task.
+        let bare = Task {
+            web_view_link: Some("https://tasks.google.com/t/9".into()),
+            ..task("t1", "Buy milk", "needsAction")
+        };
+        assert_eq!(md_yank(&bare), "# Buy milk\n");
+        assert_eq!(md_yank(&Task::default()), "# (untitled)\n");
+
+        // A description-less link labels itself with its URL, and a title with
+        // brackets cannot close the link early.
+        let t = Task {
+            links: vec![
+                Link { description: "  ".into(), link: "https://bare.test/x".into() },
+                Link { description: "a [b] c".into(), link: "https://named.test".into() },
+                Link { description: "dropped".into(), link: String::new() },
+            ],
+            // A link back to the task itself is not wanted.
+            web_view_link: Some("https://tasks.google.com/t/1".into()),
+            ..task("t2", "Linked", "needsAction")
+        };
+        assert_eq!(
+            md_yank(&t),
+            "# Linked\n\n\
+             - [https://bare.test/x](https://bare.test/x)\n\
+             - [a \\[b\\] c](https://named.test)\n"
+        );
+
+        // Due and notes, in that order, each its own block.
+        let t = Task {
+            due: Some("2026-09-25T00:00:00.000Z".into()),
+            notes: Some("  line one\nline two  ".into()),
+            ..task("t3", "Both", "needsAction")
+        };
+        assert_eq!(md_yank(&t), "# Both\n\nDue: 2026-09-25\n\nline one\nline two\n");
     }
 
     #[test]

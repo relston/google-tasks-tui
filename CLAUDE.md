@@ -17,10 +17,12 @@ Work directly on `main`; no feature branches.
   `-f` / `--format json|md` (global) selects JSON for scripts.
 - `src/main.rs` — binary shim that calls `entry()`.
 - `src/cli.rs` — `lists`, `tasks`, `get`, `create`, `update`, `done`,
-  `undone`, `delete`, and `list create|update|delete`. Resolves `--list` /
-  list specs by id first, then unique title. `-f` / `--format` is `md`
-  (default) or `json`. Mutations go through `TasksApi`, then refresh
-  `cache.json`. A running TUI does not live-reload CLI edits (press `r`).
+  `undone`, `delete`, and `list create|update|delete`. Two markdown shapes for
+  one task, both `pub(crate)`: `md_task` for `get` (a record, ids and all) and
+  `md_yank` for the TUI's `y` (a note to paste). Resolves `--list` / list
+  specs by id first, then unique title. `-f` / `--format` is `md` (default) or
+  `json`. Mutations go through `TasksApi`, then refresh `cache.json`. A
+  running TUI does not live-reload CLI edits (press `r`).
 - `src/theme.rs` — finds the active Omarchy theme, parses `colors.toml`, maps it
   to semantic roles (`bg, fg, surface, accent, muted, sel_bg, sel_fg, red,
   green, yellow, blue`). Exposes `load()` and `fingerprint()`.
@@ -75,22 +77,32 @@ Work directly on `main`; no feature branches.
   PATCHing. `C` fills the draft's `parent` from `subtask_parent`: the selected
   row, or the row's own parent when it is already a subtask, since Google
   Tasks nests exactly one level deep. A row that draws at depth 0 because its
-  parent is missing from the list parents the new subtask itself. `task_links`
-  gathers what the selected task points at — the `links` Google attached to it
-  (Gmail thread, Doc), which carry the source's `description` as a title, then
-  `urls_in` over the notes, deduped by URL — and `b` opens a centered **Browse
-  Link** overlay showing each title with its URL beneath (`ellipsize` trims to
-  the overlay width); `j`/`k` move, Enter `spawn`s `open` / `xdg-open` for the
-  selected URL and dismisses the overlay, Shift+Enter opens every URL in the
-  list then dismisses, Esc/`q` close it. It renders `Clear` first, since a
-  `Block` restyles the cells under it but leaves their text (`draw_move` and
-  `draw_help` still have that bleed-through). `m` opens a **Move** overlay of
-  every list except the current one; Enter POSTs `tasks.move` (`Cmd::Move` /
-  `Client::relocate`) for the selected task and its subtasks, then follows the
-  selection to the dest column. `?` opens a **Keyboard** overlay of
-  `help_keys()`; `j`/`k` move, Esc/`q`/`?` close it. Startup pushes kitty
-  keyboard flags when the terminal supports them, so Shift+Enter reaches the
-  notes editor (Alt+Enter and Ctrl-J are the fallbacks).
+  parent is missing from the list parents the new subtask itself. `y` yanks
+  the selected task with `cli::md_yank` — title, due, notes and every `links`
+  entry as markdown links, and none of the id / status / parent that `md_task`
+  prints for `get`, nor `web_view_link`, because those identify a task to the
+  API and mean nothing in a note — then runs it through `clean()`, since a
+  control character pastes as badly as it renders; `copy()` tries `wl-copy` /
+  `xclip` / `xsel` / `pbcopy` in turn (each exits or detaches once stdin
+  closes, so waiting on one cannot stall the UI) and falls back to OSC 52 with
+  a local `base64`. `App::notice` is the green counterpart to `App::error`,
+  cleared at the top of `on_key` so it lasts exactly one keypress.
+  `task_links` gathers what the selected task points at — the `links` Google
+  attached to it (Gmail thread, Doc), which carry the source's `description`
+  as a title, then `urls_in` over the notes, deduped by URL — and `b` opens a
+  centered **Browse Link** overlay showing each title with its URL beneath
+  (`ellipsize` trims to the overlay width); `j`/`k` move, Enter `spawn`s
+  `open` / `xdg-open` for the selected URL and dismisses the overlay,
+  Shift+Enter opens every URL in the list then dismisses, Esc/`q` close it. It
+  renders `Clear` first, since a `Block` restyles the cells under it but
+  leaves their text (`draw_move` and `draw_help` still have that bleed-
+  through). `m` opens a **Move** overlay of every list except the current one;
+  Enter POSTs `tasks.move` (`Cmd::Move` / `Client::relocate`) for the selected
+  task and its subtasks, then follows the selection to the dest column. `?`
+  opens a **Keyboard** overlay of `help_keys()`; `j`/`k` move, Esc/`q`/`?`
+  close it. Startup pushes kitty keyboard flags when the terminal supports
+  them, so Shift+Enter reaches the notes editor (Alt+Enter and Ctrl-J are the
+  fallbacks).
 
 ## Omarchy theming facts (verified Sept 2026)
 - Active theme dir, current releases: `$XDG_STATE_HOME/omarchy/current`
