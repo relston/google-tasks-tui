@@ -7,9 +7,10 @@ use clap::{Parser, Subcommand, ValueEnum};
 use crate::api::{
     CreateTask, Error as ApiError, ListPatch, Task, TaskList, TaskPatch, TasksApi,
 };
-use crate::board::{self, Board};
+use crate::board::Board;
 use crate::cache;
 use crate::paths::Paths;
+use crate::presentation::{md_lists, md_task, md_task_section, normalize_title};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
 pub enum Format {
@@ -206,9 +207,7 @@ pub fn execute_to(
             due,
             parent,
         } => {
-            if title.trim().is_empty() {
-                return Err(Error::Usage("a task needs a title".into()));
-            }
+            let title = normalize_title(&title).map_err(|error| Error::Usage(error.into()))?;
             let lists = tasklists(api)?;
             let list = resolve_list(&lists, &list)?;
             if let Some(parent_id) = &parent {
@@ -241,11 +240,10 @@ pub fn execute_to(
             due,
             status,
         } => {
-            if let Some(t) = &title {
-                if t.trim().is_empty() {
-                    return Err(Error::Usage("a task needs a title".into()));
-                }
-            }
+            let title = title
+                .map(|title| normalize_title(&title))
+                .transpose()
+                .map_err(|error| Error::Usage(error.into()))?;
             if title.is_none() && notes.is_none() && due.is_none() && status.is_none() {
                 return Err(Error::Usage(
                     "update needs at least one of --title, --notes, --due, --status".into(),
@@ -289,17 +287,15 @@ pub fn execute_to(
         }
         Command::List { cmd } => match cmd {
             ListCmd::Create { title } => {
-                if title.trim().is_empty() {
-                    return Err(Error::Usage("a list needs a title".into()));
-                }
+                let title = normalize_title(&title)
+                    .map_err(|_| Error::Usage("a list needs a title".into()))?;
                 let list = api.create_list(&title).map_err(api_fail)?;
                 cache_upsert_list(api, list.clone())?;
                 write_list(out, format, &list)?;
             }
             ListCmd::Update { list, title } => {
-                if title.trim().is_empty() {
-                    return Err(Error::Usage("a list needs a title".into()));
-                }
+                let title = normalize_title(&title)
+                    .map_err(|_| Error::Usage("a list needs a title".into()))?;
                 let lists = tasklists(api)?;
                 let list = resolve_list(&lists, &list)?;
                 let list = api
@@ -486,92 +482,6 @@ fn write_list(out: &mut impl Write, format: Format, list: &TaskList) -> Result<(
     }
 }
 
-fn md_lists(lists: &[TaskList]) -> String {
-    lists
-        .iter()
-        .map(|l| format!("- {} (`{}`)\n", l.title, l.id))
-        .collect()
-}
-
-fn md_task_section(list: &TaskList, tasks: &[Task]) -> String {
-    let mut s = format!("# {} (`{}`)\n", list.title, list.id);
-    let rows = board::ordered(tasks.to_vec());
-    if !rows.is_empty() {
-        s.push('\n');
-        for row in rows {
-            let t = row.task;
-            let mark = if t.is_done() { "x" } else { " " };
-            let indent = if row.depth > 0 { "  " } else { "" };
-            s.push_str(&format!("{indent}- [{mark}] {} (`{}`)\n", t.title, t.id));
-            if let Some(n) = t.notes.as_deref().map(str::trim).filter(|n| !n.is_empty()) {
-                for line in n.lines() {
-                    s.push_str(&format!("{indent}  {line}\n"));
-                }
-            }
-        }
-    }
-    s
-}
-
-/// One task as markdown for `get`: a record, ids and all, for scripts and
-/// agents that will act on it. `md_yank` is the version meant for a human to
-/// paste into a note.
-pub(crate) fn md_task(task: &Task) -> String {
-    let mut s = format!("# {}\n\n- id: `{}`\n- status: {}", task.title, task.id, task.status);
-    if let Some(d) = task.due_date() {
-        s.push_str(&format!("\n- due: {d}"));
-    }
-    if let Some(p) = &task.parent {
-        s.push_str(&format!("\n- parent: `{p}`"));
-    }
-    if let Some(n) = task.notes.as_deref().map(str::trim).filter(|n| !n.is_empty()) {
-        s.push_str("\n\n");
-        s.push_str(n);
-    }
-    s.push('\n');
-    s
-}
-
-/// One task as markdown to paste somewhere: the title, when it is due, the
-/// notes, and the links Google hung off the task — the Gmail thread it was
-/// made from, the Doc it points at. No id, status or parent; those identify a
-/// task to the API and mean nothing in a note. No `web_view_link` either: a
-/// link back to the task you just copied is noise.
-pub(crate) fn md_yank(task: &Task) -> String {
-    let title = match task.title.trim() {
-        "" => "(untitled)",
-        t => t,
-    };
-    let mut s = format!("# {title}\n");
-    if let Some(d) = task.due_date() {
-        s.push_str(&format!("\nDue: {d}\n"));
-    }
-    if let Some(n) = task.notes.as_deref().map(str::trim).filter(|n| !n.is_empty()) {
-        s.push_str(&format!("\n{n}\n"));
-    }
-    let links = task
-        .links
-        .iter()
-        .filter(|l| !l.link.is_empty())
-        .map(|l| (l.description.trim(), l.link.as_str()));
-    let mut any = false;
-    for (text, url) in links {
-        if !any {
-            s.push('\n');
-            any = true;
-        }
-        // A bare URL is its own label when Google gives no description.
-        let label = if text.is_empty() { url } else { text };
-        s.push_str(&format!("- [{}]({url})\n", escape_label(label)));
-    }
-    s
-}
-
-/// Keep a link's text from closing the `[...]` early.
-fn escape_label(text: &str) -> String {
-    text.replace('\\', "\\\\").replace('[', "\\[").replace(']', "\\]")
-}
-
 fn api_fail(e: ApiError) -> Error {
     Error::Fail(e.to_string())
 }
@@ -584,6 +494,7 @@ fn io_fail(e: io::Error) -> Error {
 mod tests {
     use super::*;
     use crate::api::Link;
+    use crate::presentation::md_yank;
     use serde_json::{json, Value};
     use std::collections::HashMap;
     use std::env;
@@ -1023,8 +934,8 @@ mod tests {
         assert_eq!(
             md_yank(&t),
             "# Linked\n\n\
-             - [https://bare.test/x](https://bare.test/x)\n\
-             - [a \\[b\\] c](https://named.test)\n"
+             - [https://bare.test/x](<https://bare.test/x>)\n\
+             - [a \\[b\\] c](<https://named.test>)\n"
         );
 
         // Due and notes, in that order, each its own block.

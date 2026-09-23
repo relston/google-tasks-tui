@@ -17,12 +17,15 @@ Work directly on `main`; no feature branches.
   `-f` / `--format json|md` (global) selects JSON for scripts.
 - `src/main.rs` — binary shim that calls `entry()`.
 - `src/cli.rs` — `lists`, `tasks`, `get`, `create`, `update`, `done`,
-  `undone`, `delete`, and `list create|update|delete`. Two markdown shapes for
-  one task, both `pub(crate)`: `md_task` for `get` (a record, ids and all) and
-  `md_yank` for the TUI's `y` (a note to paste). Resolves `--list` / list
-  specs by id first, then unique title. `-f` / `--format` is `md` (default) or
-  `json`. Mutations go through `TasksApi`, then refresh `cache.json`. A
+  `undone`, `delete`, and `list create|update|delete`. Resolves `--list` /
+  list specs by id first, then unique title. `-f` / `--format` is `md`
+  (default) or `json`. Mutations go through `TasksApi`, then refresh
+  `cache.json`. A
   running TUI does not live-reload CLI edits (press `r`).
+- `src/presentation.rs` — shared title normalization, terminal-control
+  sanitization, context-aware Markdown output (`md_task` records and
+  pasteable `md_yank` notes), and validated HTTP(S) extraction that preserves
+  balanced delimiters.
 - `src/board.rs` — canonical task-list/task state keyed by Google IDs. It
   filters deleted tasks, derives the shared open/completed/subtask row order
   used by TUI and CLI Markdown, converts to/from cache snapshots, and owns

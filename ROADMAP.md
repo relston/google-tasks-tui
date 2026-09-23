@@ -163,16 +163,16 @@ Unicode input.
 Remove CLI/TUI dependency inversion and prevent malformed human-readable
 output.
 
-- [ ] a) Extract Markdown formatting from [`src/cli.rs`](src/cli.rs) into a
+- [x] a) Extract Markdown formatting from [`src/cli.rs`](src/cli.rs) into a
   presentation module shared by CLI output and TUI yank.
-- [ ] b) Share title normalization and validation between CLI and TUI paths.
-- [ ] c) Strip unsafe terminal controls from human-readable output while
+- [x] b) Share title normalization and validation between CLI and TUI paths.
+- [x] c) Strip unsafe terminal controls from human-readable output while
   leaving JSON semantically unchanged.
-- [ ] d) Escape Markdown headings, list text, code spans, labels, and link
+- [x] d) Escape Markdown headings, list text, code spans, labels, and link
   destinations according to context.
-- [ ] e) Replace the ad hoc URL scanner with parsing that preserves valid
+- [x] e) Replace the ad hoc URL scanner with parsing that preserves valid
   balanced parentheses and rejects malformed HTTP(S) URLs.
-- [ ] f) Document an explicit CLI/TUI capability matrix and either align the
+- [x] f) Document an explicit CLI/TUI capability matrix and either align the
   missing operations or mark them intentionally interface-specific.
 
 ## Phase 9: Split the TUI along tested boundaries

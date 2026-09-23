@@ -210,6 +210,19 @@ pass (`--title`, `--notes`, `--due`, `--status needsAction|completed`).
 `list update` / `list delete` take a list id or unique title. `list delete`
 requires `--yes` because Google removes every task in that list.
 
+## Interface coverage
+
+| Capability | TUI | CLI | Intent |
+| ---------- | --- | --- | ------ |
+| Read lists/tasks/details | Yes | Yes | Shared canonical ordering and filtering |
+| Create/edit/complete/delete tasks | Yes | Yes | Same validation and API contracts |
+| Create subtasks | `C` | `create --parent` | Same one-level Google constraint |
+| Edit notes | Yes | Yes | Assigned Docs/Chat tasks are rejected |
+| Edit due date/status directly | Status via `Space` | Yes | Due-date editor remains future TUI work |
+| Move tasks between lists | Yes | No | Interactive destination picker; CLI move remains deferred |
+| Task-list create/rename/delete | No | Yes | TUI list management remains deferred |
+| Browse/copy task links | Yes | No | Terminal-interactive behavior |
+
 ## Keys
 
 | Key            | Action                          |
@@ -277,6 +290,7 @@ src/
 ├── config.rs  # config.toml: defaults, first-run bootstrap, parsing
 ├── paths.rs   # injectable credential/config paths
 ├── platform.rs # macOS/Linux browser and clipboard effects
+├── presentation.rs # shared Markdown, validation, sanitization, URL extraction
 ├── storage.rs # locking and secure atomic writes
 ├── auth.rs    # OAuth: client secret, token cache, refresh, loopback sign-in
 └── theme.rs   # theme discovery, colors.toml parsing, role mapping, fingerprint

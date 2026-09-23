@@ -38,6 +38,7 @@ use crate::cache;
 use crate::config::{self, Config};
 use crate::paths::Paths;
 use crate::platform::{self, Clipboard};
+use crate::presentation::{md_yank, normalize_title, urls_in};
 use crate::theme::{self, Theme};
 
 const THEME_POLL: Duration = Duration::from_millis(500);
@@ -804,12 +805,14 @@ impl App {
             selection,
         } = &e.target
         {
-            let title = e.buf.trim().to_string();
-            if title.is_empty() {
-                self.error = Some("A task needs a title".into());
-                self.interaction = Interaction::Editing(e);
-                return;
-            }
+            let title = match normalize_title(&e.buf) {
+                Ok(title) => title,
+                Err(error) => {
+                    self.error = Some(error.into());
+                    self.interaction = Interaction::Editing(e);
+                    return;
+                }
+            };
             self.error = None;
             let (list_id, parent, selection) =
                 (list_id.clone(), parent.clone(), selection.clone());
@@ -839,12 +842,14 @@ impl App {
         };
         let fields = match field {
             FieldId::Title => {
-                let title = e.buf.trim().to_string();
-                if title.is_empty() {
-                    self.error = Some("A task needs a title".into());
-                    self.interaction = Interaction::Editing(e);
-                    return;
-                }
+                let title = match normalize_title(&e.buf) {
+                    Ok(title) => title,
+                    Err(error) => {
+                        self.error = Some(error.into());
+                        self.interaction = Interaction::Editing(e);
+                        return;
+                    }
+                };
                 if let Some(task) = self.board.task_mut(&list_id, &task_id) {
                     task.title = title.clone();
                 }
@@ -1273,7 +1278,7 @@ impl App {
     fn yank(&mut self) {
         let Some(row) = self.selected_task() else { return };
         // The same control characters that would wreck a row would paste badly.
-        let md = clean(&crate::cli::md_yank(&row.task)).into_owned();
+        let md = md_yank(&row.task);
         let title = title_of(&row.task).into_owned();
         match platform::copy(&md) {
             Ok(Clipboard::Confirmed) => {
@@ -2195,38 +2200,6 @@ fn ellipsize(s: &str, width: usize) -> String {
 fn pad_to_width(text: &str, width: usize) -> String {
     let padding = width.saturating_sub(UnicodeWidthStr::width(text));
     format!("{text}{}", " ".repeat(padding))
-}
-
-/// http(s) URLs in notes, first-seen order, no duplicates.
-fn urls_in(notes: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut i = 0;
-    while i < notes.len() {
-        let rest = &notes[i..];
-        let scheme = if rest.starts_with("https://") {
-            "https://"
-        } else if rest.starts_with("http://") {
-            "http://"
-        } else {
-            i += rest.chars().next().map(char::len_utf8).unwrap_or(1);
-            continue;
-        };
-        let after = &rest[scheme.len()..];
-        let end = after.find(char::is_whitespace).unwrap_or(after.len());
-        let mut url = format!("{}{}", scheme, &after[..end]);
-        while url
-            .chars()
-            .last()
-            .is_some_and(|c| matches!(c, '.' | ',' | ';' | ':' | '!' | '?' | ')' | ']' | '>' | '\'' | '"'))
-        {
-            url.pop();
-        }
-        if url.len() > scheme.len() && !out.iter().any(|u| u == &url) {
-            out.push(url);
-        }
-        i += scheme.len() + end;
-    }
-    out
 }
 
 /// Greedy word wrap. Returns the byte range of each display line, so the
@@ -3362,11 +3335,11 @@ mod tests {
             }],
             ..Default::default()
         };
-        let md = clean(&crate::cli::md_yank(&task)).into_owned();
+        let md = md_yank(&task);
         assert_eq!(
             md,
             "# Check In For Yearly Checkup\n\nDue: 2026-09-25\n\nNeed my vax\n\n\
-             - [Check In For Your Upcoming Visit](https://mail.google.com/mail/#all/1a0)\n"
+             - [Check In For Your Upcoming Visit](<https://mail.google.com/mail/#all/1a0>)\n"
         );
         // The things that identify a task to the API have no place in a note.
         for noise in ["t1", "needsAction", "p9", "id:", "status:", "parent:"] {
