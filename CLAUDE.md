@@ -56,15 +56,17 @@ Work directly on `main`; no feature branches.
   `check_synced()` rewrites the snapshot after a complete sync; confirmed
   mutations update it. The CLI rewrites the snapshot after each successful
   mutation.
-- `src/api.rs` — blocking Tasks v1 client on `ureq` 3; `get_all` follows
-  `nextPageToken`; `patch` PATCHes arbitrary fields of one task; `create` POSTs
-  a title with an optional parent (TUI); `insert` accepts a JSON body and a
-  `parent` query (CLI); `delete` removes one; `relocate` POSTs `tasks.move` with
-  `destinationTasklist` (TUI); `create_list` / `patch_list` / `delete_list`
-  mutate task lists. `TasksApi` is the trait the CLI and tests call.
+- `src/api.rs` — blocking Tasks v1 client on `ureq` 3. `CreateTask`,
+  `TaskPatch`, `MoveTask`, and `ListPatch` are the request contracts shared by
+  CLI and TUI through `TasksApi`; responses retain ETags and assignment
+  context. Reads paginate, include assigned tasks, retry bounded 429/5xx using
+  `Retry-After`, and retry one 401 after forcing token refresh. Writes send
+  `If-Match` where supported and return typed auth/conflict/rate-limit/timeout/
+  HTTP errors.
 - `src/tui.rs` — board UI. A worker thread owns the `Client` and talks to the
   UI over `Cmd`/`Msg` channels. Refresh messages carry a generation so old
-  responses cannot complete a newer sync. Mutations are serialized through
+  responses cannot complete a newer sync. The worker is generic over
+  `TasksApi`. Mutations are serialized through
   one `PendingOperation`; commands and responses carry its id and context, so
   stale or mismatched responses are ignored. Navigation remains available
   while mutation keys are blocked. The event loop polls input every 100 ms,
@@ -118,9 +120,12 @@ Work directly on `main`; no feature branches.
   Shift+Enter opens every URL in the list then dismisses, Esc/`q` close it. It
   renders `Clear` first, since a `Block` restyles the cells under it but
   leaves their text (`draw_move` and `draw_help` still have that bleed-
-  through). `m` opens a **Move** overlay of every list except the current one;
-  Enter POSTs `tasks.move` (`Cmd::Move` / `Client::relocate`) for the selected
-  task and its subtasks, then follows the selection to the dest column. `?`
+  through). `m` opens a **Move** overlay of every list except the current one.
+  Enter uses `tasks.move` for the selected task and its subtasks, chaining
+  `previous` to preserve sibling order, then fetches both authoritative lists.
+  Partial moves report the failed ID. Assigned Docs/Chat tasks cannot move or
+  edit notes, and their delete prompt warns that the source task is also
+  deleted. `?`
   opens a **Keyboard** overlay of `help_keys()`; `j`/`k` move, Esc/`q`/`?`
   close it. Startup pushes kitty keyboard flags when the terminal supports
   them, so Shift+Enter reaches the notes editor (Alt+Enter and Ctrl-J are the

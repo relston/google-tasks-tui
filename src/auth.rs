@@ -24,6 +24,7 @@ const SCOPE: &str = "https://www.googleapis.com/auth/tasks";
 
 fn http_agent() -> ureq::Agent {
     let config = ureq::Agent::config_builder()
+        .http_status_as_error(false)
         .timeout_connect(Some(Duration::from_secs(10)))
         .timeout_send_request(Some(Duration::from_secs(15)))
         .timeout_send_body(Some(Duration::from_secs(30)))
@@ -172,21 +173,15 @@ impl Auth {
     /// A valid access token, refreshed when it's within a minute of expiry.
     pub fn token(&mut self) -> Result<String> {
         if now() + 60 >= self.tok.expires_at {
-            let sent = self.agent.post(&self.client.token_uri).send_form([
+            let mut response = self.agent.post(&self.client.token_uri).send_form([
                 ("client_id", self.client.client_id.as_str()),
                 ("client_secret", self.client.client_secret.as_str()),
                 ("refresh_token", self.tok.refresh_token.as_str()),
                 ("grant_type", "refresh_token"),
-            ]);
-            let r: TokenResponse = match sent {
-                Ok(mut resp) => resp.body_mut().read_json()?,
-                // Google rejects the token itself, rather than failing to answer.
-                Err(ureq::Error::StatusCode(400 | 401)) => {
-                    let invalidation_error = invalidate_token(&self.token_path);
-                    return Err(SignInExpired { invalidation_error }.into());
-                }
-                Err(e) => return Err(e.into()),
-            };
+            ])?;
+            let status = response.status().as_u16();
+            validate_token_status(status, &self.token_path)?;
+            let r: TokenResponse = response.body_mut().read_json()?;
             self.tok.access_token = r.access_token;
             self.tok.expires_at = now() + r.expires_in;
             if let Some(rt) = r.refresh_token {
@@ -195,6 +190,11 @@ impl Auth {
             self.save();
         }
         Ok(self.tok.access_token.clone())
+    }
+
+    pub(crate) fn force_refresh(&mut self) {
+        self.tok.access_token.clear();
+        self.tok.expires_at = 0;
     }
 
     fn save(&self) {
@@ -211,6 +211,17 @@ impl Auth {
             .open(path)
             .and_then(|mut f| f.write_all(json.as_bytes()));
     }
+}
+
+fn validate_token_status(status: u16, token_path: &std::path::Path) -> Result<()> {
+    if matches!(status, 400 | 401) {
+        let invalidation_error = invalidate_token(token_path);
+        return Err(SignInExpired { invalidation_error }.into());
+    }
+    if !(200..300).contains(&status) {
+        return Err(format!("token endpoint returned HTTP {status}").into());
+    }
+    Ok(())
 }
 
 fn invalidate_token(path: &std::path::Path) -> Option<String> {
@@ -387,41 +398,6 @@ mod tests {
         env::temp_dir().join(format!("gtt-auth-{label}-{}-{nonce}", std::process::id()))
     }
 
-    fn auth_for_status(
-        status: &str,
-        token_path: PathBuf,
-    ) -> (Auth, std::thread::JoinHandle<()>) {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-        let status = status.to_string();
-        let server = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut request = [0; 1024];
-            let _ = stream.read(&mut request);
-            write!(
-                stream,
-                "HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-            )
-            .unwrap();
-        });
-        let auth = Auth {
-            client: ClientSecret {
-                client_id: "client".into(),
-                client_secret: "secret".into(),
-                auth_uri: "http://unused".into(),
-                token_uri: format!("http://{addr}"),
-            },
-            tok: Cached {
-                refresh_token: "refresh".into(),
-                access_token: String::new(),
-                expires_at: 0,
-            },
-            agent: http_agent(),
-            token_path,
-        };
-        (auth, server)
-    }
-
     #[test]
     fn percent_round_trip() {
         let s = "4/0Ab_c+d e/f?g=h&é";
@@ -435,13 +411,10 @@ mod tests {
         fs::create_dir_all(&root).unwrap();
         let token_path = root.join("token.json");
         fs::write(&token_path, "{}").unwrap();
-        let (mut auth, server) = auth_for_status("400 Bad Request", token_path.clone());
-
-        let err = auth.token().unwrap_err();
+        let err = validate_token_status(400, &token_path).unwrap_err();
         assert!(err.downcast_ref::<SignInExpired>().is_some());
         assert!(!token_path.exists());
 
-        server.join().unwrap();
         fs::remove_dir_all(root).ok();
     }
 
@@ -451,14 +424,10 @@ mod tests {
         fs::create_dir_all(&root).unwrap();
         let token_path = root.join("token.json");
         fs::write(&token_path, "{}").unwrap();
-        let (mut auth, server) =
-            auth_for_status("500 Internal Server Error", token_path.clone());
-
-        let err = auth.token().unwrap_err();
+        let err = validate_token_status(500, &token_path).unwrap_err();
         assert!(err.downcast_ref::<SignInExpired>().is_none());
         assert!(token_path.exists());
 
-        server.join().unwrap();
         fs::remove_dir_all(root).ok();
     }
 

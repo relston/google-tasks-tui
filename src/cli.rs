@@ -3,9 +3,10 @@
 use std::io::{self, Write};
 
 use clap::{Parser, Subcommand, ValueEnum};
-use serde_json::{json, Map, Value};
 
-use crate::api::{Task, TaskList, TasksApi};
+use crate::api::{
+    CreateTask, Error as ApiError, ListPatch, Task, TaskList, TaskPatch, TasksApi,
+};
 use crate::board::{self, Board};
 use crate::cache;
 
@@ -209,15 +210,24 @@ pub fn execute_to(
             }
             let lists = tasklists(api)?;
             let list = resolve_list(&lists, &list)?;
-            let mut body = json!({ "title": title });
-            if let Some(n) = notes {
-                body["notes"] = json!(n);
+            if let Some(parent_id) = &parent {
+                if tasks(api, &list.id)?
+                    .into_iter()
+                    .find(|task| task.id == *parent_id)
+                    .is_some_and(|task| task.assignment_info.is_some())
+                {
+                    return Err(Error::Usage(
+                        "assigned tasks cannot have subtasks".into(),
+                    ));
+                }
             }
-            if let Some(d) = due {
-                body["due"] = json!(due_rfc3339(&d)?);
-            }
+            let task = CreateTask {
+                title,
+                notes,
+                due: due.map(|due| due_rfc3339(&due)).transpose()?,
+            };
             let task = api
-                .create(&list.id, &body, parent.as_deref())
+                .create(&list.id, &task, parent.as_deref())
                 .map_err(api_fail)?;
             refresh_cache(api, &list.id);
             write_task(out, format, &task)?;
@@ -230,30 +240,31 @@ pub fn execute_to(
             due,
             status,
         } => {
-            let mut fields = Map::new();
-            if let Some(t) = title {
+            if let Some(t) = &title {
                 if t.trim().is_empty() {
                     return Err(Error::Usage("a task needs a title".into()));
                 }
-                fields.insert("title".into(), json!(t));
             }
-            if let Some(n) = notes {
-                fields.insert("notes".into(), json!(n));
-            }
-            if let Some(d) = due {
-                fields.insert("due".into(), json!(due_rfc3339(&d)?));
-            }
-            if let Some(s) = status {
-                fields.insert("status".into(), json!(s));
-            }
-            if fields.is_empty() {
+            if title.is_none() && notes.is_none() && due.is_none() && status.is_none() {
                 return Err(Error::Usage(
                     "update needs at least one of --title, --notes, --due, --status".into(),
                 ));
             }
             let (list_id, task) = find_task(api, &task_id, list.as_deref())?;
+            if task.assignment_info.is_some() && notes.is_some() {
+                return Err(Error::Usage(
+                    "tasks assigned from Docs or Chat cannot have notes".into(),
+                ));
+            }
+            let patch = TaskPatch {
+                title,
+                notes,
+                due: due.map(|due| due_rfc3339(&due)).transpose()?,
+                status,
+                completed: None,
+            };
             let task = api
-                .patch(&list_id, &task.id, &Value::Object(fields))
+                .patch(&list_id, &task.id, &patch, Some(&task.etag))
                 .map_err(api_fail)?;
             refresh_cache(api, &list_id);
             write_task(out, format, &task)?;
@@ -271,7 +282,8 @@ pub fn execute_to(
                 ));
             }
             let (list_id, task) = find_task(api, &task_id, list.as_deref())?;
-            api.delete(&list_id, &task.id).map_err(api_fail)?;
+            api.delete(&list_id, &task.id, Some(&task.etag))
+                .map_err(api_fail)?;
             refresh_cache(api, &list_id);
         }
         Command::List { cmd } => match cmd {
@@ -290,7 +302,11 @@ pub fn execute_to(
                 let lists = tasklists(api)?;
                 let list = resolve_list(&lists, &list)?;
                 let list = api
-                    .patch_list(&list.id, &json!({ "title": title }))
+                    .patch_list(
+                        &list.id,
+                        &ListPatch { title },
+                        Some(&list.etag),
+                    )
                     .map_err(api_fail)?;
                 cache_upsert_list(list.clone());
                 write_list(out, format, &list)?;
@@ -322,8 +338,13 @@ fn patch_status(
     status: &str,
 ) -> Result<(), Error> {
     let (list_id, task) = find_task(api, task_id, list)?;
+    let patch = TaskPatch {
+        status: Some(status.into()),
+        completed: (status == "needsAction").then_some(None),
+        ..Default::default()
+    };
     let task = api
-        .patch(&list_id, &task.id, &json!({ "status": status }))
+        .patch(&list_id, &task.id, &patch, Some(&task.etag))
         .map_err(api_fail)?;
     refresh_cache(api, &list_id);
     write_task(out, format, &task)
@@ -534,7 +555,7 @@ fn escape_label(text: &str) -> String {
     text.replace('\\', "\\\\").replace('[', "\\[").replace(']', "\\]")
 }
 
-fn api_fail(e: Box<dyn std::error::Error + Send + Sync>) -> Error {
+fn api_fail(e: ApiError) -> Error {
     Error::Fail(e.to_string())
 }
 
@@ -546,6 +567,7 @@ fn io_fail(e: io::Error) -> Error {
 mod tests {
     use super::*;
     use crate::api::Link;
+    use serde_json::{json, Value};
     use std::collections::HashMap;
     use std::env;
     use std::fs;
@@ -568,9 +590,21 @@ mod tests {
 
     impl Fake {
         fn new() -> Self {
-            let inbox = TaskList { id: "l1".into(), title: "Inbox".into() };
-            let other = TaskList { id: "l2".into(), title: "Inbox".into() };
-            let work = TaskList { id: "lw".into(), title: "Work".into() };
+            let inbox = TaskList {
+                id: "l1".into(),
+                title: "Inbox".into(),
+                ..Default::default()
+            };
+            let other = TaskList {
+                id: "l2".into(),
+                title: "Inbox".into(),
+                ..Default::default()
+            };
+            let work = TaskList {
+                id: "lw".into(),
+                title: "Work".into(),
+                ..Default::default()
+            };
             let t1 = task("t1", "Buy milk", "needsAction");
             let t2 = Task {
                 notes: Some("Phase 3\nsee PR".into()),
@@ -595,17 +629,17 @@ mod tests {
     }
 
     impl TasksApi for Fake {
-        fn tasklists(&mut self) -> crate::auth::Result<Vec<TaskList>> {
+        fn tasklists(&mut self) -> crate::api::Result<Vec<TaskList>> {
             if let Some(e) = &self.fail {
-                return Err(e.clone().into());
+                return Err(ApiError::Transport(e.clone()));
             }
             Ok(self.lists.clone())
         }
 
-        fn tasks(&mut self, list_id: &str) -> crate::auth::Result<Vec<Task>> {
+        fn tasks(&mut self, list_id: &str) -> crate::api::Result<Vec<Task>> {
             self.task_fetches += 1;
             if let Some(e) = &self.fail {
-                return Err(e.clone().into());
+                return Err(ApiError::Transport(e.clone()));
             }
             Ok(self.tasks.get(list_id).cloned().unwrap_or_default())
         }
@@ -614,22 +648,32 @@ mod tests {
             &mut self,
             list_id: &str,
             task_id: &str,
-            fields: &Value,
-        ) -> crate::auth::Result<Task> {
-            self.patches.push(fields.clone());
-            let tasks = self.tasks.get_mut(list_id).ok_or("no list")?;
-            let task = tasks.iter_mut().find(|t| t.id == task_id).ok_or("no task")?;
-            if let Some(t) = fields.get("title").and_then(Value::as_str) {
-                task.title = t.into();
+            patch: &TaskPatch,
+            _etag: Option<&str>,
+        ) -> crate::api::Result<Task> {
+            self.patches.push(serde_json::to_value(patch).unwrap());
+            let tasks = self
+                .tasks
+                .get_mut(list_id)
+                .ok_or_else(|| ApiError::Transport("no list".into()))?;
+            let task = tasks
+                .iter_mut()
+                .find(|task| task.id == task_id)
+                .ok_or_else(|| ApiError::Transport("no task".into()))?;
+            if let Some(title) = &patch.title {
+                task.title = title.clone();
             }
-            if let Some(n) = fields.get("notes").and_then(Value::as_str) {
-                task.notes = Some(n.into());
+            if let Some(notes) = &patch.notes {
+                task.notes = Some(notes.clone());
             }
-            if let Some(d) = fields.get("due").and_then(Value::as_str) {
-                task.due = Some(d.into());
+            if let Some(due) = &patch.due {
+                task.due = Some(due.clone());
             }
-            if let Some(s) = fields.get("status").and_then(Value::as_str) {
-                task.status = s.into();
+            if let Some(status) = &patch.status {
+                task.status = status.clone();
+            }
+            if let Some(completed) = &patch.completed {
+                task.completed = completed.clone();
             }
             Ok(task.clone())
         }
@@ -637,15 +681,15 @@ mod tests {
         fn create(
             &mut self,
             list_id: &str,
-            body: &Value,
+            create: &CreateTask,
             parent: Option<&str>,
-        ) -> crate::auth::Result<Task> {
+        ) -> crate::api::Result<Task> {
             self.creates += 1;
             let t = Task {
                 id: format!("n{}", self.next_id),
-                title: body["title"].as_str().unwrap_or("").into(),
-                notes: body.get("notes").and_then(Value::as_str).map(str::to_string),
-                due: body.get("due").and_then(Value::as_str).map(str::to_string),
+                title: create.title.clone(),
+                notes: create.notes.clone(),
+                due: create.due.clone(),
                 parent: parent.map(str::to_string),
                 status: "needsAction".into(),
                 ..Default::default()
@@ -655,7 +699,12 @@ mod tests {
             Ok(t)
         }
 
-        fn delete(&mut self, list_id: &str, task_id: &str) -> crate::auth::Result<()> {
+        fn delete(
+            &mut self,
+            list_id: &str,
+            task_id: &str,
+            _etag: Option<&str>,
+        ) -> crate::api::Result<()> {
             self.deletes.push((list_id.into(), task_id.into()));
             if let Some(tasks) = self.tasks.get_mut(list_id) {
                 tasks.retain(|t| t.id != task_id);
@@ -663,10 +712,34 @@ mod tests {
             Ok(())
         }
 
-        fn create_list(&mut self, title: &str) -> crate::auth::Result<TaskList> {
+        fn move_task(
+            &mut self,
+            list_id: &str,
+            task_id: &str,
+            movement: &crate::api::MoveTask,
+        ) -> crate::api::Result<Task> {
+            let source = self
+                .tasks
+                .get_mut(list_id)
+                .ok_or_else(|| ApiError::Transport("no list".into()))?;
+            let index = source
+                .iter()
+                .position(|task| task.id == task_id)
+                .ok_or_else(|| ApiError::Transport("no task".into()))?;
+            let mut task = source.remove(index);
+            task.parent = movement.parent.clone();
+            self.tasks
+                .entry(movement.destination_list.clone())
+                .or_default()
+                .push(task.clone());
+            Ok(task)
+        }
+
+        fn create_list(&mut self, title: &str) -> crate::api::Result<TaskList> {
             let list = TaskList {
                 id: format!("n{}", self.next_id),
                 title: title.into(),
+                ..Default::default()
             };
             self.next_id += 1;
             self.lists.push(list.clone());
@@ -677,16 +750,19 @@ mod tests {
         fn patch_list(
             &mut self,
             list_id: &str,
-            fields: &Value,
-        ) -> crate::auth::Result<TaskList> {
-            let list = self.lists.iter_mut().find(|l| l.id == list_id).ok_or("no list")?;
-            if let Some(t) = fields.get("title").and_then(Value::as_str) {
-                list.title = t.into();
-            }
+            patch: &ListPatch,
+            _etag: Option<&str>,
+        ) -> crate::api::Result<TaskList> {
+            let list = self
+                .lists
+                .iter_mut()
+                .find(|list| list.id == list_id)
+                .ok_or_else(|| ApiError::Transport("no list".into()))?;
+            list.title = patch.title.clone();
             Ok(list.clone())
         }
 
-        fn delete_list(&mut self, list_id: &str) -> crate::auth::Result<()> {
+        fn delete_list(&mut self, list_id: &str) -> crate::api::Result<()> {
             self.lists.retain(|l| l.id != list_id);
             self.tasks.remove(list_id);
             Ok(())
@@ -737,9 +813,21 @@ mod tests {
     #[test]
     fn resolve_list_prefers_id_then_unique_title() {
         let lists = [
-            TaskList { id: "l1".into(), title: "Inbox".into() },
-            TaskList { id: "l2".into(), title: "Inbox".into() },
-            TaskList { id: "lw".into(), title: "Work".into() },
+            TaskList {
+                id: "l1".into(),
+                title: "Inbox".into(),
+                ..Default::default()
+            },
+            TaskList {
+                id: "l2".into(),
+                title: "Inbox".into(),
+                ..Default::default()
+            },
+            TaskList {
+                id: "lw".into(),
+                title: "Work".into(),
+                ..Default::default()
+            },
         ];
         assert_eq!(resolve_list(&lists, "lw").unwrap().id, "lw");
         assert_eq!(resolve_list(&lists, "Work").unwrap().id, "lw");
@@ -853,6 +941,24 @@ mod tests {
         assert_eq!(api.patches.last().unwrap()["status"], "completed");
         let _ = run(&mut api, &["undone", "t2", "--list", "lw"]);
         assert_eq!(api.patches.last().unwrap()["status"], "needsAction");
+    }
+
+    #[test]
+    fn assigned_tasks_reject_notes_updates() {
+        let mut api = Fake::new();
+        api.tasks.get_mut("lw").unwrap()[0].assignment_info =
+            Some(crate::api::AssignmentInfo {
+                link_to_task: "https://docs.google.com/document/d/1".into(),
+                surface_type: "DOCUMENT".into(),
+            });
+
+        let (result, _) = run(
+            &mut api,
+            &["update", "t2", "--list", "Work", "--notes", "not allowed"],
+        );
+
+        assert!(matches!(result, Err(Error::Usage(message)) if message.contains("cannot have notes")));
+        assert!(api.patches.is_empty());
     }
 
     #[test]

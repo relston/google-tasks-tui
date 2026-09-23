@@ -23,6 +23,9 @@ available as subcommands for scripts and agents (`google-tasks-tui lists`,
   they don't fit.
 - Subtasks sit indented under their parent. Completed tasks appear struck
   through at the bottom of their list.
+- Includes tasks assigned from Google Docs and Chat. Google does not allow
+  those tasks to have notes or move between lists; deleting one also deletes
+  its source task, so the confirmation calls that out.
 - Long task titles wrap onto as many lines as they need, lined up under the
   first line rather than under the bullet. Long link titles wrap in the Browse
   Link overlay too. Set `wrap_titles = false` in the config to clip each task
@@ -67,7 +70,8 @@ available as subcommands for scripts and agents (`google-tasks-tui lists`,
   If there are none, the status bar says so.
 - `m` opens a **Move** overlay of every task list except the current one.
   `j`/`k` choose a list, `Enter` assigns the selected task to it (and its
-  subtasks, the same way Google deletes them together) and closes the overlay.
+  subtasks, preserving their order) and closes the overlay. Both lists are
+  refreshed afterward; a partial move identifies the task that failed.
   `Esc` cancels. If there is only one list, the status bar says so.
 - `?` opens a **Keyboard** overlay listing the board commands. The first row
   is selected; `j`/`k` move, `Esc`/`q`/`?` close it.

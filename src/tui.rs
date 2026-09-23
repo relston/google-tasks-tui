@@ -26,9 +26,9 @@ use ratatui::{
     DefaultTerminal, Frame,
 };
 
-use serde_json::{json, Value};
-
-use crate::api::{Client, Task, TaskList};
+use crate::api::{
+    Client, CreateTask, MoveTask, Task, TaskList, TaskPatch, TasksApi,
+};
 use crate::auth;
 use crate::board::{Board, Row};
 #[cfg(test)]
@@ -51,17 +51,19 @@ enum Cmd {
         operation: u64,
         list_id: String,
         task_id: String,
-        fields: Value,
+        patch: TaskPatch,
+        etag: String,
     },
     Delete {
         operation: u64,
         list_id: String,
         task_id: String,
+        etag: String,
     },
     Create {
         operation: u64,
         list_id: String,
-        title: String,
+        task: CreateTask,
         parent: Option<String>,
         selection: Option<String>,
     },
@@ -100,14 +102,46 @@ enum Msg {
         from: String,
         to: String,
         ids: Vec<String>,
-        result: Result<(), String>,
+        result: MoveOutcome,
     },
+}
+
+struct MoveFailure {
+    task_id: String,
+    error: String,
+}
+
+struct MoveOutcome {
+    moved: Vec<Task>,
+    failure: Option<MoveFailure>,
+    source: Result<Vec<Task>, String>,
+    destination: Result<Vec<Task>, String>,
+}
+
+fn move_requests(destination: &str, ids: &[String]) -> Vec<(String, MoveTask)> {
+    let Some(root) = ids.first() else {
+        return Vec::new();
+    };
+    ids.iter()
+        .enumerate()
+        .map(|(index, id)| {
+            (
+                id.clone(),
+                MoveTask {
+                    destination_list: destination.to_string(),
+                    parent: (index > 0).then(|| root.clone()),
+                    previous: (index > 1).then(|| ids[index - 1].clone()),
+                },
+            )
+        })
+        .collect()
 }
 
 /// A delete waiting on a y/n answer in the status bar.
 struct Pending {
     list_id: String,
     task_id: String,
+    etag: String,
     prompt: String,
 }
 
@@ -296,7 +330,7 @@ enum MutationContext {
     Patch {
         list_id: String,
         task_id: String,
-        before: Task,
+        before: Box<Task>,
     },
     Delete {
         list_id: String,
@@ -547,7 +581,7 @@ impl App {
             MutationContext::Patch {
                 list_id, before, ..
             } => {
-                self.board.upsert_task(&list_id, before);
+                self.board.upsert_task(&list_id, *before);
                 self.rebuild_column(&list_id);
             }
             MutationContext::Delete {
@@ -629,6 +663,14 @@ impl App {
         let Some(col) = self.columns.get(self.focus) else { return };
         let list_id = col.list.id.clone();
         let selected = col.selected().map(|row| row.task.id.clone());
+        if under
+            && col
+                .selected()
+                .is_some_and(|row| row.task.assignment_info.is_some())
+        {
+            self.error = Some("assigned tasks cannot have subtasks".into());
+            return;
+        }
         let parent = match (under, col.selected().map(subtask_parent)) {
             (false, _) => None,
             (true, Some(p)) => p,
@@ -657,6 +699,10 @@ impl App {
         }
         let Some(col) = self.columns.get(self.focus) else { return };
         let Some(row) = col.selected() else { return };
+        if self.field == FieldId::Notes && row.task.assignment_info.is_some() {
+            self.error = Some("tasks assigned from Docs or Chat cannot have notes".into());
+            return;
+        }
         let (list_id, task_id) = (col.list.id.clone(), row.task.id.clone());
         let (title, notes) = (row.task.title.clone(), row.task.notes.clone().unwrap_or_default());
         if !self.shelf {
@@ -726,7 +772,10 @@ impl App {
                 |operation| Cmd::Create {
                     operation,
                     list_id,
-                    title,
+                    task: CreateTask {
+                        title,
+                        ..Default::default()
+                    },
                     parent,
                     selection,
                 },
@@ -754,7 +803,10 @@ impl App {
                     task.title = title.clone();
                 }
                 self.rebuild_column(&list_id);
-                json!({ "title": title })
+                TaskPatch {
+                    title: Some(title),
+                    ..Default::default()
+                }
             }
             FieldId::Notes => {
                 let notes = e.buf.trim_end().to_string();
@@ -762,7 +814,10 @@ impl App {
                     task.notes = Some(notes.clone()).filter(|notes| !notes.is_empty());
                 }
                 self.rebuild_column(&list_id);
-                json!({ "notes": notes })
+                TaskPatch {
+                    notes: Some(notes),
+                    ..Default::default()
+                }
             }
         };
         self.error = None;
@@ -783,10 +838,17 @@ impl App {
         let fields = if task.is_done() {
             task.status = "needsAction".into();
             task.completed = None;
-            json!({ "status": "needsAction", "completed": null })
+            TaskPatch {
+                status: Some("needsAction".into()),
+                completed: Some(None),
+                ..Default::default()
+            }
         } else {
             task.status = "completed".into();
-            json!({ "status": "completed" })
+            TaskPatch {
+                status: Some("completed".into()),
+                ..Default::default()
+            }
         };
         self.rebuild_column(&list_id);
         self.send_patch(list_id, task_id, fields, before);
@@ -809,10 +871,16 @@ impl App {
             1 => " and its subtask".into(),
             n => format!(" and its {n} subtasks"),
         };
+        let assigned = if row.task.assignment_info.is_some() {
+            " This also deletes the original Docs/Chat task."
+        } else {
+            ""
+        };
         self.interaction = Interaction::ConfirmDelete(Pending {
             list_id: col.list.id.clone(),
             task_id: row.task.id.clone(),
-            prompt: format!("Delete \"{}\"{also}?  y/n", title_of(&row.task)),
+            etag: row.task.etag.clone(),
+            prompt: format!("Delete \"{}\"{also}?{assigned}  y/n", title_of(&row.task)),
         });
     }
 
@@ -826,7 +894,7 @@ impl App {
         let removed = self.board.remove_tree(&p.list_id, &p.task_id);
         self.rebuild_column(&p.list_id);
         self.error = None;
-        let (list_id, task_id) = (p.list_id, p.task_id);
+        let (list_id, task_id, etag) = (p.list_id, p.task_id, p.etag);
         self.send_mutation(
             MutationContext::Delete {
                 list_id: list_id.clone(),
@@ -837,6 +905,7 @@ impl App {
                 operation,
                 list_id,
                 task_id,
+                etag,
             },
         );
     }
@@ -845,20 +914,22 @@ impl App {
         &mut self,
         list_id: String,
         task_id: String,
-        fields: Value,
+        patch: TaskPatch,
         before: Task,
     ) {
+        let etag = before.etag.clone();
         self.send_mutation(
             MutationContext::Patch {
                 list_id: list_id.clone(),
                 task_id: task_id.clone(),
-                before,
+                before: Box::new(before),
             },
             |operation| Cmd::Patch {
                 operation,
                 list_id,
                 task_id,
-                fields,
+                patch,
+                etag,
             },
         );
     }
@@ -1068,15 +1139,29 @@ impl App {
                     self.recover("move response did not match the pending operation".into());
                     return;
                 }
-                match result {
-                    Ok(()) => {
-                        self.save_cache();
+                match (result.source, result.destination) {
+                    (Ok(source), Ok(destination)) => {
+                        self.board.replace_tasks(&from, source);
+                        self.board.replace_tasks(&to, destination);
+                        self.rebuild_column(&from);
+                        self.rebuild_column(&to);
+                        if let Some(failure) = result.failure {
+                            self.recover(format!(
+                                "move partially completed ({} moved); {} failed: {}",
+                                result.moved.len(),
+                                failure.task_id,
+                                failure.error
+                            ));
+                        } else {
+                            self.save_cache();
+                        }
                     }
-                    Err(e) => {
+                    (source, destination) => {
                         self.rollback(context);
                         self.recover(format!(
-                            "move failed from {from} to {to} for {}: {e}",
-                            ids.join(", ")
+                            "move reconciliation failed: source {}; destination {}",
+                            source.err().unwrap_or_else(|| "ok".into()),
+                            destination.err().unwrap_or_else(|| "ok".into())
                         ));
                     }
                 }
@@ -1201,7 +1286,16 @@ impl App {
             return;
         }
         let Some(col) = self.columns.get(self.focus) else { return };
-        if col.selected().is_none() {
+        let Some(selected) = col.selected() else {
+            return;
+        };
+        if selected.task.assignment_info.is_some()
+            || col.rows.iter().any(|row| {
+                row.task.parent.as_deref() == Some(selected.task.id.as_str())
+                    && row.task.assignment_info.is_some()
+            })
+        {
+            self.error = Some("assigned tasks cannot move between lists".into());
             return;
         }
         let current = col.list.id.clone();
@@ -2213,18 +2307,18 @@ fn fmt_time(s: &str) -> String {
 }
 
 /// Owns the API client so network calls never block the UI.
-fn worker(mut client: Client, cmds: Receiver<Cmd>, out: Sender<Msg>) {
+fn worker<A: TasksApi>(mut client: A, cmds: Receiver<Cmd>, out: Sender<Msg>) {
     for cmd in cmds {
         match cmd {
             Cmd::Create {
                 operation,
                 list_id,
-                title,
+                task,
                 parent,
                 selection,
             } => {
                 let res = client
-                    .create(&list_id, &title, parent.as_deref())
+                    .create(&list_id, &task, parent.as_deref())
                     .map_err(|e| e.to_string());
                 if out
                     .send(Msg::Created {
@@ -2242,8 +2336,11 @@ fn worker(mut client: Client, cmds: Receiver<Cmd>, out: Sender<Msg>) {
                 operation,
                 list_id,
                 task_id,
+                etag,
             } => {
-                let res = client.delete(&list_id, &task_id).map_err(|e| e.to_string());
+                let res = client
+                    .delete(&list_id, &task_id, Some(&etag))
+                    .map_err(|e| e.to_string());
                 if out
                     .send(Msg::Deleted {
                         operation,
@@ -2260,9 +2357,12 @@ fn worker(mut client: Client, cmds: Receiver<Cmd>, out: Sender<Msg>) {
                 operation,
                 list_id,
                 task_id,
-                fields,
+                patch,
+                etag,
             } => {
-                let res = client.patch(&list_id, &task_id, &fields).map_err(|e| e.to_string());
+                let res = client
+                    .patch(&list_id, &task_id, &patch, Some(&etag))
+                    .map_err(|e| e.to_string());
                 if out
                     .send(Msg::Updated {
                         operation,
@@ -2281,23 +2381,44 @@ fn worker(mut client: Client, cmds: Receiver<Cmd>, out: Sender<Msg>) {
                 to,
                 ids,
             } => {
-                let res = (|| {
-                    let root = ids.first().ok_or_else(|| "no task".to_string())?;
-                    for (i, id) in ids.iter().enumerate() {
-                        let parent = (i > 0).then_some(root.as_str());
-                        client
-                            .relocate(&from, id, &to, parent)
-                            .map_err(|e| e.to_string())?;
+                let mut moved = Vec::new();
+                let mut failure = None;
+                let requests = move_requests(&to, &ids);
+                if requests.is_empty() {
+                    failure = Some(MoveFailure {
+                        task_id: String::new(),
+                        error: "no task".into(),
+                    });
+                } else {
+                    for (id, movement) in requests {
+                        match client.move_task(&from, &id, &movement) {
+                            Ok(task) => {
+                                moved.push(task);
+                            }
+                            Err(error) => {
+                                failure = Some(MoveFailure {
+                                    task_id: id.clone(),
+                                    error: error.to_string(),
+                                });
+                                break;
+                            }
+                        }
                     }
-                    Ok(())
-                })();
+                }
+                let source = client.tasks(&from).map_err(|error| error.to_string());
+                let destination = client.tasks(&to).map_err(|error| error.to_string());
                 if out
                     .send(Msg::Moved {
                         operation,
                         from,
                         to,
                         ids,
-                        result: res,
+                        result: MoveOutcome {
+                            moved,
+                            failure,
+                            source,
+                            destination,
+                        },
                     })
                     .is_err()
                 {
@@ -2405,6 +2526,7 @@ mod tests {
                     list: TaskList {
                         id: (*id).into(),
                         title: format!("List {id}"),
+                        ..Default::default()
                     },
                     tasks: vec![task(&format!("{id}-cached"), None, "1", false)],
                 })
@@ -2562,7 +2684,10 @@ mod tests {
         app.send_patch(
             "a".into(),
             "a-cached".into(),
-            json!({ "title": "changed" }),
+            TaskPatch {
+                title: Some("changed".into()),
+                ..Default::default()
+            },
             task("a-cached", None, "1", false),
         );
 
@@ -2580,13 +2705,19 @@ mod tests {
         app.send_patch(
             "a".into(),
             "one".into(),
-            json!({ "title": "one" }),
+            TaskPatch {
+                title: Some("one".into()),
+                ..Default::default()
+            },
             task("one", None, "1", false),
         );
         app.send_patch(
             "a".into(),
             "two".into(),
-            json!({ "title": "two" }),
+            TaskPatch {
+                title: Some("two".into()),
+                ..Default::default()
+            },
             task("two", None, "2", false),
         );
 
@@ -2616,7 +2747,10 @@ mod tests {
         app.send_patch(
             "a".into(),
             "a-one".into(),
-            json!({ "title": "changed" }),
+            TaskPatch {
+                title: Some("changed".into()),
+                ..Default::default()
+            },
             task("a-one", None, "1", false),
         );
         app.on_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
@@ -2673,7 +2807,7 @@ mod tests {
             MutationContext::Patch {
                 list_id: "a".into(),
                 task_id: "a-cached".into(),
-                before,
+                before: Box::new(before),
             },
         );
 
@@ -2703,7 +2837,7 @@ mod tests {
             MutationContext::Patch {
                 list_id: "a".into(),
                 task_id: "a-cached".into(),
-                before: task("a-cached", None, "1", false),
+                before: Box::new(task("a-cached", None, "1", false)),
             },
         );
 
@@ -2760,7 +2894,7 @@ mod tests {
             MutationContext::Patch {
                 list_id: "a".into(),
                 task_id: "a-cached".into(),
-                before: task("a-cached", None, "1", false),
+                before: Box::new(task("a-cached", None, "1", false)),
             },
         );
 
@@ -2810,7 +2944,7 @@ mod tests {
             MutationContext::Patch {
                 list_id: "a".into(),
                 task_id: "a-one".into(),
-                before: task("a-one", None, "1", false),
+                before: Box::new(task("a-one", None, "1", false)),
             },
         );
 
@@ -2889,7 +3023,7 @@ mod tests {
             MutationContext::Patch {
                 list_id: "a".into(),
                 task_id: "a-cached".into(),
-                before: task("a-cached", None, "1", false),
+                before: Box::new(task("a-cached", None, "1", false)),
             },
         );
 
@@ -2929,7 +3063,7 @@ mod tests {
             MutationContext::Patch {
                 list_id: "a".into(),
                 task_id: "a-cached".into(),
-                before: task("a-cached", None, "1", false),
+                before: Box::new(task("a-cached", None, "1", false)),
             },
         );
         app.quitting = true;
@@ -3132,9 +3266,21 @@ mod tests {
     #[test]
     fn other_lists_skip_the_current_one() {
         let lists = [
-            TaskList { id: "a".into(), title: "Inbox".into() },
-            TaskList { id: "b".into(), title: "Work".into() },
-            TaskList { id: "c".into(), title: "Home".into() },
+            TaskList {
+                id: "a".into(),
+                title: "Inbox".into(),
+                ..Default::default()
+            },
+            TaskList {
+                id: "b".into(),
+                title: "Work".into(),
+                ..Default::default()
+            },
+            TaskList {
+                id: "c".into(),
+                title: "Home".into(),
+                ..Default::default()
+            },
         ];
         let got: Vec<&str> = other_lists(&lists, "b").iter().map(|l| l.id.as_str()).collect();
         assert_eq!(got, ["a", "c"]);
@@ -3151,6 +3297,101 @@ mod tests {
         assert_eq!(move_ids(&rows, "a"), ["a", "a1"]);
         assert_eq!(move_ids(&rows, "a1"), ["a1"]);
         assert!(move_ids(&rows, "gone").is_empty());
+    }
+
+    #[test]
+    fn move_requests_preserve_subtask_sibling_order() {
+        let ids = vec!["parent".into(), "first".into(), "second".into()];
+        let requests = move_requests("destination", &ids);
+
+        assert_eq!(requests[0].1.parent, None);
+        assert_eq!(requests[0].1.previous, None);
+        assert_eq!(requests[1].1.parent.as_deref(), Some("parent"));
+        assert_eq!(requests[1].1.previous, None);
+        assert_eq!(requests[2].1.parent.as_deref(), Some("parent"));
+        assert_eq!(requests[2].1.previous.as_deref(), Some("first"));
+    }
+
+    #[test]
+    fn partial_move_applies_authoritative_lists_and_reports_the_failed_id() {
+        let (mut app, cmds) = app_with_lists(&["a", "b"]);
+        let _ = cmds.recv().unwrap(); // startup refresh
+        app.sync = SyncState::Ready;
+        let parent = task("parent", None, "1", false);
+        let child = task("child", Some("parent"), "2", false);
+        let there = task("there", None, "1", false);
+        set_tasks(
+            &mut app,
+            "a",
+            vec![parent.clone(), child.clone()],
+            "parent",
+        );
+        set_tasks(&mut app, "b", vec![there.clone()], "there");
+        let operation = pending(
+            &mut app,
+            MutationContext::Move {
+                from: "a".into(),
+                to: "b".into(),
+                ids: vec!["parent".into(), "child".into()],
+                source_before: vec![parent.clone(), child.clone()],
+                destination_before: vec![there.clone()],
+            },
+        );
+        let moved_parent = Task {
+            position: "9".into(),
+            ..parent
+        };
+
+        app.on_msg(Msg::Moved {
+            operation,
+            from: "a".into(),
+            to: "b".into(),
+            ids: vec!["parent".into(), "child".into()],
+            result: MoveOutcome {
+                moved: vec![moved_parent.clone()],
+                failure: Some(MoveFailure {
+                    task_id: "child".into(),
+                    error: "cannot move assigned task".into(),
+                }),
+                source: Ok(vec![child]),
+                destination: Ok(vec![there, moved_parent]),
+            },
+        });
+
+        assert!(app.board.task("a", "parent").is_none());
+        assert_eq!(
+            app.board.task("b", "parent").map(|task| task.position.as_str()),
+            Some("9")
+        );
+        assert!(app.error.as_deref().is_some_and(|error| {
+            error.contains("partially completed") && error.contains("child")
+        }));
+        assert!(matches!(cmds.recv().unwrap(), Cmd::Refresh(_)));
+    }
+
+    #[test]
+    fn assigned_tasks_cannot_move_or_edit_notes() {
+        let (mut app, _cmds) = app_with_lists(&["a", "b"]);
+        app.sync = SyncState::Ready;
+        let assigned = Task {
+            assignment_info: Some(crate::api::AssignmentInfo {
+                link_to_task: "https://docs.google.com/document/d/1".into(),
+                surface_type: "DOCUMENT".into(),
+            }),
+            ..task("assigned", None, "1", false)
+        };
+        set_tasks(&mut app, "a", vec![assigned], "assigned");
+
+        app.start_move();
+        assert!(matches!(app.interaction, Interaction::Idle));
+        assert!(app.error.as_deref().is_some_and(|error| error.contains("cannot move")));
+
+        app.error = None;
+        app.shelf = true;
+        app.field = FieldId::Notes;
+        app.start_edit();
+        assert!(matches!(app.interaction, Interaction::Idle));
+        assert!(app.error.as_deref().is_some_and(|error| error.contains("cannot have notes")));
     }
 
     #[test]
@@ -3195,7 +3436,11 @@ mod render_tests {
                 .iter()
                 .enumerate()
                 .map(|(i, (name, titles))| cache::CachedList {
-                    list: TaskList { id: format!("l{i}"), title: (*name).into() },
+                    list: TaskList {
+                        id: format!("l{i}"),
+                        title: (*name).into(),
+                        ..Default::default()
+                    },
                     tasks: titles
                         .iter()
                         .enumerate()

@@ -68,26 +68,26 @@ state simultaneously.
 
 Make the existing API seam represent every operation used by both interfaces.
 
-- [ ] a) Replace raw JSON request arguments with typed `CreateTask`,
+- [x] a) Replace raw JSON request arguments with typed `CreateTask`,
   `TaskPatch`, and `MoveTask` inputs in [`src/api.rs`](src/api.rs).
-- [ ] b) Add move support to `TasksApi` and make both the CLI and TUI worker
+- [x] b) Add move support to `TasksApi` and make both the CLI and TUI worker
   depend on the same interface and test double.
-- [ ] c) Preserve subtask order during cross-list moves by sending the
+- [x] c) Preserve subtask order during cross-list moves by sending the
   `previous` sibling parameter documented by Google.
-- [ ] d) Return authoritative moved tasks, including their new parent,
+- [x] d) Return authoritative moved tasks, including their new parent,
   position, and timestamps. Refresh both affected lists before confirming a
   multi-task move.
-- [ ] e) Report partial moves with the IDs that succeeded and the ID that
+- [x] e) Report partial moves with the IDs that succeeded and the ID that
   failed. Investigate safe compensation without claiming the operation is
   atomic.
-- [ ] f) Add `showAssigned=true` when listing tasks, or explicitly document
+- [x] f) Add `showAssigned=true` when listing tasks, or explicitly document
   that assigned Docs/Chat tasks are excluded. If included, model and enforce
   their mutation restrictions.
-- [ ] g) Parse Google errors into typed authentication, conflict, rate-limit,
+- [x] g) Parse Google errors into typed authentication, conflict, rate-limit,
   timeout, and general HTTP failures.
-- [ ] h) Retry one request after refreshing an unexpectedly rejected access
+- [x] h) Retry one request after refreshing an unexpectedly rejected access
   token. Add bounded retries only for safe reads and honor `Retry-After`.
-- [ ] i) Retain task and task-list ETags and verify conditional-write support
+- [x] i) Retain task and task-list ETags and verify conditional-write support
   against the Tasks API before using them to prevent external-edit conflicts.
 
 ## Phase 5: Make persistence secure and predictable

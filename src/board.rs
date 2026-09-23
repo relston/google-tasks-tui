@@ -230,6 +230,7 @@ mod tests {
                 list: TaskList {
                     id: "list".into(),
                     title: "Inbox".into(),
+                    ..Default::default()
                 },
                 tasks: vec![
                     task("done", None, "0", true),
@@ -263,6 +264,7 @@ mod tests {
                     list: TaskList {
                         id: "from".into(),
                         title: "From".into(),
+                        ..Default::default()
                     },
                     tasks: vec![
                         task("parent", None, "1", false),
@@ -273,6 +275,7 @@ mod tests {
                     list: TaskList {
                         id: "to".into(),
                         title: "To".into(),
+                        ..Default::default()
                     },
                     tasks: vec![task("there", None, "1", false)],
                 },
