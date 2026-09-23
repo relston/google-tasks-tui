@@ -35,6 +35,7 @@ use crate::board::{Board, Row};
 use crate::board::ordered as order;
 use crate::cache;
 use crate::config::{self, Config};
+use crate::paths::Paths;
 use crate::theme::{self, Theme};
 
 const THEME_POLL: Duration = Duration::from_millis(500);
@@ -402,6 +403,8 @@ struct App {
     fingerprint: theme::Fingerprint,
     transparent: bool,
     board: Board,
+    paths: Paths,
+    cache_meta: cache::Meta,
     columns: Vec<Column>,
     focus: usize,
     /// Index of the leftmost visible column.
@@ -426,7 +429,29 @@ struct App {
 }
 
 impl App {
+    #[cfg(test)]
     fn new(cmds: Sender<Cmd>, cached: cache::Cache, config: Config) -> Self {
+        Self::new_with_storage(
+            cmds,
+            cached,
+            config,
+            Paths::from_env(),
+            cache::Meta {
+                account: String::new(),
+                generation: 0,
+            },
+            None,
+        )
+    }
+
+    fn new_with_storage(
+        cmds: Sender<Cmd>,
+        cached: cache::Cache,
+        config: Config,
+        paths: Paths,
+        cache_meta: cache::Meta,
+        warning: Option<String>,
+    ) -> Self {
         // Paint the last known board straight away; the sync replaces it.
         let board = Board::from_cache(cached);
         let columns = board
@@ -449,6 +474,8 @@ impl App {
             fingerprint: theme::fingerprint(),
             transparent: false,
             board,
+            paths,
+            cache_meta,
             columns,
             focus: 0,
             scroll: 0,
@@ -459,7 +486,7 @@ impl App {
             sync: SyncState::Cached,
             next_operation: 0,
             pending_operation: None,
-            error: None,
+            error: warning,
             notice: None,
             cmds,
             quitting: false,
@@ -495,6 +522,11 @@ impl App {
     fn begin_refresh(&mut self, error: Option<String>) {
         self.error = error;
         self.sync = SyncState::Refreshing;
+        if !self.cache_meta.account.is_empty() {
+            if let Ok((_, meta)) = cache::load_for(&self.paths, &self.cache_meta.account) {
+                self.cache_meta = meta;
+            }
+        }
         for col in &mut self.columns {
             col.load = LoadState::Cached;
         }
@@ -642,12 +674,21 @@ impl App {
         self.save_cache();
     }
 
-    fn save_cache(&self) -> bool {
+    fn save_cache(&mut self) -> bool {
         if self.sync != SyncState::Ready || self.pending_operation.is_some() {
             return false;
         }
-        cache::save(&self.board.snapshot());
-        true
+        match cache::save_for(
+            &self.paths,
+            &self.board.snapshot(),
+            &mut self.cache_meta,
+        ) {
+            Ok(()) => true,
+            Err(error) => {
+                self.error = Some(error.to_string());
+                false
+            }
+        }
     }
 
     fn loading(&self) -> bool {
@@ -1069,7 +1110,6 @@ impl App {
                         if follow_created {
                             self.columns[col_index].select_id(Some(id));
                         }
-                        self.save_cache();
                     }
                     Err(e) => {
                         if let Some(index) =
@@ -1106,7 +1146,6 @@ impl App {
                 }
                 match result {
                     Ok(()) => {
-                        self.save_cache();
                     }
                     Err(e) => {
                         // The task is still there, so put the board back.
@@ -1152,8 +1191,6 @@ impl App {
                                 failure.task_id,
                                 failure.error
                             ));
-                        } else {
-                            self.save_cache();
                         }
                     }
                     (source, destination) => {
@@ -1205,7 +1242,6 @@ impl App {
                         }
                         self.board.upsert_task(&list_id, task);
                         self.rebuild_column(&list_id);
-                        self.save_cache();
                     }
                     Err(e) => {
                         // The optimistic title may be wrong now, so resync.
@@ -2487,11 +2523,29 @@ fn enable_key_detail() -> bool {
 }
 
 pub fn start() -> auth::Result<()> {
+    let paths = Paths::from_env();
     // Reuse the stored token so nothing blocks the first frame; only a first
     // run (or a wiped token) needs the browser, which wants the terminal.
-    let auth = match auth::Auth::cached() {
+    let auth = match auth::Auth::cached_with_paths(&paths) {
         Some(a) => a,
-        None => auth::Auth::new()?,
+        None => auth::Auth::new_with_paths(&paths)?,
+    };
+    let account = auth.fingerprint();
+    let (cached, cache_meta, warning) = match cache::load_for(&paths, &account) {
+        Ok((cached, meta)) => (cached, meta, None),
+        Err(error) => (
+            cache::Cache::default(),
+            cache::Meta {
+                account,
+                generation: 0,
+            },
+            Some(format!("cache ignored: {error}")),
+        ),
+    };
+    let (config, config_warning) = config::load_with_paths(&paths);
+    let warning = match (warning, config_warning) {
+        (Some(cache), Some(config)) => Some(format!("{cache}; {config}")),
+        (warning, None) | (None, warning) => warning,
     };
     let client = Client::new(auth);
     let (cmd_tx, cmd_rx) = mpsc::channel();
@@ -2500,7 +2554,18 @@ pub fn start() -> auth::Result<()> {
 
     let term = ratatui::init();
     let detailed_keys = enable_key_detail();
-    let res = run(term, App::new(cmd_tx, cache::load(), config::load()), msg_rx);
+    let res = run(
+        term,
+        App::new_with_storage(
+            cmd_tx,
+            cached,
+            config,
+            paths,
+            cache_meta,
+            warning,
+        ),
+        msg_rx,
+    );
     if detailed_keys {
         let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
     }

@@ -9,6 +9,7 @@ use crate::api::{
 };
 use crate::board::{self, Board};
 use crate::cache;
+use crate::paths::Paths;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
 pub enum Format {
@@ -229,7 +230,7 @@ pub fn execute_to(
             let task = api
                 .create(&list.id, &task, parent.as_deref())
                 .map_err(api_fail)?;
-            refresh_cache(api, &list.id);
+            refresh_cache(api, &list.id)?;
             write_task(out, format, &task)?;
         }
         Command::Update {
@@ -266,7 +267,7 @@ pub fn execute_to(
             let task = api
                 .patch(&list_id, &task.id, &patch, Some(&task.etag))
                 .map_err(api_fail)?;
-            refresh_cache(api, &list_id);
+            refresh_cache(api, &list_id)?;
             write_task(out, format, &task)?;
         }
         Command::Done { task_id, list } => {
@@ -284,7 +285,7 @@ pub fn execute_to(
             let (list_id, task) = find_task(api, &task_id, list.as_deref())?;
             api.delete(&list_id, &task.id, Some(&task.etag))
                 .map_err(api_fail)?;
-            refresh_cache(api, &list_id);
+            refresh_cache(api, &list_id)?;
         }
         Command::List { cmd } => match cmd {
             ListCmd::Create { title } => {
@@ -292,7 +293,7 @@ pub fn execute_to(
                     return Err(Error::Usage("a list needs a title".into()));
                 }
                 let list = api.create_list(&title).map_err(api_fail)?;
-                cache_upsert_list(list.clone());
+                cache_upsert_list(api, list.clone())?;
                 write_list(out, format, &list)?;
             }
             ListCmd::Update { list, title } => {
@@ -308,7 +309,7 @@ pub fn execute_to(
                         Some(&list.etag),
                     )
                     .map_err(api_fail)?;
-                cache_upsert_list(list.clone());
+                cache_upsert_list(api, list.clone())?;
                 write_list(out, format, &list)?;
             }
             ListCmd::Delete { list, yes } => {
@@ -322,7 +323,7 @@ pub fn execute_to(
                 }
                 let id = list.id.clone();
                 api.delete_list(&id).map_err(api_fail)?;
-                cache_remove_list(&id);
+                cache_remove_list(api, &id)?;
             }
         },
     }
@@ -346,7 +347,7 @@ fn patch_status(
     let task = api
         .patch(&list_id, &task.id, &patch, Some(&task.etag))
         .map_err(api_fail)?;
-    refresh_cache(api, &list_id);
+    refresh_cache(api, &list_id)?;
     write_task(out, format, &task)
 }
 
@@ -416,30 +417,46 @@ fn due_rfc3339(d: &str) -> Result<String, Error> {
         .map_err(|_| Error::Usage(format!("due date must be YYYY-MM-DD, not {d:?}")))
 }
 
-fn refresh_cache(api: &mut impl TasksApi, list_id: &str) {
-    let Ok(tasks) = api.tasks(list_id) else { return };
-    let mut board = Board::from_cache(cache::load());
+fn cache_state(api: &impl TasksApi) -> Result<(Paths, Board, cache::Meta), Error> {
+    let paths = Paths::from_env();
+    let account = api.account_fingerprint();
+    let (cache, meta) = cache::load_for(&paths, &account)
+        .map_err(|error| Error::Fail(format!("reading cache: {error}")))?;
+    Ok((paths, Board::from_cache(cache), meta))
+}
+
+fn save_board(paths: &Paths, board: &Board, meta: &mut cache::Meta) -> Result<(), Error> {
+    cache::save_for(paths, &board.snapshot(), meta).map_err(|error| {
+        Error::Fail(format!(
+            "Google mutation succeeded, but local cache update failed: {error}"
+        ))
+    })
+}
+
+fn refresh_cache(api: &mut impl TasksApi, list_id: &str) -> Result<(), Error> {
+    let tasks = api.tasks(list_id).map_err(api_fail)?;
+    let (paths, mut board, mut meta) = cache_state(api)?;
     if board.list(list_id).is_none() {
         if let Ok(lists) = api.tasklists() {
-        if let Some(list) = lists.into_iter().find(|l| l.id == list_id) {
+            if let Some(list) = lists.into_iter().find(|l| l.id == list_id) {
                 board.upsert_list(list);
             }
         }
     }
     board.replace_tasks(list_id, tasks);
-    cache::save(&board.snapshot());
+    save_board(&paths, &board, &mut meta)
 }
 
-fn cache_upsert_list(list: TaskList) {
-    let mut board = Board::from_cache(cache::load());
+fn cache_upsert_list(api: &impl TasksApi, list: TaskList) -> Result<(), Error> {
+    let (paths, mut board, mut meta) = cache_state(api)?;
     board.upsert_list(list);
-    cache::save(&board.snapshot());
+    save_board(&paths, &board, &mut meta)
 }
 
-fn cache_remove_list(list_id: &str) {
-    let mut board = Board::from_cache(cache::load());
+fn cache_remove_list(api: &impl TasksApi, list_id: &str) -> Result<(), Error> {
+    let (paths, mut board, mut meta) = cache_state(api)?;
     board.remove_list(list_id);
-    cache::save(&board.snapshot());
+    save_board(&paths, &board, &mut meta)
 }
 
 fn write_json(out: &mut impl Write, v: &impl serde::Serialize) -> Result<(), Error> {
@@ -629,6 +646,10 @@ mod tests {
     }
 
     impl TasksApi for Fake {
+        fn account_fingerprint(&self) -> String {
+            "test-account".into()
+        }
+
         fn tasklists(&mut self) -> crate::api::Result<Vec<TaskList>> {
             if let Some(e) = &self.fail {
                 return Err(ApiError::Transport(e.clone()));
@@ -795,7 +816,11 @@ mod tests {
             parsed.format,
             &mut out,
         );
-        api.last_cache = Some(cache::load());
+        api.last_cache = Some(
+            cache::load_for(&Paths::from_env(), &api.account_fingerprint())
+                .unwrap()
+                .0,
+        );
         match prev {
             Some(p) => env::set_var("XDG_CONFIG_HOME", p),
             None => env::remove_var("XDG_CONFIG_HOME"),

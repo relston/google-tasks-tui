@@ -7,16 +7,18 @@
 
 use std::{
     collections::HashMap,
-    env, fs,
+    fs,
     io::{BufRead, BufReader, Read, Write},
     net::TcpListener,
-    os::unix::fs::OpenOptionsExt,
     path::PathBuf,
     process::{Command, Stdio},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+use crate::{paths::Paths, storage};
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
@@ -69,6 +71,8 @@ struct ClientSecret {
 
 #[derive(Serialize, Deserialize)]
 struct Cached {
+    #[serde(default)]
+    client_id: String,
     refresh_token: String,
     #[serde(default)]
     access_token: String,
@@ -103,18 +107,25 @@ impl Auth {
     /// Load credentials and make sure we hold a working token. May open a
     /// browser, so call this before the TUI takes over the terminal.
     pub fn new() -> Result<Self> {
-        let path = credentials_path();
-        let token_path = cache_path();
-        let raw = fs::read_to_string(&path)
-            .map_err(|e| format!("reading {}: {e}", path.display()))?;
+        Self::new_with_paths(&Paths::from_env())
+    }
+
+    pub fn new_with_paths(paths: &Paths) -> Result<Self> {
+        let token_path = paths.token();
+        let raw = fs::read_to_string(&paths.credentials)
+            .map_err(|e| format!("reading {}: {e}", paths.credentials.display()))?;
         let client = serde_json::from_str::<ClientFile>(&raw)?.installed;
         let agent = http_agent();
 
         let cached = fs::read_to_string(&token_path)
             .ok()
             .and_then(|s| serde_json::from_str(&s).ok())
+            .filter(|token: &Cached| {
+                token.client_id.is_empty() || token.client_id == client.client_id
+            })
             .or_else(|| {
-                borrow_existing(&client.client_id).map(|refresh_token| Cached {
+                borrow_existing(&paths.credentials, &client.client_id).map(|refresh_token| Cached {
+                    client_id: client.client_id.clone(),
                     refresh_token,
                     access_token: String::new(),
                     expires_at: 0,
@@ -122,12 +133,15 @@ impl Auth {
             });
 
         let mut auth = match cached {
-            Some(tok) => Self {
+            Some(mut tok) => {
+                tok.client_id = client.client_id.clone();
+                Self {
                 client,
                 tok,
                 agent,
                 token_path,
-            },
+                }
+            }
             None => {
                 let tok = authorize(&agent, &client)?;
                 Self {
@@ -148,7 +162,7 @@ impl Auth {
             }
             auth.tok = authorize(&auth.agent, &auth.client)?;
         }
-        auth.save();
+        auth.save()?;
         Ok(auth)
     }
 
@@ -156,12 +170,17 @@ impl Auth {
     /// startup doesn't wait on Google. `None` when there's nothing to reuse
     /// and the browser flow is needed.
     pub fn cached() -> Option<Self> {
-        let raw = fs::read_to_string(credentials_path()).ok()?;
+        Self::cached_with_paths(&Paths::from_env())
+    }
+
+    pub fn cached_with_paths(paths: &Paths) -> Option<Self> {
+        let raw = fs::read_to_string(&paths.credentials).ok()?;
         let client = serde_json::from_str::<ClientFile>(&raw).ok()?.installed;
-        let token_path = cache_path();
+        let token_path = paths.token();
         let tok = fs::read_to_string(&token_path)
             .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())?;
+            .and_then(|s| serde_json::from_str::<Cached>(&s).ok())
+            .filter(|token| token.client_id == client.client_id)?;
         Some(Self {
             client,
             tok,
@@ -187,7 +206,7 @@ impl Auth {
             if let Some(rt) = r.refresh_token {
                 self.tok.refresh_token = rt;
             }
-            self.save();
+            self.save()?;
         }
         Ok(self.tok.access_token.clone())
     }
@@ -197,19 +216,18 @@ impl Auth {
         self.tok.expires_at = 0;
     }
 
-    fn save(&self) {
-        let path = &self.token_path;
-        if let Some(dir) = path.parent() {
-            let _ = fs::create_dir_all(dir);
-        }
-        let Ok(json) = serde_json::to_string_pretty(&self.tok) else { return };
-        let _ = fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(path)
-            .and_then(|mut f| f.write_all(json.as_bytes()));
+    pub fn fingerprint(&self) -> String {
+        let mut hash = Sha256::new();
+        hash.update(self.client.client_id.as_bytes());
+        hash.update([0]);
+        hash.update(self.tok.refresh_token.as_bytes());
+        hash.finalize().iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+
+    fn save(&self) -> Result<()> {
+        let json = serde_json::to_vec_pretty(&self.tok)?;
+        storage::atomic_private_write(&self.token_path, &json)?;
+        Ok(())
     }
 }
 
@@ -235,30 +253,8 @@ fn invalidate_token(path: &std::path::Path) -> Option<String> {
     }
 }
 
-fn home() -> PathBuf {
-    PathBuf::from(env::var_os("HOME").unwrap_or_default())
-}
-
-fn credentials_path() -> PathBuf {
-    env::var_os("GOOGLE_TASKS_CREDENTIALS")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home().join(".gcloud/credentials.json"))
-}
-
-/// Where this app keeps its token and its board snapshot.
-pub fn config_dir() -> PathBuf {
-    env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home().join(".config"))
-        .join("google-tasks-tui")
-}
-
-fn cache_path() -> PathBuf {
-    config_dir().join("token.json")
-}
-
-fn borrow_existing(client_id: &str) -> Option<String> {
-    let raw = fs::read_to_string(credentials_path().with_file_name("token.json")).ok()?;
+fn borrow_existing(credentials: &std::path::Path, client_id: &str) -> Option<String> {
+    let raw = fs::read_to_string(credentials.with_file_name("token.json")).ok()?;
     let t: ExistingToken = serde_json::from_str(&raw).ok()?;
     (t.client_id == client_id && t.scopes.iter().any(|s| s == SCOPE)).then_some(t.refresh_token)
 }
@@ -338,6 +334,7 @@ fn authorize(agent: &ureq::Agent, c: &ClientSecret) -> Result<Cached> {
         .body_mut()
         .read_json()?;
     Ok(Cached {
+        client_id: c.client_id.clone(),
         refresh_token: r.refresh_token.ok_or("Google returned no refresh token")?,
         access_token: r.access_token,
         expires_at: now() + r.expires_in,
@@ -389,6 +386,7 @@ fn decode(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::env;
 
     fn test_root(label: &str) -> PathBuf {
         let nonce = SystemTime::now()
@@ -454,5 +452,29 @@ mod tests {
         assert_eq!(timeouts.recv_response, Some(Duration::from_secs(30)));
         assert_eq!(timeouts.recv_body, Some(Duration::from_secs(30)));
         assert_eq!(timeouts.global, Some(Duration::from_secs(60)));
+    }
+
+    #[test]
+    fn cached_token_must_match_the_configured_client() {
+        let root = test_root("client-id");
+        fs::create_dir_all(&root).unwrap();
+        let paths = Paths {
+            credentials: root.join("credentials.json"),
+            config_dir: root.join("config"),
+        };
+        fs::write(
+            &paths.credentials,
+            r#"{"installed":{"client_id":"right","client_secret":"secret","auth_uri":"https://auth","token_uri":"https://token"}}"#,
+        )
+        .unwrap();
+        fs::create_dir_all(&paths.config_dir).unwrap();
+        fs::write(
+            paths.token(),
+            r#"{"client_id":"wrong","refresh_token":"refresh"}"#,
+        )
+        .unwrap();
+
+        assert!(Auth::cached_with_paths(&paths).is_none());
+        fs::remove_dir_all(root).ok();
     }
 }

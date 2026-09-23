@@ -121,8 +121,10 @@ with the Google Tasks API enabled. Download its JSON to
 On first run the app opens your browser to authorize access, then saves the
 refresh token to `~/.config/google-tasks-tui/token.json` (mode `0600`). Later
 runs reuse it without contacting Google before the first frame, and the board
-snapshot sits beside it in `cache.json` (also `0600`). Deleting either file is
-safe: the app re-fetches, and re-authorizes. If a
+snapshot sits beside it in `cache.json` (also `0600`). Both files are written
+atomically; the snapshot is versioned and tied to the current account so
+switching credentials cannot display another account's tasks. Deleting either
+file is safe: the app re-fetches, and re-authorizes. If a
 google-auth `token.json` for the same client, with the Tasks scope, sits next
 to `credentials.json`, the app reuses its refresh token and skips the browser
 step. It only reads that file and never modifies it.
@@ -133,9 +135,9 @@ Settings live in `~/.config/google-tasks-tui/config.toml`, next to the token
 and the board snapshot. The file is written with its defaults the first time
 the app runs, so it is there to edit and documents itself. Delete a line to go
 back to its default; delete the file and it comes back on the next run. A
-setting the app cannot read falls back to its default and the file is left
-alone, so a typo never costs you the rest of your settings. It is read at
-startup, so changes need a restart.
+malformed, unknown, unreadable, or unwritable setting falls back safely and is
+reported in the status bar with its file path. The file is read at startup, so
+changes need a restart.
 
 | Setting       | Default | Effect                                        |
 | ------------- | ------- | --------------------------------------------- |
@@ -197,8 +199,8 @@ indented under the item when present. `get` /
 fields. `list create` / `list update` print one list the same way as
 `lists`. `delete --yes` and `list delete --yes` print nothing. JSON shapes:
 `lists` is an array of `{id, title}`; `tasks --list` is an array of tasks;
-`tasks` is `{ "lists": [ { "list": …, "tasks": […] } ] }` (same as
-`cache.json`).
+`tasks` is `{ "lists": [ { "list": …, "tasks": […] } ] }`. `cache.json`
+wraps those lists with private schema, account, and generation metadata.
 
 `create` can also take `--parent TASK_ID`. `update` sends only the flags you
 pass (`--title`, `--notes`, `--due`, `--status needsAction|completed`).
@@ -270,6 +272,8 @@ src/
 ├── api.rs     # Google Tasks v1 client (task lists, tasks, pagination)
 ├── cache.rs   # board snapshot on disk for instant startup
 ├── config.rs  # config.toml: defaults, first-run bootstrap, parsing
+├── paths.rs   # injectable credential/config paths
+├── storage.rs # locking and secure atomic writes
 ├── auth.rs    # OAuth: client secret, token cache, refresh, loopback sign-in
 └── theme.rs   # theme discovery, colors.toml parsing, role mapping, fingerprint
 ```

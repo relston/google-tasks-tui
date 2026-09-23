@@ -439,6 +439,7 @@ fn should_retry(status: u16, safe_to_retry: bool, attempt: usize) -> bool {
 /// The Google Tasks operations the CLI (and tests) need. `Client` is the
 /// real implementation; tests use a fake.
 pub trait TasksApi {
+    fn account_fingerprint(&self) -> String;
     fn tasklists(&mut self) -> Result<Vec<TaskList>>;
     fn tasks(&mut self, list_id: &str) -> Result<Vec<Task>>;
     fn patch(
@@ -472,6 +473,10 @@ pub trait TasksApi {
 }
 
 impl TasksApi for Client {
+    fn account_fingerprint(&self) -> String {
+        self.auth.fingerprint()
+    }
+
     fn tasklists(&mut self) -> Result<Vec<TaskList>> {
         Client::tasklists(self)
     }

@@ -31,12 +31,14 @@ Work directly on `main`; no feature branches.
   to semantic roles (`bg, fg, surface, accent, muted, sel_bg, sel_fg, red,
   green, yellow, blue`). Exposes `load()` and `fingerprint()`.
 - All app config/state lives under `$XDG_CONFIG_HOME/google-tasks-tui/`.
+- `src/paths.rs` — resolves credentials and application paths once; tests can
+  inject a temporary `Paths` without mutating process-wide environment.
+- `src/storage.rs` — exclusive file locking plus unique same-directory atomic
+  writes with `0600`, file/directory sync, and rename.
 - `src/config.rs` — user settings at `<config dir>/config.toml`. `load()`
-  writes `TEMPLATE` (the commented defaults) when the file is missing, and
-  falls back to `Config::default()` without touching the file when it will not
-  parse. `template_matches_the_defaults` fails if `TEMPLATE` and `Config`
-  drift apart. Read once at startup, so edits need a restart. Settings:
-  `wrap_titles` (default true).
+  writes `TEMPLATE` only on `NotFound`. Parse, read, and write errors fall back
+  safely but return a visible warning; unknown fields are rejected.
+  `template_matches_the_defaults` prevents default drift. Read once at startup.
 - `src/auth.rs` — OAuth for an installed client. Secret from
   `~/.gcloud/credentials.json` (`GOOGLE_TASKS_CREDENTIALS` overrides); refresh
   token cached in `$XDG_CONFIG_HOME/google-tasks-tui/token.json` (0600). Bootstraps
@@ -45,17 +47,18 @@ Work directly on `main`; no feature branches.
   only a first run falls back to `Auth::new()`, which may open a browser and so
   runs before the TUI starts. A 400/401 on refresh returns typed
   `SignInExpired` and removes the app token, so restarting enters sign-in
-  instead of retrying it forever. The shared ureq agent bounds connect, send,
-  response, body, and whole-call time.
-- `src/cache.rs` — board snapshot at `<config dir>/cache.json` (0600, written
-  via temp + rename). `Board::from_cache` paints before any network call and
-  `Board::snapshot` is the only cache representation;
+  instead of retrying it forever. Token writes are atomic and errors propagate;
+  the cache records and validates the OAuth client ID. `Auth::fingerprint`
+  scopes the board cache without storing token material. The shared ureq agent
+  bounds connect, send, response, body, and whole-call time.
+- `src/cache.rs` — a versioned, account-scoped board preview. Locked
+  generation checks reject stale cross-process writers; `Board::from_cache`
+  paints before any network call and `Board::snapshot` is its data payload.
   `App::sync` is `Cached`, `Refreshing`, `Ready`, or `Failed`; writes require
   `Ready` after every list succeeds in the active refresh generation. Failed
   list loads and mutation recovery never save optimistic state.
-  `check_synced()` rewrites the snapshot after a complete sync; confirmed
-  mutations update it. The CLI rewrites the snapshot after each successful
-  mutation.
+  `check_synced()` is the TUI's only writer after a complete sync. The CLI
+  reports if a confirmed remote mutation cannot update the local preview.
 - `src/api.rs` — blocking Tasks v1 client on `ureq` 3. `CreateTask`,
   `TaskPatch`, `MoveTask`, and `ListPatch` are the request contracts shared by
   CLI and TUI through `TasksApi`; responses retain ETags and assignment

@@ -95,25 +95,25 @@ Make the existing API seam represent every operation used by both interfaces.
 Give configuration, token, and snapshot storage a single owner rather than
 routing application paths through the authentication module.
 
-- [ ] a) Move application-directory discovery out of
+- [x] a) Move application-directory discovery out of
   [`src/auth.rs`](src/auth.rs) into a dedicated paths/storage module that can
   be injected in tests.
-- [ ] b) Implement one secure atomic-write helper using unique same-directory
+- [x] b) Implement one secure atomic-write helper using unique same-directory
   temporary files, restrictive permissions, flush/sync, and atomic rename.
-- [ ] c) Use atomic writes for `token.json`; return errors instead of silently
+- [x] c) Use atomic writes for `token.json`; return errors instead of silently
   truncating or failing to save the token.
-- [ ] d) Make cache writes safe across CLI and TUI processes. Prevent a stale
+- [x] d) Make cache writes safe across CLI and TUI processes. Prevent a stale
   process from replacing a newer snapshot.
-- [ ] e) Define the cache as a disposable, read-only startup preview and write
+- [x] e) Define the cache as a disposable, read-only startup preview and write
   it only from confirmed state after a complete successful sync.
-- [ ] f) Add a cache schema version and token/account fingerprint so switching
+- [x] f) Add a cache schema version and token/account fingerprint so switching
   credentials cannot display another account’s cached tasks.
-- [ ] g) Store the OAuth client ID with the token and reject cached tokens
+- [x] g) Store the OAuth client ID with the token and reject cached tokens
   created for a different client.
-- [ ] h) Return visible warnings for cache/config persistence failures. A
+- [x] h) Return visible warnings for cache/config persistence failures. A
   successful remote mutation must not silently claim that local cache repair
   succeeded.
-- [ ] i) Parse configuration with unknown-field detection. Bootstrap only on
+- [x] i) Parse configuration with unknown-field detection. Bootstrap only on
   `NotFound`; report malformed, unreadable, or unwritable files with their
   path and parse location.
 

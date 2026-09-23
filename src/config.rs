@@ -2,9 +2,11 @@
 //! board snapshot. The file is written with its defaults the first time the
 //! app runs, so it documents itself and can be edited in place.
 
-use std::{fs, path::PathBuf};
+use std::{fs, io};
 
 use serde::Deserialize;
+
+use crate::{paths::Paths, storage};
 
 /// What ships in a fresh `config.toml`. Keep it in step with `Config`:
 /// `template_matches_the_defaults` fails if it drifts.
@@ -19,6 +21,7 @@ wrap_titles = true
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 #[serde(default)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
     pub wrap_titles: bool,
 }
@@ -29,51 +32,87 @@ impl Default for Config {
     }
 }
 
-fn path() -> PathBuf {
-    crate::auth::config_dir().join("config.toml")
+/// The saved settings, writing the default file first when there isn't one.
+pub fn load() -> Config {
+    load_with_paths(&Paths::from_env()).0
 }
 
-/// The saved settings, writing the default file first when there isn't one.
-/// A file we can't read or parse falls back to the defaults and is left
-/// alone, so a typo never costs anyone their settings.
-pub fn load() -> Config {
-    let path = path();
+pub fn load_with_paths(paths: &Paths) -> (Config, Option<String>) {
+    let path = paths.config();
     match fs::read_to_string(&path) {
-        Ok(raw) => parse(&raw),
-        Err(_) => {
-            if let Some(dir) = path.parent() {
-                let _ = fs::create_dir_all(dir);
-            }
-            let _ = fs::write(&path, TEMPLATE);
-            Config::default()
+        Ok(raw) => match parse(&raw) {
+            Ok(config) => (config, None),
+            Err(error) => (
+                Config::default(),
+                Some(format!("{}: {error}", path.display())),
+            ),
+        },
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            let warning = storage::atomic_private_write(&path, TEMPLATE.as_bytes())
+                .err()
+                .map(|error| format!("writing {}: {error}", path.display()));
+            (Config::default(), warning)
         }
+        Err(error) => (
+            Config::default(),
+            Some(format!("reading {}: {error}", path.display())),
+        ),
     }
 }
 
-fn parse(raw: &str) -> Config {
-    toml::from_str(raw).unwrap_or_default()
+fn parse(raw: &str) -> Result<Config, toml::de::Error> {
+    toml::from_str(raw)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn template_matches_the_defaults() {
-        assert_eq!(parse(TEMPLATE), Config::default());
+        assert_eq!(parse(TEMPLATE).unwrap(), Config::default());
     }
 
     #[test]
     fn wrapping_is_on_unless_it_is_turned_off() {
         assert!(Config::default().wrap_titles);
-        assert!(!parse("wrap_titles = false").wrap_titles);
-        assert!(parse("wrap_titles = true").wrap_titles);
+        assert!(!parse("wrap_titles = false").unwrap().wrap_titles);
+        assert!(parse("wrap_titles = true").unwrap().wrap_titles);
     }
 
     #[test]
-    fn a_broken_file_falls_back_to_the_defaults() {
-        for raw in ["", "not toml at all", "wrap_titles = \"yes\"", "nonsense = 1"] {
-            assert_eq!(parse(raw), Config::default(), "{raw:?}");
+    fn malformed_and_unknown_settings_are_rejected() {
+        assert_eq!(parse("").unwrap(), Config::default());
+        for raw in ["not toml at all", "wrap_titles = \"yes\"", "nonsense = 1"] {
+            assert!(parse(raw).is_err(), "{raw:?}");
         }
+    }
+
+    #[test]
+    fn filesystem_errors_and_parse_errors_are_visible() {
+        let root = std::env::temp_dir().join(format!(
+            "gtt-config-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let paths = Paths {
+            credentials: root.join("credentials.json"),
+            config_dir: root.join("config"),
+        };
+
+        let (_, warning) = load_with_paths(&paths);
+        assert!(warning.is_none());
+        assert!(paths.config().exists());
+
+        fs::write(paths.config(), "wrap_titles = \"maybe\"").unwrap();
+        let (_, warning) = load_with_paths(&paths);
+        assert!(warning.is_some_and(|warning| {
+            warning.contains("config.toml") && warning.contains("invalid type")
+        }));
+        fs::remove_dir_all(root).ok();
     }
 }
