@@ -262,6 +262,7 @@ src/
 ├── lib.rs     # crate root: no args → TUI, subcommand → CLI
 ├── tui.rs     # board UI: columns, details shelf, event loop, API worker thread
 ├── cli.rs     # clap subcommands; -f json|md (default md); resolve list by id or title
+├── board.rs   # canonical lists/tasks, shared ordering, snapshots, rollback helpers
 ├── api.rs     # Google Tasks v1 client (task lists, tasks, pagination)
 ├── cache.rs   # board snapshot on disk for instant startup
 ├── config.rs  # config.toml: defaults, first-run bootstrap, parsing

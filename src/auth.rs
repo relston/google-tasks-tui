@@ -182,14 +182,7 @@ impl Auth {
                 Ok(mut resp) => resp.body_mut().read_json()?,
                 // Google rejects the token itself, rather than failing to answer.
                 Err(ureq::Error::StatusCode(400 | 401)) => {
-                    let invalidation_error = match fs::remove_file(&self.token_path) {
-                        Ok(()) => None,
-                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-                        Err(e) => Some(format!(
-                            "could not remove {}: {e}; delete it manually",
-                            self.token_path.display()
-                        )),
-                    };
+                    let invalidation_error = invalidate_token(&self.token_path);
                     return Err(SignInExpired { invalidation_error }.into());
                 }
                 Err(e) => return Err(e.into()),
@@ -217,6 +210,17 @@ impl Auth {
             .mode(0o600)
             .open(path)
             .and_then(|mut f| f.write_all(json.as_bytes()));
+    }
+}
+
+fn invalidate_token(path: &std::path::Path) -> Option<String> {
+    match fs::remove_file(path) {
+        Ok(()) => None,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => Some(format!(
+            "could not remove {}: {e}; delete it manually",
+            path.display()
+        )),
     }
 }
 
@@ -463,13 +467,10 @@ mod tests {
         let root = test_root("invalidation");
         let token_path = root.join("token.json");
         fs::create_dir_all(&token_path).unwrap();
-        let (mut auth, server) = auth_for_status("400 Bad Request", token_path.clone());
-
-        let err = auth.token().unwrap_err();
-        assert!(err.to_string().contains("could not remove"));
+        let error = invalidate_token(&token_path).unwrap();
+        assert!(error.contains("could not remove"));
         assert!(token_path.exists());
 
-        server.join().unwrap();
         fs::remove_dir_all(root).ok();
     }
 

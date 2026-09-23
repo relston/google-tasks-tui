@@ -52,16 +52,16 @@ exclusive UI and synchronization states.
 Stop using rendered rows as canonical, optimistic, selected, and persisted
 state simultaneously.
 
-- [ ] a) Introduce a `Board` model containing canonical task lists and tasks,
+- [x] a) Introduce a `Board` model containing canonical task lists and tasks,
   keyed by stable IDs.
-- [ ] b) Store selection by task ID rather than rendered row index.
-- [ ] c) Derive sorted and indented rows from canonical tasks through one
+- [x] b) Store selection by task ID rather than rendered row index.
+- [x] c) Derive sorted and indented rows from canonical tasks through one
   shared ordering function.
-- [ ] d) Use the same deleted-task filtering, ordering, and subtask semantics
+- [x] d) Use the same deleted-task filtering, ordering, and subtask semantics
   in the TUI, CLI Markdown, and cache conversion.
-- [ ] e) Apply optimistic changes as an explicit pending projection or retain
+- [x] e) Apply optimistic changes as an explicit pending projection or retain
   rollback data. Persist confirmed state only.
-- [ ] f) Reorder completion changes immediately while preserving selection,
+- [x] f) Reorder completion changes immediately while preserving selection,
   then replace temporary values with Google’s response.
 
 ## Phase 4: Unify and strengthen the Google API boundary

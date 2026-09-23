@@ -6,7 +6,8 @@ use clap::{Parser, Subcommand, ValueEnum};
 use serde_json::{json, Map, Value};
 
 use crate::api::{Task, TaskList, TasksApi};
-use crate::cache::{self, CachedList};
+use crate::board::{self, Board};
+use crate::cache;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
 pub enum Format {
@@ -174,11 +175,12 @@ pub fn execute_to(
                 let board = load_board(api)?;
                 match format {
                     Format::Json => {
-                        let lists: Vec<CachedList> = board
+                        let lists = board
                             .into_iter()
-                            .map(|(list, tasks)| CachedList { list, tasks })
+                            .map(|(list, tasks)| cache::CachedList { list, tasks })
                             .collect();
-                        write_json(out, &cache::Cache { lists })?;
+                        let board = Board::from_cache(cache::Cache { lists });
+                        write_json(out, &board.snapshot())?;
                     }
                     Format::Md => {
                         let md = board
@@ -395,31 +397,28 @@ fn due_rfc3339(d: &str) -> Result<String, Error> {
 
 fn refresh_cache(api: &mut impl TasksApi, list_id: &str) {
     let Ok(tasks) = api.tasks(list_id) else { return };
-    let mut cache = cache::load();
-    if let Some(slot) = cache.lists.iter_mut().find(|c| c.list.id == list_id) {
-        slot.tasks = tasks;
-    } else if let Ok(lists) = api.tasklists() {
+    let mut board = Board::from_cache(cache::load());
+    if board.list(list_id).is_none() {
+        if let Ok(lists) = api.tasklists() {
         if let Some(list) = lists.into_iter().find(|l| l.id == list_id) {
-            cache.lists.push(CachedList { list, tasks });
+                board.upsert_list(list);
+            }
         }
     }
-    cache::save(&cache);
+    board.replace_tasks(list_id, tasks);
+    cache::save(&board.snapshot());
 }
 
 fn cache_upsert_list(list: TaskList) {
-    let mut cache = cache::load();
-    if let Some(slot) = cache.lists.iter_mut().find(|c| c.list.id == list.id) {
-        slot.list = list;
-    } else {
-        cache.lists.push(CachedList { list, tasks: Vec::new() });
-    }
-    cache::save(&cache);
+    let mut board = Board::from_cache(cache::load());
+    board.upsert_list(list);
+    cache::save(&board.snapshot());
 }
 
 fn cache_remove_list(list_id: &str) {
-    let mut cache = cache::load();
-    cache.lists.retain(|c| c.list.id != list_id);
-    cache::save(&cache);
+    let mut board = Board::from_cache(cache::load());
+    board.remove_list(list_id);
+    cache::save(&board.snapshot());
 }
 
 fn write_json(out: &mut impl Write, v: &impl serde::Serialize) -> Result<(), Error> {
@@ -458,11 +457,13 @@ fn md_lists(lists: &[TaskList]) -> String {
 
 fn md_task_section(list: &TaskList, tasks: &[Task]) -> String {
     let mut s = format!("# {} (`{}`)\n", list.title, list.id);
-    if !tasks.is_empty() {
+    let rows = board::ordered(tasks.to_vec());
+    if !rows.is_empty() {
         s.push('\n');
-        for t in tasks {
+        for row in rows {
+            let t = row.task;
             let mark = if t.is_done() { "x" } else { " " };
-            let indent = if t.parent.is_some() { "  " } else { "" };
+            let indent = if row.depth > 0 { "  " } else { "" };
             s.push_str(&format!("{indent}- [{mark}] {} (`{}`)\n", t.title, t.id));
             if let Some(n) = t.notes.as_deref().map(str::trim).filter(|n| !n.is_empty()) {
                 for line in n.lines() {

@@ -23,6 +23,10 @@ Work directly on `main`; no feature branches.
   specs by id first, then unique title. `-f` / `--format` is `md` (default) or
   `json`. Mutations go through `TasksApi`, then refresh `cache.json`. A
   running TUI does not live-reload CLI edits (press `r`).
+- `src/board.rs` — canonical task-list/task state keyed by Google IDs. It
+  filters deleted tasks, derives the shared open/completed/subtask row order
+  used by TUI and CLI Markdown, converts to/from cache snapshots, and owns
+  task-tree move/remove/restore operations.
 - `src/theme.rs` — finds the active Omarchy theme, parses `colors.toml`, maps it
   to semantic roles (`bg, fg, surface, accent, muted, sel_bg, sel_fg, red,
   green, yellow, blue`). Exposes `load()` and `fingerprint()`.
@@ -44,7 +48,8 @@ Work directly on `main`; no feature branches.
   instead of retrying it forever. The shared ureq agent bounds connect, send,
   response, body, and whole-call time.
 - `src/cache.rs` — board snapshot at `<config dir>/cache.json` (0600, written
-  via temp + rename). `App::new` paints from it before any network call;
+  via temp + rename). `Board::from_cache` paints before any network call and
+  `Board::snapshot` is the only cache representation;
   `App::sync` is `Cached`, `Refreshing`, `Ready`, or `Failed`; writes require
   `Ready` after every list succeeds in the active refresh generation. Failed
   list loads and mutation recovery never save optimistic state.
@@ -74,12 +79,14 @@ Work directly on `main`; no feature branches.
   ASCII control character (bar `\n`) for a space, the same byte length, which
   keeps every offset `wrap()` and `cursor_rc()` pass around valid.
   `control_characters_never_reach_the_screen` renders through a `TestBackend`
-  and asserts no cell holds one. `order()` sorts open tasks by position, then
-  completed tasks newest first, with subtasks under their parent. `Edit` holds
+  and asserts no cell holds one. Columns are projections of the canonical
+  `Board`; `board::ordered()` supplies their rows, while selection is stored
+  by task ID rather than row index. `Edit` holds
   the title buffer + byte cursor; commits are optimistic (local change first,
   then `Cmd::Patch`), and a failed save sets an error and refreshes.
-  `Msg::Updated` re-runs `order()` so a ticked task moves to the completed
-  group while preserving the user's current selection by task ID. Delayed
+  Optimistic patch/delete/move contexts retain rollback data and cache writes
+  require confirmation. Ticking rebuilds the row projection immediately so
+  the task moves groups while selection follows its ID. Delayed
   create responses select the new task only when selection has not moved and
   no other editor is active. `App::interaction` is the single exclusive
   `Idle` / editor / delete confirmation / Browse / Move / Help state.

@@ -1,6 +1,5 @@
 use std::{
     borrow::Cow,
-    collections::HashSet,
     io::{self, Write},
     process::{Command, Stdio},
     sync::mpsc::{self, Receiver, Sender, TryRecvError},
@@ -31,6 +30,9 @@ use serde_json::{json, Value};
 
 use crate::api::{Client, Task, TaskList};
 use crate::auth;
+use crate::board::{Board, Row};
+#[cfg(test)]
+use crate::board::ordered as order;
 use crate::cache;
 use crate::config::{self, Config};
 use crate::theme::{self, Theme};
@@ -291,19 +293,28 @@ enum Interaction {
 
 enum MutationContext {
     Create(Edit),
-    Patch { list_id: String, task_id: String },
-    Delete { list_id: String, task_id: String },
-    Move { from: String, to: String, ids: Vec<String> },
+    Patch {
+        list_id: String,
+        task_id: String,
+        before: Task,
+    },
+    Delete {
+        list_id: String,
+        task_id: String,
+        removed: Vec<Task>,
+    },
+    Move {
+        from: String,
+        to: String,
+        ids: Vec<String>,
+        source_before: Vec<Task>,
+        destination_before: Vec<Task>,
+    },
 }
 
 struct PendingOperation {
     id: u64,
     context: MutationContext,
-}
-
-struct Row {
-    task: Task,
-    depth: u8,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -326,12 +337,28 @@ struct Column {
     list: TaskList,
     rows: Vec<Row>,
     load: LoadState,
+    selected_id: Option<String>,
     state: ListState,
 }
 
 impl Column {
     fn selected(&self) -> Option<&Row> {
-        self.state.selected().and_then(|i| self.rows.get(i))
+        let selected = self.selected_id.as_deref()?;
+        self.rows.iter().find(|row| row.task.id == selected)
+    }
+
+    fn select(&mut self, index: Option<usize>) {
+        self.selected_id = index
+            .and_then(|index| self.rows.get(index))
+            .map(|row| row.task.id.clone());
+        self.state.select(index);
+    }
+
+    fn select_id(&mut self, task_id: Option<String>) {
+        let index = task_id
+            .as_deref()
+            .and_then(|id| self.rows.iter().position(|row| row.task.id == id));
+        self.select(index);
     }
 }
 
@@ -340,6 +367,7 @@ struct App {
     theme: Theme,
     fingerprint: theme::Fingerprint,
     transparent: bool,
+    board: Board,
     columns: Vec<Column>,
     focus: usize,
     /// Index of the leftmost visible column.
@@ -366,14 +394,19 @@ struct App {
 impl App {
     fn new(cmds: Sender<Cmd>, cached: cache::Cache, config: Config) -> Self {
         // Paint the last known board straight away; the sync replaces it.
-        let columns = cached
-            .lists
-            .into_iter()
-            .map(|c| Column {
-                list: c.list,
-                state: ListState::default().with_selected((!c.tasks.is_empty()).then_some(0)),
-                rows: order(c.tasks),
+        let board = Board::from_cache(cached);
+        let columns = board
+            .lists()
+            .map(|list| {
+                let rows = board.rows(&list.id);
+                let selected_id = rows.first().map(|row| row.task.id.clone());
+                Column {
+                list: list.clone(),
+                state: ListState::default().with_selected((!rows.is_empty()).then_some(0)),
+                rows,
                 load: LoadState::Cached,
+                selected_id,
+            }
             })
             .collect();
         let mut app = Self {
@@ -381,6 +414,7 @@ impl App {
             theme: theme::load(),
             fingerprint: theme::fingerprint(),
             transparent: false,
+            board,
             columns,
             focus: 0,
             scroll: 0,
@@ -497,12 +531,42 @@ impl App {
                 true
             }
             Err(_) => {
-                if let MutationContext::Create(edit) = context {
-                    self.interaction = Interaction::Editing(edit);
-                }
+                self.rollback(context);
                 self.sync = SyncState::Failed;
                 self.error = Some("network worker stopped; change was not sent".into());
                 false
+            }
+        }
+    }
+
+    fn rollback(&mut self, context: MutationContext) {
+        match context {
+            MutationContext::Create(edit) => {
+                self.interaction = Interaction::Editing(edit);
+            }
+            MutationContext::Patch {
+                list_id, before, ..
+            } => {
+                self.board.upsert_task(&list_id, before);
+                self.rebuild_column(&list_id);
+            }
+            MutationContext::Delete {
+                list_id, removed, ..
+            } => {
+                self.board.restore(&list_id, removed);
+                self.rebuild_column(&list_id);
+            }
+            MutationContext::Move {
+                from,
+                to,
+                source_before,
+                destination_before,
+                ..
+            } => {
+                self.board.replace_tasks(&from, source_before);
+                self.board.replace_tasks(&to, destination_before);
+                self.rebuild_column(&from);
+                self.rebuild_column(&to);
             }
         }
     }
@@ -548,16 +612,7 @@ impl App {
         if self.sync != SyncState::Ready || self.pending_operation.is_some() {
             return false;
         }
-        cache::save(&cache::Cache {
-            lists: self
-                .columns
-                .iter()
-                .map(|c| cache::CachedList {
-                    list: c.list.clone(),
-                    tasks: c.rows.iter().map(|r| r.task.clone()).collect(),
-                })
-                .collect(),
-        });
+        cache::save(&self.board.snapshot());
         true
     }
 
@@ -623,11 +678,23 @@ impl App {
         });
     }
 
-    fn row_mut(&mut self, list_id: &str, task_id: &str) -> Option<&mut Row> {
-        self.columns
-            .iter_mut()
-            .find(|c| c.list.id == list_id)
-            .and_then(|c| c.rows.iter_mut().find(|r| r.task.id == task_id))
+    fn rebuild_column(&mut self, list_id: &str) {
+        let rows = self.board.rows(list_id);
+        let Some(column) = self.columns.iter_mut().find(|column| column.list.id == list_id) else {
+            return;
+        };
+        let selected = column.selected_id.clone();
+        let previous = column.state.selected().unwrap_or(0);
+        column.rows = rows;
+        if selected
+            .as_deref()
+            .is_some_and(|id| column.rows.iter().any(|row| row.task.id == id))
+        {
+            column.select_id(selected);
+        } else {
+            let last = column.rows.len().checked_sub(1);
+            column.select(last.map(|last| previous.min(last)));
+        }
     }
 
     fn commit_edit(&mut self) {
@@ -671,6 +738,10 @@ impl App {
             return;
         };
         let (list_id, task_id) = (list_id.to_string(), task_id.to_string());
+        let Some(before) = self.board.task(&list_id, &task_id).cloned() else {
+            self.recover("edited task disappeared".into());
+            return;
+        };
         let fields = match field {
             FieldId::Title => {
                 let title = e.buf.trim().to_string();
@@ -679,21 +750,23 @@ impl App {
                     self.interaction = Interaction::Editing(e);
                     return;
                 }
-                if let Some(row) = self.row_mut(&list_id, &task_id) {
-                    row.task.title = title.clone();
+                if let Some(task) = self.board.task_mut(&list_id, &task_id) {
+                    task.title = title.clone();
                 }
+                self.rebuild_column(&list_id);
                 json!({ "title": title })
             }
             FieldId::Notes => {
                 let notes = e.buf.trim_end().to_string();
-                if let Some(row) = self.row_mut(&list_id, &task_id) {
-                    row.task.notes = Some(notes.clone()).filter(|n| !n.is_empty());
+                if let Some(task) = self.board.task_mut(&list_id, &task_id) {
+                    task.notes = Some(notes.clone()).filter(|notes| !notes.is_empty());
                 }
+                self.rebuild_column(&list_id);
                 json!({ "notes": notes })
             }
         };
         self.error = None;
-        self.send_patch(list_id, task_id, fields);
+        self.send_patch(list_id, task_id, fields, before);
     }
 
     /// Tick or untick the selected task.
@@ -701,21 +774,22 @@ impl App {
         if !self.writable() {
             return;
         }
-        let Some(col) = self.columns.get_mut(self.focus) else { return };
+        let Some(col) = self.columns.get(self.focus) else { return };
         let list_id = col.list.id.clone();
-        let Some(i) = col.state.selected() else { return };
-        let Some(row) = col.rows.get_mut(i) else { return };
-        let task_id = row.task.id.clone();
+        let Some(task_id) = col.selected_id.clone() else { return };
+        let Some(task) = self.board.task_mut(&list_id, &task_id) else { return };
+        let before = task.clone();
         // Show the new state now; Google's copy replaces it when it answers.
-        let fields = if row.task.is_done() {
-            row.task.status = "needsAction".into();
-            row.task.completed = None;
+        let fields = if task.is_done() {
+            task.status = "needsAction".into();
+            task.completed = None;
             json!({ "status": "needsAction", "completed": null })
         } else {
-            row.task.status = "completed".into();
+            task.status = "completed".into();
             json!({ "status": "completed" })
         };
-        self.send_patch(list_id, task_id, fields);
+        self.rebuild_column(&list_id);
+        self.send_patch(list_id, task_id, fields, before);
     }
 
     /// Ask before deleting; `confirm_delete` does the work on "y".
@@ -748,20 +822,16 @@ impl App {
             self.interaction = interaction;
             return;
         };
-        if let Some(col) = self.columns.iter_mut().find(|c| c.list.id == p.list_id) {
-            // Drop the task and its subtasks locally; Google cascades the same way.
-            col.rows
-                .retain(|r| r.task.id != p.task_id && r.task.parent.as_deref() != Some(p.task_id.as_str()));
-            let last = col.rows.len().checked_sub(1);
-            let sel = col.state.selected().unwrap_or(0);
-            col.state.select(last.map(|l| sel.min(l)));
-        }
+        // Drop the task and its subtasks locally; Google cascades the same way.
+        let removed = self.board.remove_tree(&p.list_id, &p.task_id);
+        self.rebuild_column(&p.list_id);
         self.error = None;
         let (list_id, task_id) = (p.list_id, p.task_id);
         self.send_mutation(
             MutationContext::Delete {
                 list_id: list_id.clone(),
                 task_id: task_id.clone(),
+                removed,
             },
             |operation| Cmd::Delete {
                 operation,
@@ -771,11 +841,18 @@ impl App {
         );
     }
 
-    fn send_patch(&mut self, list_id: String, task_id: String, fields: Value) {
+    fn send_patch(
+        &mut self,
+        list_id: String,
+        task_id: String,
+        fields: Value,
+        before: Task,
+    ) {
         self.send_mutation(
             MutationContext::Patch {
                 list_id: list_id.clone(),
                 task_id: task_id.clone(),
+                before,
             },
             |operation| Cmd::Patch {
                 operation,
@@ -817,20 +894,32 @@ impl App {
                 // Keep existing columns (and their selection) until fresh tasks arrive.
                 let focused = self.columns.get(self.focus).map(|c| c.list.id.clone());
                 let mut old = std::mem::take(&mut self.columns);
+                self.board.replace_lists(lists.clone());
                 self.columns = lists
                     .into_iter()
-                    .map(|list| match old.iter().position(|c| c.list.id == list.id) {
-                        Some(i) => Column {
-                            list,
-                            load: LoadState::Loading,
-                            ..old.swap_remove(i)
-                        },
-                        None => Column {
-                            list,
-                            rows: Vec::new(),
-                            load: LoadState::Loading,
-                            state: ListState::default(),
-                        },
+                    .map(|list| {
+                        let rows = self.board.rows(&list.id);
+                        let mut column = match old.iter().position(|column| column.list.id == list.id)
+                        {
+                            Some(index) => old.swap_remove(index),
+                            None => Column {
+                                list: list.clone(),
+                                rows: Vec::new(),
+                                load: LoadState::Loading,
+                                selected_id: None,
+                                state: ListState::default(),
+                            },
+                        };
+                        let selected = column.selected_id.clone();
+                        column.list = list;
+                        column.rows = rows;
+                        column.load = LoadState::Loading;
+                        column.select_id(
+                            selected.or_else(|| {
+                                column.rows.first().map(|row| row.task.id.clone())
+                            }),
+                        );
+                        column
                     })
                     .collect();
                 self.focus = focused
@@ -842,15 +931,16 @@ impl App {
                 let Some(col) = self.columns.iter_mut().find(|c| c.list.id == id) else { return };
                 match res {
                     Ok(tasks) => {
+                        self.board.replace_tasks(&id, tasks);
                         col.load = LoadState::Loaded;
-                        let keep = col.selected().map(|r| r.task.id.clone());
+                        let keep = col.selected_id.clone();
                         let prev = col.state.selected();
-                        col.rows = order(tasks);
+                        col.rows = self.board.rows(&id);
                         let last = col.rows.len().checked_sub(1);
                         let sel = keep
                             .and_then(|id| col.rows.iter().position(|r| r.task.id == id))
                             .or_else(|| last.map(|l| prev.unwrap_or(0).min(l)));
-                        col.state.select(sel);
+                        col.select(sel);
                     }
                     Err(e) => {
                         col.load = LoadState::Failed;
@@ -897,24 +987,16 @@ impl App {
                             self.recover("create succeeded but its list disappeared".into());
                             return;
                         };
-                        let col = &mut self.columns[col_index];
                         let id = task.id.clone();
-                        let selected = col.selected().map(|r| r.task.id.clone());
+                        let selected = self.columns[col_index].selected_id.clone();
                         let follow_created = may_follow && selected == selection_at_send;
-                        let mut tasks: Vec<Task> = col.rows.iter().map(|r| r.task.clone()).collect();
-                        tasks.push(task);
-                        col.rows = order(tasks);
-                        let selected = if follow_created {
-                            Some(id)
-                        } else {
-                            selected
-                        };
-                        if let Some(i) = selected
-                            .and_then(|selected| {
-                                col.rows.iter().position(|r| r.task.id == selected)
-                            })
-                        {
-                            col.state.select(Some(i));
+                        if !self.board.upsert_task(&list_id, task) {
+                            self.recover("create succeeded but its list disappeared".into());
+                            return;
+                        }
+                        self.rebuild_column(&list_id);
+                        if follow_created {
+                            self.columns[col_index].select_id(Some(id));
                         }
                         self.save_cache();
                     }
@@ -941,10 +1023,11 @@ impl App {
                     return;
                 };
                 if !matches!(
-                    context,
+                    &context,
                     MutationContext::Delete {
-                        list_id: ref expected_list,
-                        task_id: ref expected_task,
+                        list_id: expected_list,
+                        task_id: expected_task,
+                        ..
                     } if expected_list == &list_id && expected_task == &task_id
                 ) {
                     self.recover("delete response did not match the pending operation".into());
@@ -956,6 +1039,7 @@ impl App {
                     }
                     Err(e) => {
                         // The task is still there, so put the board back.
+                        self.rollback(context);
                         self.recover(format!(
                             "delete failed for {list_id}/{task_id}: {e}"
                         ));
@@ -973,11 +1057,12 @@ impl App {
                     return;
                 };
                 if !matches!(
-                    context,
+                    &context,
                     MutationContext::Move {
-                        from: ref expected_from,
-                        to: ref expected_to,
-                        ids: ref expected_ids,
+                        from: expected_from,
+                        to: expected_to,
+                        ids: expected_ids,
+                        ..
                     } if expected_from == &from && expected_to == &to && expected_ids == &ids
                 ) {
                     self.recover("move response did not match the pending operation".into());
@@ -987,10 +1072,13 @@ impl App {
                     Ok(()) => {
                         self.save_cache();
                     }
-                    Err(e) => self.recover(format!(
-                        "move failed from {from} to {to} for {}: {e}",
-                        ids.join(", ")
-                    )),
+                    Err(e) => {
+                        self.rollback(context);
+                        self.recover(format!(
+                            "move failed from {from} to {to} for {}: {e}",
+                            ids.join(", ")
+                        ));
+                    }
                 }
             }
             Msg::Updated {
@@ -1003,10 +1091,11 @@ impl App {
                     return;
                 };
                 if !matches!(
-                    context,
+                    &context,
                     MutationContext::Patch {
-                        list_id: ref expected_list,
-                        task_id: ref expected_task,
+                        list_id: expected_list,
+                        task_id: expected_task,
+                        ..
                     } if expected_list == &list_id && expected_task == &task_id
                 ) {
                     self.recover("save response did not match the pending operation".into());
@@ -1029,28 +1118,13 @@ impl App {
                             self.recover("save succeeded but its task disappeared".into());
                             return;
                         }
-                        let col = &mut self.columns[col_index];
-                        // Re-sort: ticking a task moves it down to the completed group.
-                        let id = task.id.clone();
-                        let selected = col.selected().map(|r| r.task.id.clone());
-                        let tasks = col
-                            .rows
-                            .iter()
-                            .map(|r| if r.task.id == id { task.clone() } else { r.task.clone() })
-                            .collect();
-                        col.rows = order(tasks);
-                        if let Some(i) = selected
-                            .or(Some(id))
-                            .and_then(|selected| {
-                                col.rows.iter().position(|r| r.task.id == selected)
-                            })
-                        {
-                            col.state.select(Some(i));
-                        }
+                        self.board.upsert_task(&list_id, task);
+                        self.rebuild_column(&list_id);
                         self.save_cache();
                     }
                     Err(e) => {
                         // The optimistic title may be wrong now, so resync.
+                        self.rollback(context);
                         self.recover(format!("save failed: {e}"));
                     }
                 }
@@ -1062,7 +1136,7 @@ impl App {
         let Some(col) = self.columns.get_mut(self.focus) else { return };
         let Some(last) = col.rows.len().checked_sub(1) else { return };
         let cur = col.state.selected().unwrap_or(0) as isize;
-        col.state.select(Some((cur + delta).clamp(0, last as isize) as usize));
+        col.select(Some((cur + delta).clamp(0, last as isize) as usize));
     }
 
     fn selected_task(&self) -> Option<&Row> {
@@ -1170,33 +1244,12 @@ impl App {
         let Some(dest_idx) = self.columns.iter().position(|c| c.list.id == dest_id) else {
             return;
         };
-        let id_set: HashSet<String> = ids.iter().cloned().collect();
-        let src = &mut self.columns[self.focus];
-        let mut taken = Vec::new();
-        src.rows.retain(|r| {
-            if id_set.contains(&r.task.id) {
-                taken.push(r.task.clone());
-                false
-            } else {
-                true
-            }
-        });
-        let last = src.rows.len().checked_sub(1);
-        let sel = src.state.selected().unwrap_or(0);
-        src.state.select(last.map(|l| sel.min(l)));
-        taken.sort_by_key(|t| ids.iter().position(|id| *id == t.id).unwrap_or(usize::MAX));
-        for t in &mut taken {
-            if t.parent.as_deref().is_some_and(|p| !id_set.contains(p)) {
-                t.parent = None;
-            }
-        }
-        let dest = &mut self.columns[dest_idx];
-        let mut tasks: Vec<Task> = dest.rows.iter().map(|r| r.task.clone()).collect();
-        tasks.extend(taken);
-        dest.rows = order(tasks);
-        if let Some(i) = dest.rows.iter().position(|r| r.task.id == task_id) {
-            dest.state.select(Some(i));
-        }
+        let source_before = self.board.tasks(&from_id);
+        let destination_before = self.board.tasks(&dest_id);
+        self.board.move_tree(&from_id, &dest_id, &task_id);
+        self.rebuild_column(&from_id);
+        self.rebuild_column(&dest_id);
+        self.columns[dest_idx].select_id(Some(task_id.clone()));
         self.focus = dest_idx;
         self.error = None;
         self.send_mutation(
@@ -1204,6 +1257,8 @@ impl App {
                 from: from_id.clone(),
                 to: dest_id.clone(),
                 ids: ids.clone(),
+                source_before,
+                destination_before,
             },
             |operation| Cmd::Move {
                 operation,
@@ -2157,33 +2212,6 @@ fn fmt_time(s: &str) -> String {
         .unwrap_or_else(|_| s.to_string())
 }
 
-/// Open tasks by position, then completed ones newest first; subtasks sit
-/// directly under their parent.
-fn order(tasks: Vec<Task>) -> Vec<Row> {
-    let mut tasks: Vec<Task> = tasks.into_iter().filter(|t| !t.deleted).collect();
-    tasks.sort_by(|a, b| {
-        a.is_done().cmp(&b.is_done()).then_with(|| {
-            if a.is_done() { b.completed.cmp(&a.completed) } else { a.position.cmp(&b.position) }
-        })
-    });
-    let ids: HashSet<String> = tasks.iter().map(|t| t.id.clone()).collect();
-    let (children, top): (Vec<Task>, Vec<Task>) =
-        tasks.into_iter().partition(|t| t.parent.as_ref().is_some_and(|p| ids.contains(p)));
-
-    let mut rows = Vec::with_capacity(top.len() + children.len());
-    for task in top {
-        let id = task.id.clone();
-        rows.push(Row { task, depth: 0 });
-        rows.extend(
-            children
-                .iter()
-                .filter(|c| c.parent.as_deref() == Some(id.as_str()))
-                .map(|c| Row { task: c.clone(), depth: 1 }),
-        );
-    }
-    rows
-}
-
 /// Owns the API client so network calls never block the UI.
 fn worker(mut client: Client, cmds: Receiver<Cmd>, out: Sender<Msg>) {
     for cmd in cmds {
@@ -2385,6 +2413,17 @@ mod tests {
         (App::new(tx, cached, Config::default()), rx)
     }
 
+    fn set_tasks(app: &mut App, list_id: &str, tasks: Vec<Task>, selected: &str) {
+        app.board.replace_tasks(list_id, tasks);
+        app.rebuild_column(list_id);
+        let column = app
+            .columns
+            .iter_mut()
+            .find(|column| column.list.id == list_id)
+            .unwrap();
+        column.select_id(Some(selected.into()));
+    }
+
     fn task(id: &str, parent: Option<&str>, pos: &str, done: bool) -> Task {
         Task {
             id: id.into(),
@@ -2464,11 +2503,14 @@ mod tests {
         let (mut app, cmds) = app_with_lists(&["a"]);
         let _ = cmds.recv().unwrap(); // startup refresh
         app.sync = SyncState::Ready;
+        let removed = app.board.remove_tree("a", "a-cached");
+        app.rebuild_column("a");
         let operation = pending(
             &mut app,
             MutationContext::Delete {
                 list_id: "a".into(),
                 task_id: "a-cached".into(),
+                removed,
             },
         );
 
@@ -2482,6 +2524,8 @@ mod tests {
         assert_ne!(app.sync, SyncState::Ready);
         assert_eq!(app.sync, SyncState::Refreshing);
         assert!(app.pending_operation.is_none());
+        assert!(app.board.task("a", "a-cached").is_some());
+        assert_eq!(app.columns[0].selected_id.as_deref(), Some("a-cached"));
         assert!(app.error.as_deref().is_some_and(|e| e.contains("delete failed")));
         assert!(matches!(cmds.recv().unwrap(), Cmd::Refresh(_)));
     }
@@ -2515,7 +2559,12 @@ mod tests {
         drop(cmds);
         app.sync = SyncState::Ready;
 
-        app.send_patch("a".into(), "a-cached".into(), json!({ "title": "changed" }));
+        app.send_patch(
+            "a".into(),
+            "a-cached".into(),
+            json!({ "title": "changed" }),
+            task("a-cached", None, "1", false),
+        );
 
         assert!(app.pending_operation.is_none());
         assert_eq!(app.sync, SyncState::Failed);
@@ -2528,8 +2577,18 @@ mod tests {
         let _ = cmds.recv().unwrap(); // startup refresh
         app.sync = SyncState::Ready;
 
-        app.send_patch("a".into(), "one".into(), json!({ "title": "one" }));
-        app.send_patch("a".into(), "two".into(), json!({ "title": "two" }));
+        app.send_patch(
+            "a".into(),
+            "one".into(),
+            json!({ "title": "one" }),
+            task("one", None, "1", false),
+        );
+        app.send_patch(
+            "a".into(),
+            "two".into(),
+            json!({ "title": "two" }),
+            task("two", None, "2", false),
+        );
 
         assert!(app.pending_operation.is_some());
         let patches = cmds
@@ -2544,13 +2603,22 @@ mod tests {
         let (mut app, cmds) = app_with_lists(&["a"]);
         let _ = cmds.recv().unwrap(); // startup refresh
         app.sync = SyncState::Ready;
-        app.columns[0].rows = order(vec![
-            task("a-one", None, "1", false),
-            task("a-two", None, "2", false),
-        ]);
-        app.columns[0].state.select(Some(0));
+        set_tasks(
+            &mut app,
+            "a",
+            vec![
+                task("a-one", None, "1", false),
+                task("a-two", None, "2", false),
+            ],
+            "a-one",
+        );
 
-        app.send_patch("a".into(), "a-one".into(), json!({ "title": "changed" }));
+        app.send_patch(
+            "a".into(),
+            "a-one".into(),
+            json!({ "title": "changed" }),
+            task("a-one", None, "1", false),
+        );
         app.on_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
         app.on_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
 
@@ -2565,6 +2633,68 @@ mod tests {
     }
 
     #[test]
+    fn completion_reorders_immediately_and_selection_follows_its_id() {
+        let (mut app, cmds) = app_with_lists(&["a"]);
+        let _ = cmds.recv().unwrap(); // startup refresh
+        app.sync = SyncState::Ready;
+        set_tasks(
+            &mut app,
+            "a",
+            vec![
+                task("a-one", None, "1", false),
+                task("a-two", None, "2", false),
+            ],
+            "a-one",
+        );
+
+        app.toggle_done();
+
+        assert_eq!(
+            app.columns[0]
+                .rows
+                .iter()
+                .map(|row| row.task.id.as_str())
+                .collect::<Vec<_>>(),
+            ["a-two", "a-one"]
+        );
+        assert_eq!(app.columns[0].selected_id.as_deref(), Some("a-one"));
+        assert_eq!(app.columns[0].state.selected(), Some(1));
+    }
+
+    #[test]
+    fn a_failed_patch_rolls_back_the_canonical_task() {
+        let (mut app, _cmds) = app_with_lists(&["a"]);
+        app.sync = SyncState::Ready;
+        let before = app.board.task("a", "a-cached").unwrap().clone();
+        app.board.task_mut("a", "a-cached").unwrap().title = "optimistic".into();
+        app.rebuild_column("a");
+        let operation = pending(
+            &mut app,
+            MutationContext::Patch {
+                list_id: "a".into(),
+                task_id: "a-cached".into(),
+                before,
+            },
+        );
+
+        app.on_msg(Msg::Updated {
+            operation,
+            list_id: "a".into(),
+            task_id: "a-cached".into(),
+            result: Err("offline".into()),
+        });
+
+        assert_ne!(
+            app.board.task("a", "a-cached").unwrap().title,
+            "optimistic"
+        );
+        assert_eq!(
+            app.columns[0].rows[0].task.title,
+            app.board.task("a", "a-cached").unwrap().title
+        );
+    }
+
+    #[test]
     fn a_response_for_another_operation_is_ignored() {
         let (mut app, _cmds) = app_with_lists(&["a"]);
         app.sync = SyncState::Ready;
@@ -2573,6 +2703,7 @@ mod tests {
             MutationContext::Patch {
                 list_id: "a".into(),
                 task_id: "a-cached".into(),
+                before: task("a-cached", None, "1", false),
             },
         );
 
@@ -2629,6 +2760,7 @@ mod tests {
             MutationContext::Patch {
                 list_id: "a".into(),
                 task_id: "a-cached".into(),
+                before: task("a-cached", None, "1", false),
             },
         );
 
@@ -2655,11 +2787,15 @@ mod tests {
     #[test]
     fn a_delayed_update_does_not_hide_another_tasks_editor() {
         let (mut app, _cmds) = app_with_lists(&["a"]);
-        app.columns[0].rows = order(vec![
-            task("a-one", None, "1", false),
-            task("a-two", None, "2", false),
-        ]);
-        app.columns[0].state.select(Some(1));
+        set_tasks(
+            &mut app,
+            "a",
+            vec![
+                task("a-one", None, "1", false),
+                task("a-two", None, "2", false),
+            ],
+            "a-two",
+        );
         app.interaction = Interaction::Editing(Edit {
             target: EditTarget::Existing {
                 list_id: "a".into(),
@@ -2674,6 +2810,7 @@ mod tests {
             MutationContext::Patch {
                 list_id: "a".into(),
                 task_id: "a-one".into(),
+                before: task("a-one", None, "1", false),
             },
         );
 
@@ -2699,11 +2836,15 @@ mod tests {
     #[test]
     fn a_delayed_create_does_not_hide_another_tasks_editor() {
         let (mut app, _cmds) = app_with_lists(&["a"]);
-        app.columns[0].rows = order(vec![
-            task("a-one", None, "1", false),
-            task("a-two", None, "2", false),
-        ]);
-        app.columns[0].state.select(Some(1));
+        set_tasks(
+            &mut app,
+            "a",
+            vec![
+                task("a-one", None, "1", false),
+                task("a-two", None, "2", false),
+            ],
+            "a-two",
+        );
         app.interaction = Interaction::Editing(Edit {
             target: EditTarget::Existing {
                 list_id: "a".into(),
@@ -2748,6 +2889,7 @@ mod tests {
             MutationContext::Patch {
                 list_id: "a".into(),
                 task_id: "a-cached".into(),
+                before: task("a-cached", None, "1", false),
             },
         );
 
@@ -2787,6 +2929,7 @@ mod tests {
             MutationContext::Patch {
                 list_id: "a".into(),
                 task_id: "a-cached".into(),
+                before: task("a-cached", None, "1", false),
             },
         );
         app.quitting = true;
