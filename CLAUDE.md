@@ -48,7 +48,7 @@ Work directly on `main`; no feature branches.
   drains messages, and calls `check_theme()` every 500 ms. `order()` sorts
   open tasks by position, then completed tasks newest first, with subtasks
   under their parent. `Edit` holds the title buffer + byte cursor; commits are
-optimistic (local change first, then `Cmd::Patch`), and a failed save sets
+  optimistic (local change first, then `Cmd::Patch`), and a failed save sets
   an error and refreshes. `Msg::Updated` re-runs `order()` so a ticked task
   moves to the completed group with the selection following it. Destructive
   keys go through `App::pending` (a y/n prompt in the status bar), never
@@ -60,12 +60,17 @@ optimistic (local change first, then `Cmd::Patch`), and a failed save sets
   draft's `parent` from `subtask_parent`: the selected row, or the row's own
   parent when it is already a subtask, since Google Tasks nests exactly one
   level deep. A row that draws at depth 0 because its parent is missing from
-  the list parents the new subtask itself. `b` extracts `http(s)` URLs from
-  the selected task's notes (`urls_in`) and opens a centered **Browse Link**
-  overlay; `j`/`k` move, Enter `spawn`s `open` / `xdg-open` for the selected
+  the list parents the new subtask itself. `task_links` gathers what the
+  selected task points at — the `links` Google attached to it (Gmail thread,
+  Doc), which carry the source's `description` as a title, then `urls_in` over
+  the notes, deduped by URL — and `b` opens a centered **Browse Link** overlay
+  showing each title with its URL beneath (`ellipsize` trims to the overlay
+  width); `j`/`k` move, Enter `spawn`s `open` / `xdg-open` for the selected
   URL and dismisses the overlay, Shift+Enter opens every URL in the list then
-  dismisses, Esc/`q` close it. `m` opens a **Move** overlay of every list
-  except the current one; Enter POSTs `tasks.move` (`Cmd::Move` /
+  dismisses, Esc/`q` close it. It renders `Clear` first, since a `Block`
+  restyles the cells under it but leaves their text (`draw_move` and
+  `draw_help` still have that bleed-through). `m` opens a **Move** overlay of
+  every list except the current one; Enter POSTs `tasks.move` (`Cmd::Move` /
   `Client::relocate`) for the selected task and its subtasks, then follows the
   selection to the dest column. `?` opens a **Keyboard** overlay of
   `help_keys()`; `j`/`k` move, Esc/`q`/`?` close it. Startup pushes kitty

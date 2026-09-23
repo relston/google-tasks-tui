@@ -32,11 +32,15 @@ available as subcommands for scripts and agents (`google-tasks-tui lists`,
 - `d` deletes the selected task after a y/n confirmation in the status bar.
   The prompt names the task and counts the subtasks that go with it, since
   Google deletes those too.
-- `b` opens a **Browse Link** overlay listing `http://` / `https://` URLs
-  found in the selected task's notes. The first link is selected; `j`/`k`
-  move, `Enter` opens the selected URL and closes the overlay, `Shift+Enter`
-  opens every URL in the list (selection does not matter) and closes,
-  `Esc` closes without opening. If there are none, the status bar says so.
+- `b` opens a **Browse Link** overlay of everything the selected task links
+  to. Links Google attached to the task — the Gmail thread a task was made
+  from, a linked Doc — are listed first under the source's own title, with
+  the URL beneath it; after those come any `http://` / `https://` URLs typed
+  into the notes, which have no title to show. A URL that appears both ways
+  is listed once. The first link is selected; `j`/`k` move, `Enter` opens the
+  selected URL and closes the overlay, `Shift+Enter` opens every URL in the
+  list (selection does not matter) and closes, `Esc` closes without opening.
+  If there are none, the status bar says so.
 - `m` opens a **Move** overlay of every task list except the current one.
   `j`/`k` choose a list, `Enter` assigns the selected task to it (and its
   subtasks, the same way Google deletes them together) and closes the overlay.

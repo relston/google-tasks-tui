@@ -20,7 +20,8 @@ use ratatui::{
     style::{Color, Modifier, Style, Stylize},
     text::{Line, Span},
     widgets::{
-        Block, BorderType, HighlightSpacing, List, ListItem, ListState, Padding, Paragraph,
+        Block, BorderType, Clear, HighlightSpacing, List, ListItem, ListState, Padding,
+        Paragraph,
     },
     DefaultTerminal, Frame,
 };
@@ -65,9 +66,17 @@ struct Pending {
     prompt: String,
 }
 
-/// Overlay listing URLs found in the selected task's notes.
+/// One row of the Browse overlay.
+struct BrowseLink {
+    /// The source's title, for links Google attached to the task. URLs picked
+    /// out of the notes have nothing to call themselves.
+    name: Option<String>,
+    url: String,
+}
+
+/// Overlay listing everything the selected task links to.
 struct Browse {
-    urls: Vec<String>,
+    links: Vec<BrowseLink>,
     state: ListState,
 }
 
@@ -635,21 +644,21 @@ impl App {
 
     fn start_browse(&mut self) {
         let Some(row) = self.selected_task() else { return };
-        let urls = urls_in(row.task.notes.as_deref().unwrap_or(""));
-        if urls.is_empty() {
-            self.error = Some("no links in notes".into());
+        let links = task_links(&row.task);
+        if links.is_empty() {
+            self.error = Some("no links on this task".into());
             return;
         }
         self.error = None;
         self.browse = Some(Browse {
-            urls,
+            links,
             state: ListState::default().with_selected(Some(0)),
         });
     }
 
     fn move_browse(&mut self, delta: isize) {
         let Some(b) = self.browse.as_mut() else { return };
-        let Some(last) = b.urls.len().checked_sub(1) else { return };
+        let Some(last) = b.links.len().checked_sub(1) else { return };
         let cur = b.state.selected().unwrap_or(0) as isize;
         b.state.select(Some((cur + delta).clamp(0, last as isize) as usize));
     }
@@ -658,11 +667,11 @@ impl App {
         let urls = {
             let Some(b) = self.browse.as_ref() else { return };
             if all {
-                b.urls.clone()
+                b.links.iter().map(|l| l.url.clone()).collect()
             } else {
                 let Some(i) = b.state.selected() else { return };
-                let Some(url) = b.urls.get(i) else { return };
-                vec![url.clone()]
+                let Some(l) = b.links.get(i) else { return };
+                vec![l.url.clone()]
             }
         };
         for url in &urls {
@@ -1186,8 +1195,9 @@ impl App {
     fn draw_browse(&mut self, f: &mut Frame, area: Rect, t: &Theme) {
         let bg = self.bg(t.bg);
         let Some(browse) = self.browse.as_mut() else { return };
-        let width = area.width.min(72).max(24);
-        let height = (browse.urls.len() as u16 + 2).clamp(3, area.height.max(3));
+        let width = area.width.clamp(28, 80);
+        let rows: u16 = browse.links.iter().map(|l| 1 + u16::from(l.name.is_some())).sum();
+        let height = (rows + 2).clamp(3, area.height.max(3));
         let x = area.x + area.width.saturating_sub(width) / 2;
         let y = area.y + area.height.saturating_sub(height) / 2;
         let rect = Rect::new(x, y, width, height);
@@ -1196,16 +1206,31 @@ impl App {
             .border_style(Style::default().fg(t.accent))
             .title(Line::styled(" Browse Link ", Style::default().fg(t.accent).bold()))
             .style(Style::default().bg(bg));
+        // Two borders and the selection marker eat into the usable width.
+        let text_w = (width as usize).saturating_sub(4);
         let items: Vec<ListItem> = browse
-            .urls
+            .links
             .iter()
-            .map(|u| ListItem::new(Line::styled(u.clone(), Style::default().fg(t.blue))))
+            .map(|l| match &l.name {
+                Some(name) => ListItem::new(vec![
+                    Line::styled(ellipsize(name, text_w), Style::default().fg(t.fg).bold()),
+                    Line::styled(
+                        format!("  {}", ellipsize(&l.url, text_w.saturating_sub(2))),
+                        Style::default().fg(t.muted),
+                    ),
+                ]),
+                None => ListItem::new(Line::styled(
+                    ellipsize(&l.url, text_w),
+                    Style::default().fg(t.blue),
+                )),
+            })
             .collect();
         let list = List::new(items)
             .block(block)
             .highlight_style(Style::default().fg(t.sel_fg).bg(t.sel_bg).add_modifier(Modifier::BOLD))
             .highlight_symbol("▌")
             .highlight_spacing(HighlightSpacing::Always);
+        f.render_widget(Clear, rect); // a Block restyles cells but leaves their text
         f.render_stateful_widget(list, rect, &mut browse.state);
     }
 
@@ -1317,6 +1342,37 @@ fn subtask_parent(row: &Row) -> Option<String> {
         0 => Some(row.task.id.clone()),
         _ => row.task.parent.clone(),
     }
+}
+
+/// Everything the task links to: the links Google attached to it (a Gmail
+/// thread, a Doc) keep the source's title, then any bare URLs typed into the
+/// notes. First-seen order, no duplicate URLs.
+fn task_links(task: &Task) -> Vec<BrowseLink> {
+    let mut out: Vec<BrowseLink> = Vec::new();
+    for l in &task.links {
+        let name = l.description.trim();
+        if l.link.is_empty() || out.iter().any(|b| b.url == l.link) {
+            continue;
+        }
+        out.push(BrowseLink {
+            name: (!name.is_empty()).then(|| name.to_string()),
+            url: l.link.clone(),
+        });
+    }
+    for url in urls_in(task.notes.as_deref().unwrap_or("")) {
+        if !out.iter().any(|b| b.url == url) {
+            out.push(BrowseLink { name: None, url });
+        }
+    }
+    out
+}
+
+/// Cut `s` to `width` characters, marking the cut with an ellipsis.
+fn ellipsize(s: &str, width: usize) -> String {
+    if s.chars().count() <= width {
+        return s.to_string();
+    }
+    s.chars().take(width.saturating_sub(1)).chain(['…']).collect()
 }
 
 /// http(s) URLs in notes, first-seen order, no duplicates.
@@ -1699,6 +1755,47 @@ mod tests {
             urls_in("https://dup.test then https://dup.test again"),
             vec!["https://dup.test"]
         );
+    }
+
+    #[test]
+    fn task_links_lists_attached_links_then_notes_urls() {
+        use crate::api::Link;
+        let link = |d: &str, u: &str| Link { description: d.into(), link: u.into() };
+        let task = Task {
+            notes: Some("see https://notes.test/a and https://mail.test/#all/1".into()),
+            links: vec![
+                link("Check In For Your Visit", "https://mail.test/#all/1"),
+                link("  ", "https://nameless.test"),
+                link("same url again", "https://mail.test/#all/1"),
+                link("no url at all", ""),
+            ],
+            ..Default::default()
+        };
+        let links = task_links(&task);
+        let got: Vec<(Option<&str>, &str)> = links
+            .iter()
+            .map(|l| (l.name.as_deref(), l.url.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                // Google's own link keeps the source's title and comes first.
+                (Some("Check In For Your Visit"), "https://mail.test/#all/1"),
+                (None, "https://nameless.test"),
+                // The same URL in the notes is not offered twice.
+                (None, "https://notes.test/a"),
+            ]
+        );
+        assert!(task_links(&Task::default()).is_empty());
+    }
+
+    #[test]
+    fn ellipsize_cuts_on_character_boundaries() {
+        assert_eq!(ellipsize("short", 10), "short");
+        assert_eq!(ellipsize("exactfit", 8), "exactfit");
+        assert_eq!(ellipsize("truncate me", 8), "truncat…");
+        assert_eq!(ellipsize("héllo wörld", 6), "héllo…");
+        assert_eq!(ellipsize("abc", 0), "…");
     }
 
     #[test]
