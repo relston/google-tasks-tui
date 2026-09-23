@@ -25,6 +25,12 @@ Work directly on `main`; no feature branches.
   to semantic roles (`bg, fg, surface, accent, muted, sel_bg, sel_fg, red,
   green, yellow, blue`). Exposes `load()` and `fingerprint()`.
 - All app config/state lives under `$XDG_CONFIG_HOME/google-tasks-tui/`.
+- `src/config.rs` — user settings at `<config dir>/config.toml`. `load()`
+  writes `TEMPLATE` (the commented defaults) when the file is missing, and
+  falls back to `Config::default()` without touching the file when it will not
+  parse. `template_matches_the_defaults` fails if `TEMPLATE` and `Config`
+  drift apart. Read once at startup, so edits need a restart. Settings:
+  `wrap_titles` (default true).
 - `src/auth.rs` — OAuth for an installed client. Secret from
   `~/.gcloud/credentials.json` (`GOOGLE_TASKS_CREDENTIALS` overrides); refresh
   token cached in `$XDG_CONFIG_HOME/google-tasks-tui/token.json` (0600). Bootstraps
@@ -45,30 +51,39 @@ Work directly on `main`; no feature branches.
   mutate task lists. `TasksApi` is the trait the CLI and tests call.
 - `src/tui.rs` — board UI. A worker thread owns the `Client` and talks to the
   UI over `Cmd`/`Msg` channels; the event loop polls input every 100 ms,
-  drains messages, and calls `check_theme()` every 500 ms. `order()` sorts
-  open tasks by position, then completed tasks newest first, with subtasks
-  under their parent. `Edit` holds the title buffer + byte cursor; commits are
-  optimistic (local change first, then `Cmd::Patch`), and a failed save sets
-  an error and refreshes. `Msg::Updated` re-runs `order()` so a ticked task
-  moves to the completed group with the selection following it. Destructive
-  keys go through `App::pending` (a y/n prompt in the status bar), never
-  straight to the API. The shelf lays out explicit sub-rects
-  (title/meta/notes/updated) so `wrap()` + `cursor_rc()` can place the real
-  terminal cursor; `App::field` holds shelf focus. `App::creating` holds a
-  `Draft` that swaps the shelf for a title-only input whose `Edit` has an
-  empty `task_id`, so `commit_edit` POSTs instead of PATCHing. `C` fills the
-  draft's `parent` from `subtask_parent`: the selected row, or the row's own
-  parent when it is already a subtask, since Google Tasks nests exactly one
-  level deep. A row that draws at depth 0 because its parent is missing from
-  the list parents the new subtask itself. `task_links` gathers what the
-  selected task points at — the `links` Google attached to it (Gmail thread,
-  Doc), which carry the source's `description` as a title, then `urls_in` over
-  the notes, deduped by URL — and `b` opens a centered **Browse Link** overlay
-  showing each title with its URL beneath (`ellipsize` trims to the overlay
-  width); `j`/`k` move, Enter `spawn`s `open` / `xdg-open` for the selected
-  URL and dismisses the overlay, Shift+Enter opens every URL in the list then
-  dismisses, Esc/`q` close it. It renders `Clear` first, since a `Block`
-  restyles the cells under it but leaves their text (`draw_move` and
+  drains messages, and calls `check_theme()` every 500 ms. `task_item` wraps a
+  title over as many lines as it needs when `config.wrap_titles` is on,
+  trimming the leading space `wrap()` leaves when a break lands on a run of
+  them. Everything Google sends goes through `clean()` first: task text can
+  carry control characters, and printing a `\r` walks the terminal cursor to
+  column 0 so every cell after it lands in the wrong place. Clipping hid them
+  past a column's edge, so wrapping is what exposed it. `clean` swaps each
+  ASCII control character (bar `\n`) for a space, the same byte length, which
+  keeps every offset `wrap()` and `cursor_rc()` pass around valid.
+  `control_characters_never_reach_the_screen` renders through a `TestBackend`
+  and asserts no cell holds one. `order()` sorts open tasks by position, then
+  completed tasks newest first, with subtasks under their parent. `Edit` holds
+  the title buffer + byte cursor; commits are optimistic (local change first,
+  then `Cmd::Patch`), and a failed save sets an error and refreshes.
+  `Msg::Updated` re-runs `order()` so a ticked task moves to the completed
+  group with the selection following it. Destructive keys go through
+  `App::pending` (a y/n prompt in the status bar), never straight to the API.
+  The shelf lays out explicit sub-rects (title/meta/notes/updated) so `wrap()`
+  + `cursor_rc()` can place the real terminal cursor; `App::field` holds shelf
+  focus. `App::creating` holds a `Draft` that swaps the shelf for a title-only
+  input whose `Edit` has an empty `task_id`, so `commit_edit` POSTs instead of
+  PATCHing. `C` fills the draft's `parent` from `subtask_parent`: the selected
+  row, or the row's own parent when it is already a subtask, since Google
+  Tasks nests exactly one level deep. A row that draws at depth 0 because its
+  parent is missing from the list parents the new subtask itself. `task_links`
+  gathers what the selected task points at — the `links` Google attached to it
+  (Gmail thread, Doc), which carry the source's `description` as a title, then
+  `urls_in` over the notes, deduped by URL — and `b` opens a centered **Browse
+  Link** overlay showing each title with its URL beneath (`ellipsize` trims to
+  the overlay width); `j`/`k` move, Enter `spawn`s `open` / `xdg-open` for the
+  selected URL and dismisses the overlay, Shift+Enter opens every URL in the
+  list then dismisses, Esc/`q` close it. It renders `Clear` first, since a
+  `Block` restyles the cells under it but leaves their text (`draw_move` and
   `draw_help` still have that bleed-through). `m` opens a **Move** overlay of
   every list except the current one; Enter POSTs `tasks.move` (`Cmd::Move` /
   `Client::relocate`) for the selected task and its subtasks, then follows the

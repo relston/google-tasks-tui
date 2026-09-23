@@ -1,6 +1,7 @@
 pub mod api;
 pub mod auth;
 pub mod cache;
+pub mod config;
 pub mod cli;
 pub mod theme;
 pub mod tui;

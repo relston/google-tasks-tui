@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     collections::HashSet,
     io,
     process::{Command, Stdio},
@@ -31,6 +32,7 @@ use serde_json::{json, Value};
 use crate::api::{Client, Task, TaskList};
 use crate::auth;
 use crate::cache;
+use crate::config::{self, Config};
 use crate::theme::{self, Theme};
 
 const THEME_POLL: Duration = Duration::from_millis(500);
@@ -229,6 +231,7 @@ impl Column {
 }
 
 struct App {
+    config: Config,
     theme: Theme,
     fingerprint: theme::Fingerprint,
     transparent: bool,
@@ -258,7 +261,7 @@ struct App {
 }
 
 impl App {
-    fn new(cmds: Sender<Cmd>, cached: cache::Cache) -> Self {
+    fn new(cmds: Sender<Cmd>, cached: cache::Cache, config: Config) -> Self {
         // Paint the last known board straight away; the sync replaces it.
         let columns = cached
             .lists
@@ -271,6 +274,7 @@ impl App {
             })
             .collect();
         let mut app = Self {
+            config,
             theme: theme::load(),
             fingerprint: theme::fingerprint(),
             transparent: false,
@@ -992,6 +996,11 @@ impl App {
         let focused = i == self.focus;
         let surface = self.bg(t.surface);
         let today = Local::now().date_naive();
+        // Two borders and the selection marker sit outside the item's text.
+        let wrap_to = self
+            .config
+            .wrap_titles
+            .then(|| (area.width as usize).saturating_sub(3));
         let col = &mut self.columns[i];
 
         let open = col.rows.iter().filter(|r| !r.task.is_done()).count();
@@ -999,7 +1008,10 @@ impl App {
         let block = Block::bordered()
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(if focused { t.accent } else { t.muted }))
-            .title(Line::styled(format!(" {} ", col.list.title), Style::default().fg(title_fg).bold()))
+            .title(Line::styled(
+                format!(" {} ", clean(&col.list.title)),
+                Style::default().fg(title_fg).bold(),
+            ))
             .title(Line::styled(format!(" {open} "), Style::default().fg(t.muted)).right_aligned())
             .style(Style::default().bg(surface));
 
@@ -1009,7 +1021,8 @@ impl App {
             return;
         }
 
-        let items: Vec<ListItem> = col.rows.iter().map(|r| task_item(r, t, today)).collect();
+        let items: Vec<ListItem> =
+            col.rows.iter().map(|r| task_item(r, t, today, wrap_to)).collect();
         let highlight = if focused {
             Style::default().fg(t.sel_fg).bg(t.sel_bg).add_modifier(Modifier::BOLD)
         } else {
@@ -1118,13 +1131,17 @@ impl App {
         }
         for l in &task.links {
             let text = if l.description.is_empty() { &l.link } else { &l.description };
-            meta.push(field("Link", Span::styled(text.clone(), Style::default().fg(t.blue)), t));
+            meta.push(field(
+                "Link",
+                Span::styled(clean(text).into_owned(), Style::default().fg(t.blue)),
+                t,
+            ));
         }
 
         // title · gap · meta · gap · "Notes" · notes · gap · updated
         let title_h = match editing_field {
             Some(FieldId::Title) => 1,
-            _ => wrap(title_of(task), w).len().min(3) as u16,
+            _ => wrap(&title_of(task), w).len().min(3) as u16,
         };
         let meta_h = meta.len() as u16;
         let notes_h = inner.height.saturating_sub(title_h + meta_h + 5).max(1);
@@ -1147,7 +1164,7 @@ impl App {
                 cursor = Some((title_a.x + 2 + offset as u16, title_a.y));
                 vec![Line::styled(format!("{text:<w$}"), input.bold())]
             }
-            None => wrap(title, w)
+            None => wrap(&title, w)
                 .into_iter()
                 .take(title_h as usize)
                 .map(|(s, e)| Line::styled(title[s..e].to_string(), Style::default().fg(t.fg).bold()))
@@ -1159,7 +1176,9 @@ impl App {
         f.render_widget(Line::styled("  Notes", muted.bold()), notes_label_a);
 
         let stored = task.notes.as_deref().unwrap_or("");
-        let notes_text = editing.filter(|e| e.field == FieldId::Notes).map_or(stored, |e| &e.buf);
+        let raw = editing.filter(|e| e.field == FieldId::Notes).map_or(stored, |e| &e.buf);
+        let cleaned = clean(raw);
+        let notes_text = cleaned.as_ref();
         let rows = notes_a.height as usize;
         let notes_lines = if notes_text.is_empty() && editing_field != Some(FieldId::Notes) {
             vec![Line::styled("(none)", muted)]
@@ -1194,9 +1213,41 @@ impl App {
 
     fn draw_browse(&mut self, f: &mut Frame, area: Rect, t: &Theme) {
         let bg = self.bg(t.bg);
+        let wrap_titles = self.config.wrap_titles;
         let Some(browse) = self.browse.as_mut() else { return };
         let width = area.width.clamp(28, 80);
-        let rows: u16 = browse.links.iter().map(|l| 1 + u16::from(l.name.is_some())).sum();
+        // Two borders and the selection marker eat into the usable width.
+        let text_w = (width as usize).saturating_sub(4);
+        let items: Vec<ListItem> = browse
+            .links
+            .iter()
+            .map(|l| {
+                // A bare URL from the notes has no title to put above it.
+                let Some(name) = &l.name else {
+                    return ListItem::new(Line::styled(
+                        ellipsize(&l.url, text_w),
+                        Style::default().fg(t.blue),
+                    ));
+                };
+                let style = Style::default().fg(t.fg).bold();
+                let mut lines: Vec<Line> = if wrap_titles {
+                    wrap(name, text_w)
+                        .into_iter()
+                        .map(|(from, to)| Line::styled(name[from..to].to_string(), style))
+                        .collect()
+                } else {
+                    vec![Line::styled(ellipsize(name, text_w), style)]
+                };
+                // The URL stays on one line: wrapping one only makes it harder
+                // to read, and it is a subtitle here, not the label.
+                lines.push(Line::styled(
+                    format!("  {}", ellipsize(&l.url, text_w.saturating_sub(2))),
+                    Style::default().fg(t.muted),
+                ));
+                ListItem::new(lines)
+            })
+            .collect();
+        let rows: u16 = items.iter().map(|i| i.height() as u16).sum();
         let height = (rows + 2).clamp(3, area.height.max(3));
         let x = area.x + area.width.saturating_sub(width) / 2;
         let y = area.y + area.height.saturating_sub(height) / 2;
@@ -1206,25 +1257,6 @@ impl App {
             .border_style(Style::default().fg(t.accent))
             .title(Line::styled(" Browse Link ", Style::default().fg(t.accent).bold()))
             .style(Style::default().bg(bg));
-        // Two borders and the selection marker eat into the usable width.
-        let text_w = (width as usize).saturating_sub(4);
-        let items: Vec<ListItem> = browse
-            .links
-            .iter()
-            .map(|l| match &l.name {
-                Some(name) => ListItem::new(vec![
-                    Line::styled(ellipsize(name, text_w), Style::default().fg(t.fg).bold()),
-                    Line::styled(
-                        format!("  {}", ellipsize(&l.url, text_w.saturating_sub(2))),
-                        Style::default().fg(t.muted),
-                    ),
-                ]),
-                None => ListItem::new(Line::styled(
-                    ellipsize(&l.url, text_w),
-                    Style::default().fg(t.blue),
-                )),
-            })
-            .collect();
         let list = List::new(items)
             .block(block)
             .highlight_style(Style::default().fg(t.sel_fg).bg(t.sel_bg).add_modifier(Modifier::BOLD))
@@ -1250,7 +1282,12 @@ impl App {
         let items: Vec<ListItem> = pick
             .lists
             .iter()
-            .map(|l| ListItem::new(Line::styled(l.title.clone(), Style::default().fg(t.fg))))
+            .map(|l| {
+                ListItem::new(Line::styled(
+                    clean(&l.title).into_owned(),
+                    Style::default().fg(t.fg),
+                ))
+            })
             .collect();
         let list = List::new(items)
             .block(block)
@@ -1355,8 +1392,8 @@ fn task_links(task: &Task) -> Vec<BrowseLink> {
             continue;
         }
         out.push(BrowseLink {
-            name: (!name.is_empty()).then(|| name.to_string()),
-            url: l.link.clone(),
+            name: (!name.is_empty()).then(|| clean(name).into_owned()),
+            url: clean(&l.link).into_owned(),
         });
     }
     for url in urls_in(task.notes.as_deref().unwrap_or("")) {
@@ -1469,15 +1506,43 @@ fn marked<'a>(lines: Vec<Line<'a>>, focused: bool, t: &Theme) -> Vec<Line<'a>> {
         .collect()
 }
 
-fn title_of(task: &Task) -> &str {
-    if task.title.trim().is_empty() { "(untitled)" } else { &task.title }
+fn title_of(task: &Task) -> Cow<'_, str> {
+    if task.title.trim().is_empty() {
+        Cow::Borrowed("(untitled)")
+    } else {
+        clean(&task.title)
+    }
+}
+
+/// Task text arrives from Google as-is, control characters and all. Printing
+/// one is not cosmetic: a stray `\r` in a title walks the terminal cursor back
+/// to column 0 and every cell after it lands in the wrong place. Clipping used
+/// to hide them past the edge of a column; wrapping renders the whole string,
+/// so they have to go. Every ASCII control character is one byte, so swapping
+/// in a space keeps the byte offsets `wrap()` and `cursor_rc()` hand around.
+fn clean(s: &str) -> Cow<'_, str> {
+    if !s.bytes().any(|b| b.is_ascii_control() && b != b'\n') {
+        return Cow::Borrowed(s);
+    }
+    Cow::Owned(
+        s.chars()
+            .map(|c| if c.is_ascii_control() && c != '\n' { ' ' } else { c })
+            .collect(),
+    )
 }
 
 fn field<'a>(key: &str, value: Span<'a>, t: &Theme) -> Line<'a> {
     Line::from(vec![Span::styled(format!("{key:<11}"), Style::default().fg(t.muted)), value])
 }
 
-fn task_item<'a>(r: &'a Row, t: &Theme, today: NaiveDate) -> ListItem<'a> {
+/// One row of a column. `wrap_to` is the usable text width when titles wrap,
+/// `None` to keep each task on a single clipped line.
+fn task_item<'a>(
+    r: &'a Row,
+    t: &Theme,
+    today: NaiveDate,
+    wrap_to: Option<usize>,
+) -> ListItem<'a> {
     let task = &r.task;
     let indent = "  ".repeat(r.depth as usize);
     let done = task.is_done();
@@ -1486,15 +1551,37 @@ fn task_item<'a>(r: &'a Row, t: &Theme, today: NaiveDate) -> ListItem<'a> {
     } else {
         ("○ ", t.muted, Style::default().fg(t.fg))
     };
-    let mut title = vec![
-        Span::raw(indent.clone()),
-        Span::styled(mark, Style::default().fg(mark_fg)),
-        Span::styled(title_of(task), style),
-    ];
-    if task.notes.as_deref().is_some_and(|n| !n.trim().is_empty()) {
-        title.push(Span::styled(" ≡", Style::default().fg(t.muted)));
-    }
-    let mut lines = vec![Line::from(title)];
+    let title = title_of(task);
+    // The indent and the ○/✓ marker both eat into the room left for the title.
+    let head = indent.chars().count() + 2;
+    let segs = match wrap_to {
+        Some(w) => wrap(&title, w.saturating_sub(head).max(1)),
+        None => vec![(0, title.len())],
+    };
+    let noted = task.notes.as_deref().is_some_and(|n| !n.trim().is_empty());
+    let last = segs.len() - 1;
+    let mut lines: Vec<Line> = segs
+        .iter()
+        .enumerate()
+        .map(|(i, &(from, to))| {
+            // A break at a run of spaces leaves the next line starting on one;
+            // that reads as a ragged indent, so drop it.
+            let from = from + title[from..to].len() - title[from..to].trim_start().len();
+            // Continuation lines sit under the title, past the marker.
+            let mut spans = vec![Span::raw(match i {
+                0 => indent.clone(),
+                _ => format!("{indent}  "),
+            })];
+            if i == 0 {
+                spans.push(Span::styled(mark, Style::default().fg(mark_fg)));
+            }
+            spans.push(Span::styled(title[from..to].to_string(), style));
+            if i == last && noted {
+                spans.push(Span::styled(" ≡", Style::default().fg(t.muted)));
+            }
+            Line::from(spans)
+        })
+        .collect();
     if let Some(d) = task.due_date().filter(|_| !done) {
         lines.push(Line::from(vec![
             Span::raw(format!("{indent}  ")),
@@ -1663,7 +1750,7 @@ pub fn start() -> auth::Result<()> {
 
     let term = ratatui::init();
     let detailed_keys = enable_key_detail();
-    let res = run(term, App::new(cmd_tx, cache::load()), msg_rx);
+    let res = run(term, App::new(cmd_tx, cache::load(), config::load()), msg_rx);
     if detailed_keys {
         let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
     }
@@ -1790,6 +1877,39 @@ mod tests {
     }
 
     #[test]
+    fn task_titles_wrap_only_when_asked() {
+        let t = Theme::default();
+        let today = Local::now().date_naive();
+        let long = Task {
+            title: "Extend irrigation to the raised beds before the frost".into(),
+            ..task("a", None, "1", false)
+        };
+        let rows = order(vec![long.clone(), Task { parent: Some("a".into()), ..long }]);
+        // Clipped: one line per task, however long the title is.
+        assert_eq!(task_item(&rows[0], &t, today, None).height(), 1);
+        // Wrapped: a 53-character title needs several lines in a 20-wide column.
+        let top = task_item(&rows[0], &t, today, Some(20)).height();
+        assert!(top > 2, "expected the title to wrap, got {top} line(s)");
+        // A subtask is indented, so it has less room and needs at least as many.
+        assert!(task_item(&rows[1], &t, today, Some(20)).height() >= top);
+        // A width narrower than the indent and marker still renders.
+        assert!(task_item(&rows[1], &t, today, Some(1)).height() >= 1);
+    }
+
+    #[test]
+    fn clean_swaps_control_characters_without_moving_offsets() {
+        assert!(matches!(clean("plain text"), Cow::Borrowed(_)));
+        // Newlines survive: wrap() splits lines on them.
+        assert!(matches!(clean("two\nlines"), Cow::Borrowed(_)));
+        assert_eq!(clean("print \r and bring"), "print   and bring");
+        assert_eq!(clean("bell\u{7}tab\u{8}"), "bell tab ");
+        // Byte offsets have to survive, or wrap()/cursor_rc() slice mid-char.
+        for raw in ["print \r and", "a\u{7}b\u{1b}c", "\r\n\r\n", "héllo\rwörld"] {
+            assert_eq!(clean(raw).len(), raw.len(), "{raw:?}");
+        }
+    }
+
+    #[test]
     fn ellipsize_cuts_on_character_boundaries() {
         assert_eq!(ellipsize("short", 10), "short");
         assert_eq!(ellipsize("exactfit", 8), "exactfit");
@@ -1872,3 +1992,97 @@ mod tests {
         assert_eq!(subtask_parent(row("orphan")).as_deref(), Some("orphan"));
     }
 }
+
+#[cfg(test)]
+mod render_tests {
+    use super::*;
+    use ratatui::{backend::TestBackend, Terminal};
+
+    /// Render a board of `(list title, task titles)` and return the screen.
+    fn screen(w: u16, h: u16, lists: &[(&str, &[&str])], wrap_titles: bool) -> Vec<String> {
+        let (tx, _rx) = mpsc::channel();
+        let cached = cache::Cache {
+            lists: lists
+                .iter()
+                .enumerate()
+                .map(|(i, (name, titles))| cache::CachedList {
+                    list: TaskList { id: format!("l{i}"), title: (*name).into() },
+                    tasks: titles
+                        .iter()
+                        .enumerate()
+                        .map(|(j, title)| Task {
+                            id: format!("l{i}t{j}"),
+                            title: (*title).into(),
+                            position: format!("{j:09}"),
+                            status: "needsAction".into(),
+                            ..Default::default()
+                        })
+                        .collect(),
+                })
+                .collect(),
+        };
+        let mut app = App::new(tx, cached, Config { wrap_titles });
+        let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
+        term.draw(|f| app.draw(f)).unwrap();
+        let buf = term.backend().buffer().clone();
+        (0..h)
+            .map(|y| (0..w).map(|x| buf[(x, y)].symbol()).collect())
+            .collect()
+    }
+
+    #[test]
+    fn a_wrapped_line_never_starts_on_a_stray_space() {
+        // Breaking on a run of spaces hands the next line a leading one, which
+        // shows up as a one-column indent under the rest of the title.
+        let title = "aaaaaaaaaaaaaaaaaaaaaaaa  gamma";
+        // 30 wide puts the break between the two spaces.
+        let rows = screen(30, 8, &[("One", &[title])], true);
+        let col = |needle: &str| {
+            rows.iter()
+                .find_map(|r| r.find(needle).map(|b| r[..b].chars().count()))
+                .unwrap_or_else(|| panic!("{needle} is not on screen: {rows:#?}"))
+        };
+        assert_eq!(col("gamma"), col("aaaa"));
+        for (i, row) in rows.iter().enumerate() {
+            assert_eq!(row.chars().count(), 30, "row {i} is {row:?}");
+        }
+    }
+
+    /// A control character reaching a cell is not cosmetic: printing `\r`
+    /// walks the terminal cursor back to column 0 and shifts the rest of the
+    /// row. Clipping hid them past a column's edge; wrapping does not.
+    #[test]
+    fn control_characters_never_reach_the_screen() {
+        let rows = screen(
+            34,
+            14,
+            &[("One", &["print \r and bring with you to the hospital", "bell\u{7}here"]),
+              ("Two\r", &["fine"])],
+            true,
+        );
+        for (y, row) in rows.iter().enumerate() {
+            for c in row.chars() {
+                assert!(!c.is_ascii_control(), "{c:?} on row {y}: {row:?}");
+            }
+            assert_eq!(row.chars().count(), 34, "row {y} is {row:?}");
+        }
+        assert!(rows.iter().any(|r| r.contains("and bring")), "{rows:#?}");
+    }
+
+    #[test]
+    fn every_row_of_the_board_is_the_full_width() {
+        let long = "Complete Birth Certificate Worksheet as much as possible, print and bring";
+        let rows = screen(
+            62,
+            20,
+            &[("One", &["Extend irrigation to the outer plants", "Baby go bag prep"]),
+              ("Two", &[long, "Irrigation for box"])],
+            true,
+        );
+        for (i, row) in rows.iter().enumerate() {
+            assert_eq!(row.chars().count(), 62, "row {i} is {row:?}");
+        }
+    }
+}
+
+

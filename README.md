@@ -23,6 +23,13 @@ available as subcommands for scripts and agents (`google-tasks-tui lists`,
   they don't fit.
 - Subtasks sit indented under their parent. Completed tasks appear struck
   through at the bottom of their list.
+- Long task titles wrap onto as many lines as they need, lined up under the
+  first line rather than under the bullet. Long link titles wrap in the Browse
+  Link overlay too. Set `wrap_titles = false` in the config to clip each task
+  to one line instead.
+- Control characters in a task's text — a stray carriage return pasted into a
+  title, say — are drawn as spaces instead of being sent to the terminal,
+  where they would shift the rest of the row.
 - Due dates are relative ("Today", "Friday", "3d overdue"). Overdue dates are
   red and today's are yellow.
 - The details shelf shows status, due date, completion time, the parent task,
@@ -95,6 +102,20 @@ safe: the app re-fetches, and re-authorizes. If a
 google-auth `token.json` for the same client, with the Tasks scope, sits next
 to `credentials.json`, the app reuses its refresh token and skips the browser
 step. It only reads that file and never modifies it.
+
+## Configuration
+
+Settings live in `~/.config/google-tasks-tui/config.toml`, next to the token
+and the board snapshot. The file is written with its defaults the first time
+the app runs, so it is there to edit and documents itself. Delete a line to go
+back to its default; delete the file and it comes back on the next run. A
+setting the app cannot read falls back to its default and the file is left
+alone, so a typo never costs you the rest of your settings. It is read at
+startup, so changes need a restart.
+
+| Setting       | Default | Effect                                        |
+| ------------- | ------- | --------------------------------------------- |
+| `wrap_titles` | `true`  | Wrap long task titles in the columns and long link titles in the Browse Link overlay onto more lines. `false` clips them to one line. |
 
 ## Install and run
 
@@ -222,6 +243,7 @@ src/
 ├── cli.rs     # clap subcommands; -f json|md (default md); resolve list by id or title
 ├── api.rs     # Google Tasks v1 client (task lists, tasks, pagination)
 ├── cache.rs   # board snapshot on disk for instant startup
+├── config.rs  # config.toml: defaults, first-run bootstrap, parsing
 ├── auth.rs    # OAuth: client secret, token cache, refresh, loopback sign-in
 └── theme.rs   # theme discovery, colors.toml parsing, role mapping, fingerprint
 ```
