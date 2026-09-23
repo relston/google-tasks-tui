@@ -15,6 +15,7 @@ pub struct Row {
 pub struct Board {
     list_order: Vec<String>,
     lists: HashMap<String, TaskList>,
+    task_order: HashMap<String, Vec<String>>,
     tasks: HashMap<String, HashMap<String, Task>>,
 }
 
@@ -22,10 +23,10 @@ impl Board {
     pub fn from_cache(cache: cache::Cache) -> Self {
         let mut board = Self::default();
         for cached in cache.lists {
+            let (order, tasks) = keyed(cached.tasks);
             board.list_order.push(cached.list.id.clone());
-            board
-                .tasks
-                .insert(cached.list.id.clone(), keyed(cached.tasks));
+            board.task_order.insert(cached.list.id.clone(), order);
+            board.tasks.insert(cached.list.id.clone(), tasks);
             board.lists.insert(cached.list.id.clone(), cached.list);
         }
         board
@@ -47,14 +48,7 @@ impl Board {
     }
 
     pub fn rows(&self, list_id: &str) -> Vec<Row> {
-        ordered(
-            self.tasks
-                .get(list_id)
-                .into_iter()
-                .flat_map(HashMap::values)
-                .cloned()
-                .collect(),
-        )
+        ordered(self.tasks(list_id))
     }
 
     pub fn lists(&self) -> impl Iterator<Item = &TaskList> {
@@ -74,12 +68,29 @@ impl Board {
     }
 
     pub fn tasks(&self, list_id: &str) -> Vec<Task> {
-        self.tasks
+        let Some(tasks) = self.tasks.get(list_id) else {
+            return Vec::new();
+        };
+        let mut output: Vec<Task> = self
+            .task_order
             .get(list_id)
             .into_iter()
-            .flat_map(HashMap::values)
+            .flatten()
+            .filter_map(|id| tasks.get(id))
             .cloned()
-            .collect()
+            .collect();
+        let mut extras: Vec<&Task> = tasks
+            .values()
+            .filter(|task| {
+                !self
+                    .task_order
+                    .get(list_id)
+                    .is_some_and(|ids| ids.contains(&task.id))
+            })
+            .collect();
+        extras.sort_by(|left, right| left.id.cmp(&right.id));
+        output.extend(extras.into_iter().cloned());
+        output
     }
 
     pub fn replace_lists(&mut self, lists: Vec<TaskList>) {
@@ -89,8 +100,10 @@ impl Board {
             .map(|list| (list.id.clone(), list))
             .collect();
         self.tasks.retain(|id, _| self.lists.contains_key(id));
+        self.task_order.retain(|id, _| self.lists.contains_key(id));
         for id in &ids {
             self.tasks.entry(id.clone()).or_default();
+            self.task_order.entry(id.clone()).or_default();
         }
         self.list_order = ids;
     }
@@ -99,6 +112,7 @@ impl Board {
         if !self.lists.contains_key(&list.id) {
             self.list_order.push(list.id.clone());
             self.tasks.insert(list.id.clone(), HashMap::new());
+            self.task_order.insert(list.id.clone(), Vec::new());
         }
         self.lists.insert(list.id.clone(), list);
     }
@@ -106,30 +120,46 @@ impl Board {
     pub fn remove_list(&mut self, list_id: &str) {
         self.list_order.retain(|id| id != list_id);
         self.lists.remove(list_id);
+        self.task_order.remove(list_id);
         self.tasks.remove(list_id);
     }
 
     pub fn replace_tasks(&mut self, list_id: &str, tasks: Vec<Task>) {
-        self.tasks.insert(list_id.to_string(), keyed(tasks));
+        let (order, tasks) = keyed(tasks);
+        self.task_order.insert(list_id.to_string(), order);
+        self.tasks.insert(list_id.to_string(), tasks);
     }
 
     pub fn upsert_task(&mut self, list_id: &str, task: Task) -> bool {
         let Some(tasks) = self.tasks.get_mut(list_id) else {
             return false;
         };
+        if !tasks.contains_key(&task.id) {
+            self.task_order
+                .entry(list_id.to_string())
+                .or_default()
+                .push(task.id.clone());
+        }
         tasks.insert(task.id.clone(), task);
         true
     }
 
     pub fn remove_tree(&mut self, list_id: &str, task_id: &str) -> Vec<Task> {
+        let source_order = self.task_order.get(list_id).cloned().unwrap_or_default();
         let Some(tasks) = self.tasks.get_mut(list_id) else {
             return Vec::new();
         };
-        let ids: Vec<String> = tasks
-            .values()
-            .filter(|task| task.id == task_id || task.parent.as_deref() == Some(task_id))
-            .map(|task| task.id.clone())
+        let ids: Vec<String> = source_order
+            .into_iter()
+            .filter(|id| {
+                tasks.get(id).is_some_and(|task| {
+                    task.id == task_id || task.parent.as_deref() == Some(task_id)
+                })
+            })
             .collect();
+        if let Some(order) = self.task_order.get_mut(list_id) {
+            order.retain(|id| !ids.contains(id));
+        }
         ids.into_iter().filter_map(|id| tasks.remove(&id)).collect()
     }
 
@@ -137,7 +167,13 @@ impl Board {
         let Some(current) = self.tasks.get_mut(list_id) else {
             return;
         };
-        current.extend(tasks.into_iter().map(|task| (task.id.clone(), task)));
+        let order = self.task_order.entry(list_id.to_string()).or_default();
+        for task in tasks {
+            if !current.contains_key(&task.id) {
+                order.push(task.id.clone());
+            }
+            current.insert(task.id.clone(), task);
+        }
     }
 
     pub fn move_tree(&mut self, from: &str, to: &str, task_id: &str) -> Vec<Task> {
@@ -165,12 +201,14 @@ impl Board {
     }
 }
 
-fn keyed(tasks: Vec<Task>) -> HashMap<String, Task> {
-    tasks
+fn keyed(tasks: Vec<Task>) -> (Vec<String>, HashMap<String, Task>) {
+    let tasks: Vec<Task> = tasks.into_iter().filter(|task| !task.deleted).collect();
+    let order = tasks.iter().map(|task| task.id.clone()).collect();
+    let tasks = tasks
         .into_iter()
-        .filter(|task| !task.deleted)
         .map(|task| (task.id.clone(), task))
-        .collect()
+        .collect();
+    (order, tasks)
 }
 
 pub fn ordered(tasks: Vec<Task>) -> Vec<Row> {
@@ -295,5 +333,41 @@ mod tests {
         board.replace_tasks("to", to);
         assert!(board.task("from", "parent").is_some());
         assert!(board.task("to", "parent").is_none());
+    }
+
+    #[test]
+    fn equal_sort_keys_preserve_source_order() {
+        let source = vec![
+            task("first", None, "same", false),
+            task("second", None, "same", false),
+            task("third", None, "same", false),
+        ];
+        let board = Board::from_cache(cache::Cache {
+            lists: vec![cache::CachedList {
+                list: TaskList {
+                    id: "list".into(),
+                    title: "List".into(),
+                    ..Default::default()
+                },
+                tasks: source,
+            }],
+        });
+
+        assert_eq!(
+            board
+                .tasks("list")
+                .iter()
+                .map(|task| task.id.as_str())
+                .collect::<Vec<_>>(),
+            ["first", "second", "third"]
+        );
+        assert_eq!(
+            board
+                .rows("list")
+                .iter()
+                .map(|row| row.task.id.as_str())
+                .collect::<Vec<_>>(),
+            ["first", "second", "third"]
+        );
     }
 }

@@ -333,6 +333,7 @@ fn authorize(agent: &ureq::Agent, c: &ClientSecret) -> Result<Cached> {
             Err(error) => return Err(error.into()),
         };
         stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+        stream.set_write_timeout(Some(Duration::from_secs(5)))?;
         let mut line = String::new();
         BufReader::new(&stream).take(8192).read_line(&mut line)?;
         let query = line
