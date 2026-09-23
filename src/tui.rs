@@ -3,7 +3,7 @@ use std::{
     collections::HashSet,
     io::{self, Write},
     process::{Command, Stdio},
-    sync::mpsc::{self, Receiver, Sender},
+    sync::mpsc::{self, Receiver, Sender, TryRecvError},
     thread,
     time::{Duration, Instant},
 };
@@ -44,20 +44,25 @@ const READ_ONLY: &str = "Syncing with Google — read-only for a moment";
 
 /// Requests to the network thread.
 enum Cmd {
-    Refresh,
+    Refresh(u64),
     Patch { list_id: String, task_id: String, fields: Value },
     Delete { list_id: String, task_id: String },
-    Create { list_id: String, title: String, parent: Option<String> },
+    Create {
+        list_id: String,
+        title: String,
+        parent: Option<String>,
+        selection: Option<String>,
+    },
     Move { from: String, to: String, ids: Vec<String> },
 }
 
 /// Results from the network thread.
 enum Msg {
-    Lists(Result<Vec<TaskList>, String>),
-    Tasks(String, Result<Vec<Task>, String>),
+    Lists(u64, Result<Vec<TaskList>, String>),
+    Tasks(u64, String, Result<Vec<Task>, String>),
     Updated(String, Result<Task, String>),
     Deleted(Result<(), String>),
-    Created(String, Result<Task, String>),
+    Created(String, Option<String>, Result<Task, String>),
     Moved(Result<(), String>),
 }
 
@@ -217,10 +222,18 @@ struct Row {
     depth: u8,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LoadState {
+    Cached,
+    Loading,
+    Loaded,
+    Failed,
+}
+
 struct Column {
     list: TaskList,
     rows: Vec<Row>,
-    loaded: bool,
+    load: LoadState,
     state: ListState,
 }
 
@@ -249,6 +262,8 @@ struct App {
     browse: Option<Browse>,
     move_to: Option<MovePick>,
     help: Option<Help>,
+    /// Identifies the only refresh whose responses may update the board.
+    refresh_generation: u64,
     fetching: bool,
     /// False while the board may still be stale: edits are blocked until the
     /// first sync of this run lands.
@@ -259,6 +274,9 @@ struct App {
     /// A one-off confirmation, cleared by the next keypress.
     notice: Option<String>,
     cmds: Sender<Cmd>,
+    /// The user asked to quit and writes are still outstanding.
+    quitting: bool,
+    force_quit: bool,
     quit: bool,
 }
 
@@ -272,7 +290,7 @@ impl App {
                 list: c.list,
                 state: ListState::default().with_selected((!c.tasks.is_empty()).then_some(0)),
                 rows: order(c.tasks),
-                loaded: true,
+                load: LoadState::Cached,
             })
             .collect();
         let mut app = Self {
@@ -291,12 +309,15 @@ impl App {
             browse: None,
             move_to: None,
             help: None,
+            refresh_generation: 0,
             fetching: false,
             synced: false,
             saving: 0,
             error: None,
             notice: None,
             cmds,
+            quitting: false,
+            force_quit: false,
             quit: false,
         };
         app.refresh();
@@ -304,10 +325,80 @@ impl App {
     }
 
     fn refresh(&mut self) {
-        self.error = None;
+        self.begin_refresh(None);
+    }
+
+    fn begin_refresh(&mut self, error: Option<String>) {
+        self.error = error;
         self.fetching = true;
         self.synced = false;
-        let _ = self.cmds.send(Cmd::Refresh);
+        for col in &mut self.columns {
+            col.load = LoadState::Cached;
+        }
+        self.refresh_generation = self.refresh_generation.wrapping_add(1);
+        if self
+            .cmds
+            .send(Cmd::Refresh(self.refresh_generation))
+            .is_err()
+        {
+            self.fetching = false;
+            self.error = Some(match self.error.take() {
+                Some(error) => format!("{error}; network worker stopped"),
+                None => "network worker stopped".into(),
+            });
+        }
+    }
+
+    fn recover(&mut self, error: String) {
+        if self.quitting {
+            self.error = Some(error);
+            self.synced = false;
+        } else {
+            self.begin_refresh(Some(error));
+        }
+    }
+
+    fn request_quit(&mut self) {
+        if self.quitting {
+            self.force_quit = true;
+            self.quit = true;
+        } else if self.saving > 0 {
+            self.quitting = true;
+            self.notice = Some(format!(
+                "waiting for {} pending save{} · q again to force quit",
+                self.saving,
+                if self.saving == 1 { "" } else { "s" }
+            ));
+        } else {
+            self.quit = true;
+        }
+    }
+
+    fn mutation_finished(&mut self) {
+        self.saving = self.saving.saturating_sub(1);
+        if self.quitting && self.saving == 0 {
+            self.quit = true;
+        }
+    }
+
+    fn send_mutation(&mut self, cmd: Cmd) {
+        match self.cmds.send(cmd) {
+            Ok(()) => self.saving += 1,
+            Err(_) => {
+                self.synced = false;
+                self.error = Some("network worker stopped; change was not sent".into());
+            }
+        }
+    }
+
+    fn worker_disconnected(&mut self) {
+        self.fetching = false;
+        self.synced = false;
+        self.saving = 0;
+        self.error = Some("network worker stopped".into());
+        if self.quitting {
+            self.quit = true;
+        }
     }
 
     /// Editing waits until this run has seen Google's copy of every list.
@@ -319,7 +410,7 @@ impl App {
     }
 
     fn check_synced(&mut self) {
-        if self.fetching || !self.columns.iter().all(|c| c.loaded) {
+        if self.fetching || !self.columns.iter().all(|c| c.load == LoadState::Loaded) {
             return;
         }
         self.synced = true;
@@ -329,7 +420,10 @@ impl App {
         self.save_cache();
     }
 
-    fn save_cache(&self) {
+    fn save_cache(&self) -> bool {
+        if !self.synced || self.saving > 0 {
+            return false;
+        }
         cache::save(&cache::Cache {
             lists: self
                 .columns
@@ -340,10 +434,11 @@ impl App {
                 })
                 .collect(),
         });
+        true
     }
 
     fn loading(&self) -> bool {
-        self.fetching || self.columns.iter().any(|c| !c.loaded)
+        self.fetching || self.columns.iter().any(|c| c.load == LoadState::Loading)
     }
 
     /// Start a new task in the focused list: an empty title input in the shelf.
@@ -413,11 +508,17 @@ impl App {
                 return;
             }
             self.error = None;
-            self.saving += 1;
-            let _ = self.cmds.send(Cmd::Create {
+            let selection = self
+                .columns
+                .iter()
+                .find(|c| c.list.id == e.list_id)
+                .and_then(Column::selected)
+                .map(|r| r.task.id.clone());
+            self.send_mutation(Cmd::Create {
                 list_id: e.list_id,
                 title,
                 parent: draft.parent,
+                selection,
             });
             return;
         }
@@ -504,13 +605,18 @@ impl App {
             col.state.select(last.map(|l| sel.min(l)));
         }
         self.error = None;
-        self.saving += 1;
-        let _ = self.cmds.send(Cmd::Delete { list_id: p.list_id, task_id: p.task_id });
+        self.send_mutation(Cmd::Delete {
+            list_id: p.list_id,
+            task_id: p.task_id,
+        });
     }
 
     fn send_patch(&mut self, list_id: String, task_id: String, fields: Value) {
-        self.saving += 1;
-        let _ = self.cmds.send(Cmd::Patch { list_id, task_id, fields });
+        self.send_mutation(Cmd::Patch {
+            list_id,
+            task_id,
+            fields,
+        });
     }
 
     /// Reload the palette only when the fingerprint changes (cheap stat calls).
@@ -527,12 +633,20 @@ impl App {
     }
 
     fn on_msg(&mut self, msg: Msg) {
+        match &msg {
+            Msg::Lists(generation, _) | Msg::Tasks(generation, _, _)
+                if *generation != self.refresh_generation =>
+            {
+                return;
+            }
+            _ => {}
+        }
         match msg {
-            Msg::Lists(Err(e)) => {
+            Msg::Lists(_, Err(e)) => {
                 self.fetching = false;
                 self.error = Some(e);
             }
-            Msg::Lists(Ok(lists)) => {
+            Msg::Lists(_, Ok(lists)) => {
                 self.fetching = false;
                 // Keep existing columns (and their selection) until fresh tasks arrive.
                 let focused = self.columns.get(self.focus).map(|c| c.list.id.clone());
@@ -540,8 +654,17 @@ impl App {
                 self.columns = lists
                     .into_iter()
                     .map(|list| match old.iter().position(|c| c.list.id == list.id) {
-                        Some(i) => Column { list, loaded: false, ..old.swap_remove(i) },
-                        None => Column { list, rows: Vec::new(), loaded: false, state: ListState::default() },
+                        Some(i) => Column {
+                            list,
+                            load: LoadState::Loading,
+                            ..old.swap_remove(i)
+                        },
+                        None => Column {
+                            list,
+                            rows: Vec::new(),
+                            load: LoadState::Loading,
+                            state: ListState::default(),
+                        },
                     })
                     .collect();
                 self.focus = focused
@@ -549,11 +672,11 @@ impl App {
                     .unwrap_or(0);
                 self.check_synced(); // an account with no lists is already in sync
             }
-            Msg::Tasks(id, res) => {
+            Msg::Tasks(_, id, res) => {
                 let Some(col) = self.columns.iter_mut().find(|c| c.list.id == id) else { return };
-                col.loaded = true;
                 match res {
                     Ok(tasks) => {
+                        col.load = LoadState::Loaded;
                         let keep = col.selected().map(|r| r.task.id.clone());
                         let prev = col.state.selected();
                         col.rows = order(tasks);
@@ -563,75 +686,113 @@ impl App {
                             .or_else(|| last.map(|l| prev.unwrap_or(0).min(l)));
                         col.state.select(sel);
                     }
-                    Err(e) => self.error = Some(format!("{}: {e}", col.list.title)),
+                    Err(e) => {
+                        col.load = LoadState::Failed;
+                        self.error = Some(format!("{}: {e}", col.list.title));
+                    }
                 }
                 self.check_synced();
             }
-            Msg::Created(list_id, res) => {
-                self.saving = self.saving.saturating_sub(1);
+            Msg::Created(list_id, selection_at_send, res) => {
+                self.mutation_finished();
                 match res {
                     Ok(task) => {
-                        let Some(col) = self.columns.iter_mut().find(|c| c.list.id == list_id)
+                        let focused_list =
+                            self.columns.get(self.focus).map(|c| c.list.id.as_str());
+                        let may_follow = self.edit.is_none()
+                            && focused_list == Some(list_id.as_str());
+                        let Some(col_index) =
+                            self.columns.iter().position(|c| c.list.id == list_id)
                         else {
+                            self.recover("create succeeded but its list disappeared".into());
                             return;
                         };
+                        let col = &mut self.columns[col_index];
                         let id = task.id.clone();
+                        let selected = col.selected().map(|r| r.task.id.clone());
+                        let follow_created = may_follow && selected == selection_at_send;
                         let mut tasks: Vec<Task> = col.rows.iter().map(|r| r.task.clone()).collect();
                         tasks.push(task);
                         col.rows = order(tasks);
-                        if let Some(i) = col.rows.iter().position(|r| r.task.id == id) {
+                        let selected = if follow_created {
+                            Some(id)
+                        } else {
+                            selected
+                        };
+                        if let Some(i) = selected
+                            .and_then(|selected| {
+                                col.rows.iter().position(|r| r.task.id == selected)
+                            })
+                        {
                             col.state.select(Some(i));
                         }
                         self.save_cache();
                     }
-                    Err(e) => self.error = Some(format!("create failed: {e}")),
+                    Err(e) => self.recover(format!("create failed: {e}")),
                 }
             }
             Msg::Deleted(res) => {
-                self.saving = self.saving.saturating_sub(1);
-                self.save_cache();
-                if let Err(e) = res {
-                    // The task is still there, so put the board back.
-                    self.error = Some(format!("delete failed: {e}"));
-                    self.fetching = true;
-                    let _ = self.cmds.send(Cmd::Refresh);
+                self.mutation_finished();
+                match res {
+                    Ok(()) => {
+                        self.save_cache();
+                    }
+                    Err(e) => {
+                        // The task is still there, so put the board back.
+                        self.recover(format!("delete failed: {e}"));
+                    }
                 }
             }
             Msg::Moved(res) => {
-                self.saving = self.saving.saturating_sub(1);
-                self.save_cache();
-                if let Err(e) = res {
-                    self.error = Some(format!("move failed: {e}"));
-                    self.fetching = true;
-                    let _ = self.cmds.send(Cmd::Refresh);
+                self.mutation_finished();
+                match res {
+                    Ok(()) => {
+                        self.save_cache();
+                    }
+                    Err(e) => self.recover(format!("move failed: {e}")),
                 }
             }
             Msg::Updated(list_id, res) => {
-                self.saving = self.saving.saturating_sub(1);
+                self.mutation_finished();
                 match res {
                     Ok(task) => {
-                        let Some(col) = self.columns.iter_mut().find(|c| c.list.id == list_id)
+                        let Some(col_index) =
+                            self.columns.iter().position(|c| c.list.id == list_id)
                         else {
+                            self.recover("save succeeded but its list disappeared".into());
                             return;
                         };
+                        if !self.columns[col_index]
+                            .rows
+                            .iter()
+                            .any(|row| row.task.id == task.id)
+                        {
+                            self.recover("save succeeded but its task disappeared".into());
+                            return;
+                        }
+                        let col = &mut self.columns[col_index];
                         // Re-sort: ticking a task moves it down to the completed group.
                         let id = task.id.clone();
+                        let selected = col.selected().map(|r| r.task.id.clone());
                         let tasks = col
                             .rows
                             .iter()
                             .map(|r| if r.task.id == id { task.clone() } else { r.task.clone() })
                             .collect();
                         col.rows = order(tasks);
-                        if let Some(i) = col.rows.iter().position(|r| r.task.id == id) {
+                        if let Some(i) = selected
+                            .or(Some(id))
+                            .and_then(|selected| {
+                                col.rows.iter().position(|r| r.task.id == selected)
+                            })
+                        {
                             col.state.select(Some(i));
                         }
                         self.save_cache();
                     }
                     Err(e) => {
                         // The optimistic title may be wrong now, so resync.
-                        self.error = Some(format!("save failed: {e}"));
-                        self.fetching = true;
-                        let _ = self.cmds.send(Cmd::Refresh);
+                        self.recover(format!("save failed: {e}"));
                     }
                 }
             }
@@ -779,8 +940,11 @@ impl App {
         }
         self.focus = dest_idx;
         self.error = None;
-        self.saving += 1;
-        let _ = self.cmds.send(Cmd::Move { from: from_id, to: dest_id, ids });
+        self.send_mutation(Cmd::Move {
+            from: from_id,
+            to: dest_id,
+            ids,
+        });
     }
 
     fn start_help(&mut self) {
@@ -797,6 +961,12 @@ impl App {
     fn on_key(&mut self, k: KeyEvent) {
         // A notice is for the keypress that earned it, and no longer.
         self.notice = None;
+        if self.quitting {
+            if matches!(k.code, KeyCode::Esc | KeyCode::Char('q')) {
+                self.request_quit();
+            }
+            return;
+        }
         if self.edit.is_some() {
             self.edit_key(k);
             return;
@@ -842,9 +1012,9 @@ impl App {
             return;
         }
         match k.code {
-            KeyCode::Char('q') => self.quit = true,
+            KeyCode::Char('q') => self.request_quit(),
             KeyCode::Esc if self.shelf => self.shelf = false,
-            KeyCode::Esc => self.quit = true,
+            KeyCode::Esc => self.request_quit(),
             KeyCode::Char('h') | KeyCode::Left => self.focus = self.focus.saturating_sub(1),
             KeyCode::Char('l') | KeyCode::Right => {
                 self.focus = (self.focus + 1).min(self.columns.len().saturating_sub(1))
@@ -946,7 +1116,9 @@ impl App {
         self.draw_move(f, body, &t);
         self.draw_help(f, body, &t);
 
-        let hints = if self.browse.is_some() {
+        let hints = if self.quitting {
+            " waiting for pending saves… q again to force quit"
+        } else if self.browse.is_some() {
             " j/k · ⏎ open · ⇧⏎ all · Esc close"
         } else if self.move_to.is_some() {
             " j/k · ⏎ move · Esc close"
@@ -1040,7 +1212,11 @@ impl App {
             .style(Style::default().bg(surface));
 
         if col.rows.is_empty() {
-            let msg = if col.loaded { "No tasks" } else { "Loading…" };
+            let msg = if col.load == LoadState::Loading {
+                "Loading…"
+            } else {
+                "No tasks"
+            };
             f.render_widget(Paragraph::new(msg).style(Style::default().fg(t.muted)).block(block), area);
             return;
         }
@@ -1728,11 +1904,16 @@ fn order(tasks: Vec<Task>) -> Vec<Row> {
 fn worker(mut client: Client, cmds: Receiver<Cmd>, out: Sender<Msg>) {
     for cmd in cmds {
         match cmd {
-            Cmd::Create { list_id, title, parent } => {
+            Cmd::Create {
+                list_id,
+                title,
+                parent,
+                selection,
+            } => {
                 let res = client
                     .create(&list_id, &title, parent.as_deref())
                     .map_err(|e| e.to_string());
-                if out.send(Msg::Created(list_id, res)).is_err() {
+                if out.send(Msg::Created(list_id, selection, res)).is_err() {
                     return;
                 }
             }
@@ -1763,15 +1944,15 @@ fn worker(mut client: Client, cmds: Receiver<Cmd>, out: Sender<Msg>) {
                     return;
                 }
             }
-            Cmd::Refresh => {
+            Cmd::Refresh(generation) => {
                 let lists = client.tasklists().map_err(|e| e.to_string());
                 let ids: Vec<String> = lists.iter().flatten().map(|l| l.id.clone()).collect();
-                if out.send(Msg::Lists(lists)).is_err() {
+                if out.send(Msg::Lists(generation, lists)).is_err() {
                     return;
                 }
                 for id in ids {
                     let tasks = client.tasks(&id).map_err(|e| e.to_string());
-                    if out.send(Msg::Tasks(id, tasks)).is_err() {
+                    if out.send(Msg::Tasks(generation, id, tasks)).is_err() {
                         return;
                     }
                 }
@@ -1780,7 +1961,8 @@ fn worker(mut client: Client, cmds: Receiver<Cmd>, out: Sender<Msg>) {
     }
 }
 
-fn run(mut term: DefaultTerminal, mut app: App, msgs: Receiver<Msg>) -> std::io::Result<()> {
+/// Returns whether shutdown should join the worker after draining writes.
+fn run(mut term: DefaultTerminal, mut app: App, msgs: Receiver<Msg>) -> std::io::Result<bool> {
     let mut last_poll = Instant::now();
     while !app.quit {
         term.draw(|f| app.draw(f))?;
@@ -1792,15 +1974,22 @@ fn run(mut term: DefaultTerminal, mut app: App, msgs: Receiver<Msg>) -> std::io:
                 }
             }
         }
-        while let Ok(msg) = msgs.try_recv() {
-            app.on_msg(msg);
+        loop {
+            match msgs.try_recv() {
+                Ok(msg) => app.on_msg(msg),
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    app.worker_disconnected();
+                    break;
+                }
+            }
         }
         if last_poll.elapsed() >= THEME_POLL {
             app.check_theme();
             last_poll = Instant::now();
         }
     }
-    Ok(())
+    Ok(app.quitting && !app.force_quit)
 }
 
 /// Ask the terminal to report Shift+Enter and friends (kitty keyboard
@@ -1826,7 +2015,7 @@ pub fn start() -> auth::Result<()> {
     let client = Client::new(auth);
     let (cmd_tx, cmd_rx) = mpsc::channel();
     let (msg_tx, msg_rx) = mpsc::channel();
-    thread::spawn(move || worker(client, cmd_rx, msg_tx));
+    let worker_handle = thread::spawn(move || worker(client, cmd_rx, msg_tx));
 
     let term = ratatui::init();
     let detailed_keys = enable_key_detail();
@@ -1835,12 +2024,34 @@ pub fn start() -> auth::Result<()> {
         let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
     }
     ratatui::restore();
-    Ok(res?)
+    let join_worker = res.as_ref().copied().unwrap_or(true);
+    if join_worker && worker_handle.join().is_err() && res.is_ok() {
+        return Err("network worker panicked".into());
+    }
+    res?;
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn app_with_lists(ids: &[&str]) -> (App, Receiver<Cmd>) {
+        let (tx, rx) = mpsc::channel();
+        let cached = cache::Cache {
+            lists: ids
+                .iter()
+                .map(|id| cache::CachedList {
+                    list: TaskList {
+                        id: (*id).into(),
+                        title: format!("List {id}"),
+                    },
+                    tasks: vec![task(&format!("{id}-cached"), None, "1", false)],
+                })
+                .collect(),
+        };
+        (App::new(tx, cached, Config::default()), rx)
+    }
 
     fn task(id: &str, parent: Option<&str>, pos: &str, done: bool) -> Task {
         Task {
@@ -1876,6 +2087,207 @@ mod tests {
         assert_eq!(e.buf, "Buy ");
         e.kill_to_start();
         assert_eq!((e.buf.as_str(), e.cursor), ("", 0));
+    }
+
+    #[test]
+    fn a_failed_list_sync_keeps_the_board_read_only() {
+        let (mut app, _cmds) = app_with_lists(&["a", "b"]);
+        let generation = app.refresh_generation;
+        let lists = app.columns.iter().map(|c| c.list.clone()).collect();
+
+        app.on_msg(Msg::Lists(generation, Ok(lists)));
+        app.on_msg(Msg::Tasks(
+            generation,
+            "a".into(),
+            Ok(vec![task("a-fresh", None, "1", false)]),
+        ));
+        app.on_msg(Msg::Tasks(generation, "b".into(), Err("offline".into())));
+
+        assert!(!app.synced, "a partial sync must not enable writes");
+        assert!(!app.writable());
+        assert_eq!(app.columns[1].rows[0].task.id, "b-cached");
+    }
+
+    #[test]
+    fn a_failed_mutation_enters_read_only_recovery() {
+        let (mut app, cmds) = app_with_lists(&["a"]);
+        let _ = cmds.recv().unwrap(); // startup refresh
+        app.synced = true;
+        app.fetching = false;
+        app.saving = 1;
+
+        app.on_msg(Msg::Deleted(Err("offline".into())));
+
+        assert!(!app.synced);
+        assert!(app.fetching);
+        assert_eq!(app.saving, 0);
+        assert!(app.error.as_deref().is_some_and(|e| e.contains("delete failed")));
+        assert!(matches!(cmds.recv().unwrap(), Cmd::Refresh(_)));
+    }
+
+    #[test]
+    fn a_failed_create_uses_the_same_read_only_recovery() {
+        let (mut app, cmds) = app_with_lists(&["a"]);
+        let _ = cmds.recv().unwrap(); // startup refresh
+        app.synced = true;
+        app.fetching = false;
+        app.saving = 1;
+
+        app.on_msg(Msg::Created(
+            "a".into(),
+            Some("a-cached".into()),
+            Err("offline".into()),
+        ));
+
+        assert!(!app.synced);
+        assert!(app.fetching);
+        assert!(app.error.as_deref().is_some_and(|e| e.contains("create failed")));
+        assert!(matches!(cmds.recv().unwrap(), Cmd::Refresh(_)));
+    }
+
+    #[test]
+    fn a_disconnected_worker_does_not_create_a_pending_save() {
+        let (mut app, cmds) = app_with_lists(&["a"]);
+        drop(cmds);
+        app.synced = true;
+        app.fetching = false;
+
+        app.send_patch("a".into(), "a-cached".into(), json!({ "title": "changed" }));
+
+        assert_eq!(app.saving, 0);
+        assert!(!app.synced);
+        assert!(app.error.as_deref().is_some_and(|e| e.contains("worker stopped")));
+    }
+
+    #[test]
+    fn pending_mutations_prevent_cache_snapshots() {
+        let (mut app, _cmds) = app_with_lists(&["a"]);
+        app.synced = true;
+        app.saving = 1;
+
+        assert!(!app.save_cache());
+    }
+
+    #[test]
+    fn an_old_refresh_cannot_complete_a_newer_one() {
+        let (mut app, cmds) = app_with_lists(&["a"]);
+        let first = match cmds.recv().unwrap() {
+            Cmd::Refresh(generation) => generation,
+            _ => panic!("expected startup refresh"),
+        };
+
+        app.refresh();
+        let _ = cmds.recv().unwrap(); // second refresh
+        app.on_msg(Msg::Lists(first, Ok(Vec::new()))); // late response from the first
+
+        assert!(!app.synced);
+        assert_eq!(app.columns.len(), 1);
+        assert_eq!(app.columns[0].list.id, "a");
+    }
+
+    #[test]
+    fn a_delayed_update_does_not_hide_another_tasks_editor() {
+        let (mut app, _cmds) = app_with_lists(&["a"]);
+        app.columns[0].rows = order(vec![
+            task("a-one", None, "1", false),
+            task("a-two", None, "2", false),
+        ]);
+        app.columns[0].state.select(Some(1));
+        app.edit = Some(Edit {
+            list_id: "a".into(),
+            task_id: "a-two".into(),
+            field: FieldId::Title,
+            buf: "editing two".into(),
+            cursor: 11,
+        });
+        app.saving = 1;
+
+        app.on_msg(Msg::Updated(
+            "a".into(),
+            Ok(Task {
+                title: "updated one".into(),
+                ..task("a-one", None, "1", false)
+            }),
+        ));
+
+        assert_eq!(app.selected_task().map(|r| r.task.id.as_str()), Some("a-two"));
+        assert_eq!(app.edit.as_ref().map(|e| e.task_id.as_str()), Some("a-two"));
+    }
+
+    #[test]
+    fn a_delayed_create_does_not_hide_another_tasks_editor() {
+        let (mut app, _cmds) = app_with_lists(&["a"]);
+        app.columns[0].rows = order(vec![
+            task("a-one", None, "1", false),
+            task("a-two", None, "2", false),
+        ]);
+        app.columns[0].state.select(Some(1));
+        app.edit = Some(Edit {
+            list_id: "a".into(),
+            task_id: "a-two".into(),
+            field: FieldId::Title,
+            buf: "editing two".into(),
+            cursor: 11,
+        });
+        app.saving = 1;
+
+        app.on_msg(Msg::Created(
+            "a".into(),
+            Some("a-one".into()),
+            Ok(Task {
+                id: "new".into(),
+                title: "new task".into(),
+                status: "needsAction".into(),
+                position: "0".into(),
+                ..Default::default()
+            }),
+        ));
+
+        assert_eq!(app.selected_task().map(|r| r.task.id.as_str()), Some("a-two"));
+        assert_eq!(app.edit.as_ref().map(|e| e.task_id.as_str()), Some("a-two"));
+    }
+
+    #[test]
+    fn quit_waits_for_writes_and_a_second_quit_forces_it() {
+        let (mut app, _cmds) = app_with_lists(&["a"]);
+        app.saving = 1;
+
+        app.on_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
+        assert!(!app.quit, "the first quit must wait for the pending write");
+
+        app.on_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
+        assert!(app.quit, "the second quit is the explicit force-quit path");
+    }
+
+    #[test]
+    fn a_waiting_quit_finishes_when_the_last_write_returns() {
+        let (mut app, _cmds) = app_with_lists(&["a"]);
+        app.saving = 1;
+
+        app.on_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
+        assert!(!app.quit);
+        app.on_msg(Msg::Created(
+            "a".into(),
+            Some("a-cached".into()),
+            Err("offline".into()),
+        ));
+
+        assert_eq!(app.saving, 0);
+        assert!(app.quit);
+    }
+
+    #[test]
+    fn worker_disconnect_does_not_hang_a_waiting_quit() {
+        let (mut app, _cmds) = app_with_lists(&["a"]);
+        app.saving = 2;
+        app.quitting = true;
+
+        app.worker_disconnected();
+
+        assert_eq!(app.saving, 0);
+        assert!(app.quit);
+        assert!(!app.synced);
+        assert!(app.error.as_deref().is_some_and(|e| e.contains("worker stopped")));
     }
 
     #[test]

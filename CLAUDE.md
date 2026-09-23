@@ -39,11 +39,16 @@ Work directly on `main`; no feature branches.
   from a sibling google-auth `token.json` if it has the tasks scope, else runs
   the loopback browser flow. `Auth::cached()` (no network) is the startup path;
   only a first run falls back to `Auth::new()`, which may open a browser and so
-  runs before the TUI starts. A 400/401 on refresh reports "sign-in expired".
+  runs before the TUI starts. A 400/401 on refresh returns typed
+  `SignInExpired` and removes the app token, so restarting enters sign-in
+  instead of retrying it forever. The shared ureq agent bounds connect, send,
+  response, body, and whole-call time.
 - `src/cache.rs` — board snapshot at `<config dir>/cache.json` (0600, written
   via temp + rename). `App::new` paints from it before any network call;
-  `App::synced` gates every write until this run's first full sync lands, and
-  `check_synced()` rewrites the snapshot then and after each mutation. The CLI
+  `App::synced` gates every write until every list succeeds in the active
+  refresh generation. Failed list loads and mutation recovery remain
+  read-only and never save optimistic failure state. `check_synced()` rewrites
+  the snapshot after a complete sync; successful mutations update it. The CLI
   rewrites the snapshot after each successful mutation.
 - `src/api.rs` — blocking Tasks v1 client on `ureq` 3; `get_all` follows
   `nextPageToken`; `patch` PATCHes arbitrary fields of one task; `create` POSTs
@@ -52,8 +57,10 @@ Work directly on `main`; no feature branches.
   `destinationTasklist` (TUI); `create_list` / `patch_list` / `delete_list`
   mutate task lists. `TasksApi` is the trait the CLI and tests call.
 - `src/tui.rs` — board UI. A worker thread owns the `Client` and talks to the
-  UI over `Cmd`/`Msg` channels; the event loop polls input every 100 ms,
-  drains messages, and calls `check_theme()` every 500 ms. `task_item` wraps a
+  UI over `Cmd`/`Msg` channels. Refresh messages carry a generation so old
+  responses cannot complete a newer sync. The event loop polls input every
+  100 ms, drains messages, and calls `check_theme()` every 500 ms. A quit
+  request waits for pending saves; a second request force-quits. `task_item` wraps a
   title over as many lines as it needs when `config.wrap_titles` is on,
   trimming the leading space `wrap()` leaves when a break lands on a run of
   them. Everything Google sends goes through `clean()` first: task text can
@@ -68,7 +75,9 @@ Work directly on `main`; no feature branches.
   the title buffer + byte cursor; commits are optimistic (local change first,
   then `Cmd::Patch`), and a failed save sets an error and refreshes.
   `Msg::Updated` re-runs `order()` so a ticked task moves to the completed
-  group with the selection following it. Destructive keys go through
+  group while preserving the user's current selection by task ID. Delayed
+  create responses select the new task only when selection has not moved and
+  no other editor is active. Destructive keys go through
   `App::pending` (a y/n prompt in the status bar), never straight to the API.
   The shelf lays out explicit sub-rects (title/meta/notes/updated) so `wrap()`
   + `cursor_rc()` can place the real terminal cursor; `App::field` holds shelf

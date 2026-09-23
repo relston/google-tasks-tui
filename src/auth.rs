@@ -13,7 +13,7 @@ use std::{
     os::unix::fs::OpenOptionsExt,
     path::PathBuf,
     process::{Command, Stdio},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use serde::{Deserialize, Serialize};
@@ -21,6 +21,36 @@ use serde::{Deserialize, Serialize};
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 const SCOPE: &str = "https://www.googleapis.com/auth/tasks";
+
+fn http_agent() -> ureq::Agent {
+    let config = ureq::Agent::config_builder()
+        .timeout_connect(Some(Duration::from_secs(10)))
+        .timeout_send_request(Some(Duration::from_secs(15)))
+        .timeout_send_body(Some(Duration::from_secs(30)))
+        .timeout_recv_response(Some(Duration::from_secs(30)))
+        .timeout_recv_body(Some(Duration::from_secs(30)))
+        .timeout_global(Some(Duration::from_secs(60)))
+        .build();
+    ureq::Agent::new_with_config(config)
+}
+
+#[derive(Debug)]
+pub struct SignInExpired {
+    invalidation_error: Option<String>,
+}
+
+impl std::fmt::Display for SignInExpired {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("sign-in expired — restart the app to sign in again")?;
+        if let Some(error) = &self.invalidation_error {
+            write!(f, "; {error}")
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl std::error::Error for SignInExpired {}
 
 #[derive(Deserialize)]
 struct ClientFile {
@@ -65,6 +95,7 @@ pub struct Auth {
     client: ClientSecret,
     tok: Cached,
     pub agent: ureq::Agent,
+    token_path: PathBuf,
 }
 
 impl Auth {
@@ -72,12 +103,13 @@ impl Auth {
     /// browser, so call this before the TUI takes over the terminal.
     pub fn new() -> Result<Self> {
         let path = credentials_path();
+        let token_path = cache_path();
         let raw = fs::read_to_string(&path)
             .map_err(|e| format!("reading {}: {e}", path.display()))?;
         let client = serde_json::from_str::<ClientFile>(&raw)?.installed;
-        let agent = ureq::Agent::new_with_defaults();
+        let agent = http_agent();
 
-        let cached = fs::read_to_string(cache_path())
+        let cached = fs::read_to_string(&token_path)
             .ok()
             .and_then(|s| serde_json::from_str(&s).ok())
             .or_else(|| {
@@ -89,14 +121,30 @@ impl Auth {
             });
 
         let mut auth = match cached {
-            Some(tok) => Self { client, tok, agent },
+            Some(tok) => Self {
+                client,
+                tok,
+                agent,
+                token_path,
+            },
             None => {
                 let tok = authorize(&agent, &client)?;
-                Self { client, tok, agent }
+                Self {
+                    client,
+                    tok,
+                    agent,
+                    token_path,
+                }
             }
         };
         // A revoked or expired refresh token means signing in again.
-        if auth.token().is_err() {
+        if let Err(e) = auth.token() {
+            let Some(expired) = e.downcast_ref::<SignInExpired>() else {
+                return Err(e);
+            };
+            if expired.invalidation_error.is_some() {
+                return Err(e);
+            }
             auth.tok = authorize(&auth.agent, &auth.client)?;
         }
         auth.save();
@@ -109,17 +157,16 @@ impl Auth {
     pub fn cached() -> Option<Self> {
         let raw = fs::read_to_string(credentials_path()).ok()?;
         let client = serde_json::from_str::<ClientFile>(&raw).ok()?.installed;
-        let tok = fs::read_to_string(cache_path())
+        let token_path = cache_path();
+        let tok = fs::read_to_string(&token_path)
             .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .or_else(|| {
-                borrow_existing(&client.client_id).map(|refresh_token| Cached {
-                    refresh_token,
-                    access_token: String::new(),
-                    expires_at: 0,
-                })
-            })?;
-        Some(Self { client, tok, agent: ureq::Agent::new_with_defaults() })
+            .and_then(|s| serde_json::from_str(&s).ok())?;
+        Some(Self {
+            client,
+            tok,
+            agent: http_agent(),
+            token_path,
+        })
     }
 
     /// A valid access token, refreshed when it's within a minute of expiry.
@@ -135,7 +182,15 @@ impl Auth {
                 Ok(mut resp) => resp.body_mut().read_json()?,
                 // Google rejects the token itself, rather than failing to answer.
                 Err(ureq::Error::StatusCode(400 | 401)) => {
-                    return Err("sign-in expired — quit and start the app again to sign in".into())
+                    let invalidation_error = match fs::remove_file(&self.token_path) {
+                        Ok(()) => None,
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                        Err(e) => Some(format!(
+                            "could not remove {}: {e}; delete it manually",
+                            self.token_path.display()
+                        )),
+                    };
+                    return Err(SignInExpired { invalidation_error }.into());
                 }
                 Err(e) => return Err(e.into()),
             };
@@ -150,7 +205,7 @@ impl Auth {
     }
 
     fn save(&self) {
-        let path = cache_path();
+        let path = &self.token_path;
         if let Some(dir) = path.parent() {
             let _ = fs::create_dir_all(dir);
         }
@@ -160,7 +215,7 @@ impl Auth {
             .create(true)
             .truncate(true)
             .mode(0o600)
-            .open(&path)
+            .open(path)
             .and_then(|mut f| f.write_all(json.as_bytes()));
     }
 }
@@ -320,10 +375,114 @@ fn decode(s: &str) -> String {
 mod tests {
     use super::*;
 
+    fn test_root(label: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        env::temp_dir().join(format!("gtt-auth-{label}-{}-{nonce}", std::process::id()))
+    }
+
+    fn auth_for_status(
+        status: &str,
+        token_path: PathBuf,
+    ) -> (Auth, std::thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let status = status.to_string();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0; 1024];
+            let _ = stream.read(&mut request);
+            write!(
+                stream,
+                "HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            )
+            .unwrap();
+        });
+        let auth = Auth {
+            client: ClientSecret {
+                client_id: "client".into(),
+                client_secret: "secret".into(),
+                auth_uri: "http://unused".into(),
+                token_uri: format!("http://{addr}"),
+            },
+            tok: Cached {
+                refresh_token: "refresh".into(),
+                access_token: String::new(),
+                expires_at: 0,
+            },
+            agent: http_agent(),
+            token_path,
+        };
+        (auth, server)
+    }
+
     #[test]
     fn percent_round_trip() {
         let s = "4/0Ab_c+d e/f?g=h&é";
         assert_eq!(decode(&pct(s)), s);
         assert_eq!(decode("a+b%2Fc%"), "a b/c%");
+    }
+
+    #[test]
+    fn a_rejected_refresh_token_is_typed_and_invalidated() {
+        let root = test_root("rejected");
+        fs::create_dir_all(&root).unwrap();
+        let token_path = root.join("token.json");
+        fs::write(&token_path, "{}").unwrap();
+        let (mut auth, server) = auth_for_status("400 Bad Request", token_path.clone());
+
+        let err = auth.token().unwrap_err();
+        assert!(err.downcast_ref::<SignInExpired>().is_some());
+        assert!(!token_path.exists());
+
+        server.join().unwrap();
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn a_transient_refresh_failure_preserves_the_cached_token() {
+        let root = test_root("transient");
+        fs::create_dir_all(&root).unwrap();
+        let token_path = root.join("token.json");
+        fs::write(&token_path, "{}").unwrap();
+        let (mut auth, server) =
+            auth_for_status("500 Internal Server Error", token_path.clone());
+
+        let err = auth.token().unwrap_err();
+        assert!(err.downcast_ref::<SignInExpired>().is_none());
+        assert!(token_path.exists());
+
+        server.join().unwrap();
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn token_invalidation_failure_is_reported() {
+        let root = test_root("invalidation");
+        let token_path = root.join("token.json");
+        fs::create_dir_all(&token_path).unwrap();
+        let (mut auth, server) = auth_for_status("400 Bad Request", token_path.clone());
+
+        let err = auth.token().unwrap_err();
+        assert!(err.to_string().contains("could not remove"));
+        assert!(token_path.exists());
+
+        server.join().unwrap();
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn the_http_agent_bounds_every_network_phase() {
+        let agent = http_agent();
+        let timeouts = agent.config().timeouts();
+
+        assert_eq!(timeouts.connect, Some(Duration::from_secs(10)));
+        assert_eq!(timeouts.send_request, Some(Duration::from_secs(15)));
+        assert_eq!(timeouts.send_body, Some(Duration::from_secs(30)));
+        assert_eq!(timeouts.recv_response, Some(Duration::from_secs(30)));
+        assert_eq!(timeouts.recv_body, Some(Duration::from_secs(30)));
+        assert_eq!(timeouts.global, Some(Duration::from_secs(60)));
     }
 }
