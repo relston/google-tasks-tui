@@ -282,7 +282,13 @@ The theme name shown in the header comes from the symlink target
 src/
 ├── main.rs    # dispatches to the TUI or the CLI
 ├── lib.rs     # crate root: no args → TUI, subcommand → CLI
-├── tui.rs     # board UI: columns, details shelf, event loop, API worker thread
+├── tui.rs     # TUI startup, terminal guard, event loop, and orchestration
+├── tui/
+│   ├── app.rs    # application state, input handling, and transitions
+│   ├── board.rs  # TUI board rules for subtasks and cross-list moves
+│   ├── render.rs # ratatui layout and drawing
+│   ├── text.rs   # Unicode wrapping, cursor layout, and sanitization
+│   └── worker.rs # API worker protocol and command execution
 ├── cli.rs     # clap subcommands; -f json|md (default md); resolve list by id or title
 ├── board.rs   # canonical lists/tasks, shared ordering, snapshots, rollback helpers
 ├── api.rs     # Google Tasks v1 client (task lists, tasks, pagination)

@@ -74,75 +74,32 @@ Work directly on `main`; no feature branches.
   `Retry-After`, and retry one 401 after forcing token refresh. Writes send
   `If-Match` where supported and return typed auth/conflict/rate-limit/timeout/
   HTTP errors.
-- `src/tui.rs` — board UI. A worker thread owns the `Client` and talks to the
-  UI over `Cmd`/`Msg` channels. Refresh messages carry a generation so old
-  responses cannot complete a newer sync. The worker is generic over
-  `TasksApi`. Mutations are serialized through
-  one `PendingOperation`; commands and responses carry its id and context, so
-  stale or mismatched responses are ignored. Navigation remains available
-  while mutation keys are blocked. The event loop polls input every 100 ms,
-  drains messages, and calls `check_theme()` every 500 ms. A quit request
-  waits for the pending operation; a second request force-quits. Key bindings
-  require exact modifiers and Ctrl-C deliberately quits. `task_item` wraps a
-  title over terminal-cell widths and grapheme boundaries when
-  `config.wrap_titles` is on. Everything Google sends goes through `clean()` first: task text can
-  carry control characters, and printing a `\r` walks the terminal cursor to
-  column 0 so every cell after it lands in the wrong place. Clipping hid them
-  past a column's edge, so wrapping is what exposed it. `clean` swaps each
-  ASCII control character (bar `\n`) for a space, the same byte length, which
-  keeps every offset `wrap()` and `cursor_rc()` pass around valid.
-  `control_characters_never_reach_the_screen` renders through a `TestBackend`
-  and asserts no cell holds one. Columns are projections of the canonical
-  `Board`; `board::ordered()` supplies their rows, while selection is stored
-  by task ID rather than row index. `Edit` holds
-  the title buffer + byte cursor; commits are optimistic (local change first,
-  then `Cmd::Patch`), and a failed save sets an error and refreshes.
-  Optimistic patch/delete/move contexts retain rollback data and cache writes
-  require confirmation. Ticking rebuilds the row projection immediately so
-  the task moves groups while selection follows its ID. Delayed
-  create responses select the new task only when selection has not moved and
-  no other editor is active. `App::interaction` is the single exclusive
-  `Idle` / editor / delete confirmation / Browse / Move / Help state.
-  Destructive keys go through `Interaction::ConfirmDelete`, never straight to the API.
-  The shelf lays out explicit sub-rects (title/meta/notes/updated) using the
-  same cell-width layout for rendering and vertical cursor movement. Metadata
-  is capped to reserve Notes/Updated; narrow terminals show the shelf
-  full-width and tiny terminals reject blind editing. `App::field` holds shelf
-  focus. `EditTarget::New` swaps the shelf for a title-only input and makes
-  `commit_edit` POST instead of PATCH; its full draft lives in the pending
-  operation until Google confirms it and reopens unchanged after failure.
-  `C` fills its `parent` from `subtask_parent`: the selected
-  row, or the row's own parent when it is already a subtask, since Google
-  Tasks nests exactly one level deep. A row that draws at depth 0 because its
-  parent is missing from the list parents the new subtask itself. `y` yanks
-  the selected task with `cli::md_yank` — title, due, notes and every `links`
-  entry as markdown links, and none of the id / status / parent that `md_task`
-  prints for `get`, nor `web_view_link`, because those identify a task to the
-  API and mean nothing in a note — then runs it through `clean()`, since a
-  control character pastes as badly as it renders; `copy()` tries `wl-copy` /
-  `xclip` / `xsel` / `pbcopy` in turn (each exits or detaches once stdin
-  closes, so waiting on one cannot stall the UI) and falls back to OSC 52 with
-  a local `base64`. `App::notice` is the green counterpart to `App::error`,
-  cleared at the top of `on_key` so it lasts exactly one keypress.
-  `task_links` gathers what the selected task points at — the `links` Google
-  attached to it (Gmail thread, Doc), which carry the source's `description`
-  as a title, then `urls_in` over the notes, deduped by URL — and `b` opens a
-  centered **Browse Link** overlay showing each title with its URL beneath
-  (`ellipsize` trims to the overlay width); `j`/`k` move, Enter `spawn`s
-  `open` / `xdg-open` for the selected URL and dismisses the overlay only when
-  launch succeeds,
-  Shift+Enter opens every URL in the list then dismisses, Esc/`q` close it.
-  Browse, Move, and Keyboard share bounded centered rectangles and render
-  `Clear` first so underlay text cannot bleed through. `m` opens a **Move**
-  overlay of every list except the current one.
-  Enter uses `tasks.move` for the selected task and its subtasks, chaining
-  `previous` to preserve sibling order, then fetches both authoritative lists.
-  Partial moves report the failed ID. Assigned Docs/Chat tasks cannot move or
-  edit notes, and their delete prompt warns that the source task is also
-  deleted. `?` opens a static **Keyboard** table; Esc/`q`/`?` close it.
-  Startup pushes kitty keyboard flags when the terminal supports
-  them, so Shift+Enter reaches the notes editor (Alt+Enter and Ctrl-J are the
-  fallbacks).
+- [`src/tui.rs`](src/tui.rs) — thin TUI module root. It authenticates, loads
+  config/cache, starts the worker, polls events and messages, and checks the
+  theme every 500 ms. `TerminalGuard` owns the ratatui terminal and restores
+  keyboard enhancement flags, raw mode, and the alternate screen on normal
+  return, errors, and panic unwinding.
+- [`src/tui/app.rs`](src/tui/app.rs) — application state and transitions.
+  Columns project the canonical `Board`; selection uses task IDs. One
+  `Interaction` owns the active editor/modal, and one `PendingOperation`
+  serializes optimistic writes with rollback context. Refresh generations
+  reject stale responses, failed writes re-enter read-only recovery, delayed
+  responses do not replace another editor, and graceful quit waits for an
+  in-flight write unless the user explicitly force-quits.
+- [`src/tui/board.rs`](src/tui/board.rs) — TUI-specific board rules: valid move
+  destinations, task/subtask move groups, one-level subtask parenting, and
+  ordered Google move requests.
+- [`src/tui/worker.rs`](src/tui/worker.rs) — `Cmd`/`Msg` protocol and blocking
+  `TasksApi` execution on the network thread. The worker refreshes both lists
+  after moves and reports partial move context.
+- [`src/tui/render.rs`](src/tui/render.rs) — ratatui-only layout and drawing for
+  columns, details shelves, status, and overlays. Metadata is capped to reserve
+  Notes/Updated; narrow terminals use a full-width shelf; modals clear their
+  underlay before drawing.
+- [`src/tui/text.rs`](src/tui/text.rs) — terminal-cell/grapheme wrapping,
+  clipping, padding, cursor mapping, and control-character sanitization shared
+  by editing and rendering. Sanitization preserves byte lengths so cursor
+  offsets remain valid.
 
 ## Omarchy theming facts (verified Sept 2026)
 - Active theme dir, current releases: `$XDG_STATE_HOME/omarchy/current`

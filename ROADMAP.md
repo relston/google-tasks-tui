@@ -180,14 +180,19 @@ output.
 Perform this extraction after the state model is stable. Do not introduce
 service or repository layers that own no rule or external contract.
 
-- [ ] a) Move canonical board rules and row derivation into `tui/board.rs`.
-- [ ] b) Move pure application transitions into `tui/app.rs`.
-- [ ] c) Move command execution and worker protocol into `tui/worker.rs`.
-- [ ] d) Move ratatui-only layout and drawing into `tui/render.rs`.
-- [ ] e) Move wrapping, Unicode layout, and sanitization into `tui/text.rs`.
-- [ ] f) Keep `tui/mod.rs` responsible only for startup, terminal lifecycle,
-  event polling, and orchestration.
-- [ ] g) Add a terminal guard that restores raw mode and keyboard enhancement
+- [x] a) Move canonical board rules and row derivation into
+  [`src/tui/board.rs`](src/tui/board.rs).
+- [x] b) Move pure application transitions into
+  [`src/tui/app.rs`](src/tui/app.rs).
+- [x] c) Move command execution and worker protocol into
+  [`src/tui/worker.rs`](src/tui/worker.rs).
+- [x] d) Move ratatui-only layout and drawing into
+  [`src/tui/render.rs`](src/tui/render.rs).
+- [x] e) Move wrapping, Unicode layout, and sanitization into
+  [`src/tui/text.rs`](src/tui/text.rs).
+- [x] f) Keep the [`src/tui.rs`](src/tui.rs) module root responsible only for
+  startup, terminal lifecycle, event polling, and orchestration.
+- [x] g) Add a terminal guard that restores raw mode and keyboard enhancement
   flags on errors and panics.
 
 ## Phase 10: Lock in quality and remove drift
