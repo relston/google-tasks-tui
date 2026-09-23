@@ -26,10 +26,11 @@ available as subcommands for scripts and agents (`google-tasks-tui lists`,
 - Includes tasks assigned from Google Docs and Chat. Google does not allow
   those tasks to have notes or move between lists; deleting one also deletes
   its source task, so the confirmation calls that out.
-- Long task titles wrap onto as many lines as they need, lined up under the
-  first line rather than under the bullet. Long link titles wrap in the Browse
-  Link overlay too. Set `wrap_titles = false` in the config to clip each task
-  to one line instead.
+- Long task titles wrap by terminal-cell width and grapheme boundaries, lined
+  up under the first line rather than under the bullet. CJK, emoji, and
+  combining characters keep correct cursor and column placement. Long link
+  titles wrap in the Browse Link overlay too. Set `wrap_titles = false` in the
+  config to clip each task to one line instead.
 - Control characters in a task's text — a stray carriage return pasted into a
   title, say — are drawn as spaces instead of being sent to the terminal,
   where they would shift the rest of the row.
@@ -73,8 +74,8 @@ available as subcommands for scripts and agents (`google-tasks-tui lists`,
   subtasks, preserving their order) and closes the overlay. Both lists are
   refreshed afterward; a partial move identifies the task that failed.
   `Esc` cancels. If there is only one list, the status bar says so.
-- `?` opens a **Keyboard** overlay listing the board commands. The first row
-  is selected; `j`/`k` move, `Esc`/`q`/`?` close it.
+- `?` opens a static **Keyboard** overlay listing the board commands;
+  `Esc`/`q`/`?` close it.
 - API calls run on a background thread, so the UI never blocks. Lists fill in
   as they load. One write runs at a time; navigation stays available while
   other mutation keys wait. If you quit while a write is pending, the app

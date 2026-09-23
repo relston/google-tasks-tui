@@ -79,10 +79,10 @@ Work directly on `main`; no feature branches.
   stale or mismatched responses are ignored. Navigation remains available
   while mutation keys are blocked. The event loop polls input every 100 ms,
   drains messages, and calls `check_theme()` every 500 ms. A quit request
-  waits for the pending operation; a second request force-quits. `task_item` wraps a
-  title over as many lines as it needs when `config.wrap_titles` is on,
-  trimming the leading space `wrap()` leaves when a break lands on a run of
-  them. Everything Google sends goes through `clean()` first: task text can
+  waits for the pending operation; a second request force-quits. Key bindings
+  require exact modifiers and Ctrl-C deliberately quits. `task_item` wraps a
+  title over terminal-cell widths and grapheme boundaries when
+  `config.wrap_titles` is on. Everything Google sends goes through `clean()` first: task text can
   carry control characters, and printing a `\r` walks the terminal cursor to
   column 0 so every cell after it lands in the wrong place. Clipping hid them
   past a column's edge, so wrapping is what exposed it. `clean` swaps each
@@ -101,8 +101,10 @@ Work directly on `main`; no feature branches.
   no other editor is active. `App::interaction` is the single exclusive
   `Idle` / editor / delete confirmation / Browse / Move / Help state.
   Destructive keys go through `Interaction::ConfirmDelete`, never straight to the API.
-  The shelf lays out explicit sub-rects (title/meta/notes/updated) so `wrap()`
-  + `cursor_rc()` can place the real terminal cursor; `App::field` holds shelf
+  The shelf lays out explicit sub-rects (title/meta/notes/updated) using the
+  same cell-width layout for rendering and vertical cursor movement. Metadata
+  is capped to reserve Notes/Updated; narrow terminals show the shelf
+  full-width and tiny terminals reject blind editing. `App::field` holds shelf
   focus. `EditTarget::New` swaps the shelf for a title-only input and makes
   `commit_edit` POST instead of PATCH; its full draft lives in the pending
   operation until Google confirms it and reopens unchanged after failure.
@@ -126,17 +128,16 @@ Work directly on `main`; no feature branches.
   (`ellipsize` trims to the overlay width); `j`/`k` move, Enter `spawn`s
   `open` / `xdg-open` for the selected URL and dismisses the overlay only when
   launch succeeds,
-  Shift+Enter opens every URL in the list then dismisses, Esc/`q` close it. It
-  renders `Clear` first, since a `Block` restyles the cells under it but
-  leaves their text (`draw_move` and `draw_help` still have that bleed-
-  through). `m` opens a **Move** overlay of every list except the current one.
+  Shift+Enter opens every URL in the list then dismisses, Esc/`q` close it.
+  Browse, Move, and Keyboard share bounded centered rectangles and render
+  `Clear` first so underlay text cannot bleed through. `m` opens a **Move**
+  overlay of every list except the current one.
   Enter uses `tasks.move` for the selected task and its subtasks, chaining
   `previous` to preserve sibling order, then fetches both authoritative lists.
   Partial moves report the failed ID. Assigned Docs/Chat tasks cannot move or
   edit notes, and their delete prompt warns that the source task is also
-  deleted. `?`
-  opens a **Keyboard** overlay of `help_keys()`; `j`/`k` move, Esc/`q`/`?`
-  close it. Startup pushes kitty keyboard flags when the terminal supports
+  deleted. `?` opens a static **Keyboard** table; Esc/`q`/`?` close it.
+  Startup pushes kitty keyboard flags when the terminal supports
   them, so Shift+Enter reaches the notes editor (Alt+Enter and Ctrl-J are the
   fallbacks).
 

@@ -7,6 +7,8 @@ use std::{
 };
 
 use chrono::{DateTime, Datelike, Local, NaiveDate};
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 use ratatui::{
     crossterm::{
         event::{
@@ -166,11 +168,6 @@ struct MovePick {
     state: ListState,
 }
 
-/// Overlay listing keyboard commands.
-struct Help {
-    state: ListState,
-}
-
 /// The editable fields of the shelf.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum FieldId {
@@ -227,14 +224,14 @@ impl Edit {
     }
 
     fn left(&mut self) {
-        if let Some((i, _)) = self.buf[..self.cursor].char_indices().next_back() {
+        if let Some((i, _)) = self.buf[..self.cursor].grapheme_indices(true).next_back() {
             self.cursor = i;
         }
     }
 
     fn right(&mut self) {
-        if let Some(c) = self.buf[self.cursor..].chars().next() {
-            self.cursor += c.len_utf8();
+        if let Some(grapheme) = self.buf[self.cursor..].graphemes(true).next() {
+            self.cursor += grapheme.len();
         }
     }
 
@@ -245,8 +242,8 @@ impl Edit {
     }
 
     fn delete(&mut self) {
-        if let Some(c) = self.buf[self.cursor..].chars().next() {
-            let end = self.cursor + c.len_utf8();
+        if let Some(grapheme) = self.buf[self.cursor..].graphemes(true).next() {
+            let end = self.cursor + grapheme.len();
             self.buf.replace_range(self.cursor..end, "");
         }
     }
@@ -276,44 +273,50 @@ impl Edit {
         self.buf[self.cursor..].find('\n').map_or(self.buf.len(), |i| self.cursor + i)
     }
 
-    /// Move a logical line up or down, keeping the column where possible.
-    fn step_line(&mut self, down: bool) {
-        let start = self.line_start();
-        let col = self.buf[start..self.cursor].chars().count();
+    fn step_visual_line(&mut self, width: usize, down: bool) {
+        let segments = wrap(&self.buf, width);
+        let (row, column) = cursor_rc(&segments, &self.buf, self.cursor);
         let target = if down {
-            let end = self.line_end();
-            if end == self.buf.len() {
-                self.cursor = end;
-                return;
-            }
-            end + 1
+            (row + 1).min(segments.len().saturating_sub(1))
         } else {
-            if start == 0 {
-                self.cursor = 0;
-                return;
-            }
-            self.buf[..start - 1].rfind('\n').map_or(0, |i| i + 1)
+            row.saturating_sub(1)
         };
-        let line = &self.buf[target..];
-        let len = line.find('\n').unwrap_or(line.len());
-        self.cursor = target
-            + line[..len]
-                .char_indices()
-                .nth(col)
-                .map_or(len, |(i, _)| i);
+        if target == row {
+            return;
+        }
+        let (start, end) = segments[target];
+        self.cursor = byte_at_column(&self.buf, start, end, column);
     }
 
     /// The slice that fits `width` columns with the cursor in view, and the
     /// cursor's offset within it.
     fn view(&self, width: usize) -> (&str, usize) {
         let width = width.max(1);
-        let chars: Vec<usize> = self.buf.char_indices().map(|(i, _)| i).collect();
-        let cur = chars.iter().position(|i| *i >= self.cursor).unwrap_or(chars.len());
-        let start = cur.saturating_sub(width - 1);
-        let end = (start + width).min(chars.len());
-        let from = chars.get(start).copied().unwrap_or(self.buf.len());
-        let to = chars.get(end).copied().unwrap_or(self.buf.len());
-        (&self.buf[from..to], cur - start)
+        let mut boundaries: Vec<usize> =
+            self.buf.grapheme_indices(true).map(|(index, _)| index).collect();
+        boundaries.push(self.buf.len());
+        let current = boundaries
+            .iter()
+            .position(|index| *index >= self.cursor)
+            .unwrap_or(boundaries.len() - 1);
+        let mut start = current;
+        while start > 0
+            && UnicodeWidthStr::width(&self.buf[boundaries[start - 1]..self.cursor]) < width
+        {
+            start -= 1;
+        }
+        let mut end = current;
+        while end + 1 < boundaries.len()
+            && UnicodeWidthStr::width(&self.buf[boundaries[start]..boundaries[end + 1]]) <= width
+        {
+            end += 1;
+        }
+        let from = boundaries[start];
+        let to = boundaries[end];
+        (
+            &self.buf[from..to],
+            UnicodeWidthStr::width(&self.buf[from..self.cursor]),
+        )
     }
 }
 
@@ -323,7 +326,7 @@ enum Interaction {
     ConfirmDelete(Pending),
     Browse(Browse),
     Move(MovePick),
-    Help(Help),
+    Help,
 }
 
 enum MutationContext {
@@ -412,6 +415,7 @@ struct App {
     shelf: bool,
     /// Which shelf field the keyboard is on.
     field: FieldId,
+    edit_width: usize,
     interaction: Interaction,
     /// Identifies the only refresh whose responses may update the board.
     refresh_generation: u64,
@@ -481,6 +485,7 @@ impl App {
             scroll: 0,
             shelf: false,
             field: FieldId::Title,
+            edit_width: 0,
             interaction: Interaction::Idle,
             refresh_generation: 0,
             sync: SyncState::Cached,
@@ -1410,22 +1415,20 @@ impl App {
     }
 
     fn start_help(&mut self) {
-        self.interaction =
-            Interaction::Help(Help { state: ListState::default().with_selected(Some(0)) });
-    }
-
-    fn step_help(&mut self, delta: isize) {
-        let Interaction::Help(h) = &mut self.interaction else { return };
-        let n = help_keys().len();
-        let i = h.state.selected().unwrap_or(0) as isize + delta;
-        h.state.select(Some(i.clamp(0, n.saturating_sub(1) as isize) as usize));
+        self.interaction = Interaction::Help;
     }
 
     fn on_key(&mut self, k: KeyEvent) {
         // A notice is for the keypress that earned it, and no longer.
         self.notice = None;
+        if k.code == KeyCode::Char('c') && k.modifiers == KeyModifiers::CONTROL {
+            self.request_quit();
+            return;
+        }
         if self.quitting {
-            if matches!(k.code, KeyCode::Esc | KeyCode::Char('q')) {
+            if no_modifiers(k.modifiers)
+                && matches!(k.code, KeyCode::Esc | KeyCode::Char('q'))
+            {
                 self.request_quit();
             }
             return;
@@ -1437,78 +1440,104 @@ impl App {
         if matches!(self.interaction, Interaction::ConfirmDelete(_)) {
             // Only "y" deletes; every other key cancels.
             match k.code {
-                KeyCode::Char('y') | KeyCode::Char('Y') => self.confirm_delete(),
+                KeyCode::Char('y') if no_modifiers(k.modifiers) => self.confirm_delete(),
                 _ => self.interaction = Interaction::Idle,
             }
             return;
         }
         if matches!(self.interaction, Interaction::Browse(_)) {
             match k.code {
-                KeyCode::Esc | KeyCode::Char('q') => self.interaction = Interaction::Idle,
-                KeyCode::Char('j') | KeyCode::Down => self.move_browse(1),
-                KeyCode::Char('k') | KeyCode::Up => self.move_browse(-1),
-                KeyCode::Enter if k.modifiers.contains(KeyModifiers::SHIFT) => {
+                KeyCode::Esc | KeyCode::Char('q') if no_modifiers(k.modifiers) => {
+                    self.interaction = Interaction::Idle
+                }
+                KeyCode::Char('j') | KeyCode::Down if no_modifiers(k.modifiers) => {
+                    self.move_browse(1)
+                }
+                KeyCode::Char('k') | KeyCode::Up if no_modifiers(k.modifiers) => {
+                    self.move_browse(-1)
+                }
+                KeyCode::Enter if k.modifiers == KeyModifiers::SHIFT => {
                     self.open_browse(true)
                 }
-                KeyCode::Enter => self.open_browse(false),
+                KeyCode::Enter if no_modifiers(k.modifiers) => self.open_browse(false),
                 _ => {}
             }
             return;
         }
         if matches!(self.interaction, Interaction::Move(_)) {
             match k.code {
-                KeyCode::Esc | KeyCode::Char('q') => self.interaction = Interaction::Idle,
-                KeyCode::Char('j') | KeyCode::Down => self.step_move(1),
-                KeyCode::Char('k') | KeyCode::Up => self.step_move(-1),
-                KeyCode::Enter => self.confirm_move(),
+                KeyCode::Esc | KeyCode::Char('q') if no_modifiers(k.modifiers) => {
+                    self.interaction = Interaction::Idle
+                }
+                KeyCode::Char('j') | KeyCode::Down if no_modifiers(k.modifiers) => {
+                    self.step_move(1)
+                }
+                KeyCode::Char('k') | KeyCode::Up if no_modifiers(k.modifiers) => {
+                    self.step_move(-1)
+                }
+                KeyCode::Enter if no_modifiers(k.modifiers) => self.confirm_move(),
                 _ => {}
             }
             return;
         }
-        if matches!(self.interaction, Interaction::Help(_)) {
+        if matches!(self.interaction, Interaction::Help) {
             match k.code {
-                KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('?') => {
+                KeyCode::Esc | KeyCode::Char('q') if no_modifiers(k.modifiers) => {
                     self.interaction = Interaction::Idle
                 }
-                KeyCode::Char('j') | KeyCode::Down => self.step_help(1),
-                KeyCode::Char('k') | KeyCode::Up => self.step_help(-1),
+                KeyCode::Char('?') if shifted(k.modifiers) => {
+                    self.interaction = Interaction::Idle
+                }
                 _ => {}
             }
             return;
         }
         match k.code {
-            KeyCode::Char('q') => self.request_quit(),
-            KeyCode::Esc if self.shelf => self.shelf = false,
-            KeyCode::Esc => self.request_quit(),
-            KeyCode::Char('h') | KeyCode::Left => self.focus = self.focus.saturating_sub(1),
-            KeyCode::Char('l') | KeyCode::Right => {
+            KeyCode::Char('q') if no_modifiers(k.modifiers) => self.request_quit(),
+            KeyCode::Esc if no_modifiers(k.modifiers) && self.shelf => self.shelf = false,
+            KeyCode::Esc if no_modifiers(k.modifiers) => self.request_quit(),
+            KeyCode::Char('h') | KeyCode::Left if no_modifiers(k.modifiers) => {
+                self.focus = self.focus.saturating_sub(1)
+            }
+            KeyCode::Char('l') | KeyCode::Right if no_modifiers(k.modifiers) => {
                 self.focus = (self.focus + 1).min(self.columns.len().saturating_sub(1))
             }
-            KeyCode::Char('j') | KeyCode::Down => self.move_task(1),
-            KeyCode::Char('k') | KeyCode::Up => self.move_task(-1),
-            KeyCode::Char('g') | KeyCode::Home => self.move_task(isize::MIN / 2),
-            KeyCode::Char('G') | KeyCode::End => self.move_task(isize::MAX / 2),
-            KeyCode::Enter => {
+            KeyCode::Char('j') | KeyCode::Down if no_modifiers(k.modifiers) => self.move_task(1),
+            KeyCode::Char('k') | KeyCode::Up if no_modifiers(k.modifiers) => self.move_task(-1),
+            KeyCode::Char('g') | KeyCode::Home if no_modifiers(k.modifiers) => {
+                self.move_task(isize::MIN / 2)
+            }
+            KeyCode::Char('G') if shifted(k.modifiers) => self.move_task(isize::MAX / 2),
+            KeyCode::End if no_modifiers(k.modifiers) => self.move_task(isize::MAX / 2),
+            KeyCode::Enter if no_modifiers(k.modifiers) => {
                 self.shelf = !self.shelf && self.selected_task().is_some();
                 self.field = FieldId::Title;
             }
-            KeyCode::Tab | KeyCode::BackTab if self.shelf => {
+            KeyCode::Tab if no_modifiers(k.modifiers) && self.shelf => {
                 self.field = match self.field {
                     FieldId::Title => FieldId::Notes,
                     FieldId::Notes => FieldId::Title,
                 }
             }
-            KeyCode::Char('i') => self.start_edit(),
-            KeyCode::Char(' ') => self.toggle_done(),
-            KeyCode::Char('d') => self.ask_delete(),
-            KeyCode::Char('c') => self.start_create(false),
-            KeyCode::Char('C') => self.start_create(true),
-            KeyCode::Char('r') => self.refresh(),
-            KeyCode::Char('t') => self.transparent = !self.transparent,
-            KeyCode::Char('y') => self.yank(),
-            KeyCode::Char('b') => self.start_browse(),
-            KeyCode::Char('m') => self.start_move(),
-            KeyCode::Char('?') => self.start_help(),
+            KeyCode::BackTab if shifted(k.modifiers) && self.shelf => {
+                self.field = match self.field {
+                    FieldId::Title => FieldId::Notes,
+                    FieldId::Notes => FieldId::Title,
+                }
+            }
+            KeyCode::Char('i') if no_modifiers(k.modifiers) => self.start_edit(),
+            KeyCode::Char(' ') if no_modifiers(k.modifiers) => self.toggle_done(),
+            KeyCode::Char('d') if no_modifiers(k.modifiers) => self.ask_delete(),
+            KeyCode::Char('c') if no_modifiers(k.modifiers) => self.start_create(false),
+            KeyCode::Char('C') if shifted(k.modifiers) => self.start_create(true),
+            KeyCode::Char('r') if no_modifiers(k.modifiers) => self.refresh(),
+            KeyCode::Char('t') if no_modifiers(k.modifiers) => {
+                self.transparent = !self.transparent
+            }
+            KeyCode::Char('y') if no_modifiers(k.modifiers) => self.yank(),
+            KeyCode::Char('b') if no_modifiers(k.modifiers) => self.start_browse(),
+            KeyCode::Char('m') if no_modifiers(k.modifiers) => self.start_move(),
+            KeyCode::Char('?') if shifted(k.modifiers) => self.start_help(),
             _ => {}
         }
     }
@@ -1517,42 +1546,60 @@ impl App {
     /// Shift+Enter (or Alt+Enter / Ctrl+J where the terminal can't report it)
     /// starts a new line.
     fn edit_key(&mut self, k: KeyEvent) {
-        let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
-        let newline = k.modifiers.intersects(KeyModifiers::SHIFT | KeyModifiers::ALT);
+        if self.edit_width == 0
+            && !(k.code == KeyCode::Esc && no_modifiers(k.modifiers))
+        {
+            self.error = Some("terminal too small to show the editor; Esc cancels".into());
+            return;
+        }
+        let ctrl = k.modifiers == KeyModifiers::CONTROL;
+        let newline =
+            k.modifiers == KeyModifiers::SHIFT || k.modifiers == KeyModifiers::ALT;
         let notes = self.edit().is_some_and(|e| e.field() == FieldId::Notes);
         match k.code {
-            KeyCode::Esc => {
+            KeyCode::Esc if no_modifiers(k.modifiers) => {
                 self.interaction = Interaction::Idle;
                 return;
             }
-            KeyCode::Enter if !(notes && newline) => {
+            KeyCode::Enter if no_modifiers(k.modifiers) => {
                 self.commit_edit();
                 return;
             }
             _ => {}
         }
+        let width = self.edit_width.max(1);
         let Some(e) = self.edit_mut() else { return };
         match k.code {
-            KeyCode::Enter => e.insert('\n'),
+            KeyCode::Enter if notes && newline => e.insert('\n'),
             KeyCode::Char('j') if ctrl && notes => e.insert('\n'),
             KeyCode::Char('w') if ctrl => e.kill_word(),
             KeyCode::Char('u') if ctrl => e.kill_to_start(),
             KeyCode::Char('a') if ctrl => e.cursor = e.line_start(),
             KeyCode::Char('e') if ctrl => e.cursor = e.line_end(),
-            KeyCode::Char(c) if !ctrl => e.insert(c),
-            KeyCode::Backspace => e.backspace(),
-            KeyCode::Delete => e.delete(),
-            KeyCode::Left => e.left(),
-            KeyCode::Right => e.right(),
-            KeyCode::Up if notes => e.step_line(false),
-            KeyCode::Down if notes => e.step_line(true),
-            KeyCode::Home => e.cursor = e.line_start(),
-            KeyCode::End => e.cursor = e.line_end(),
+            KeyCode::Char(c)
+                if no_modifiers(k.modifiers)
+                    || k.modifiers == KeyModifiers::SHIFT =>
+            {
+                e.insert(c)
+            }
+            KeyCode::Backspace if no_modifiers(k.modifiers) => e.backspace(),
+            KeyCode::Delete if no_modifiers(k.modifiers) => e.delete(),
+            KeyCode::Left if no_modifiers(k.modifiers) => e.left(),
+            KeyCode::Right if no_modifiers(k.modifiers) => e.right(),
+            KeyCode::Up if notes && no_modifiers(k.modifiers) => {
+                e.step_visual_line(width, false)
+            }
+            KeyCode::Down if notes && no_modifiers(k.modifiers) => {
+                e.step_visual_line(width, true)
+            }
+            KeyCode::Home if no_modifiers(k.modifiers) => e.cursor = e.line_start(),
+            KeyCode::End if no_modifiers(k.modifiers) => e.cursor = e.line_end(),
             _ => {}
         }
     }
 
     fn draw(&mut self, f: &mut Frame) {
+        self.edit_width = 0;
         let t = self.theme.clone();
         let base = Style::default().fg(t.fg).bg(self.bg(t.bg));
         f.render_widget(Block::default().style(base), f.area());
@@ -1586,8 +1633,8 @@ impl App {
             " j/k · ⏎ open · ⇧⏎ all · Esc close"
         } else if matches!(self.interaction, Interaction::Move(_)) {
             " j/k · ⏎ move · Esc close"
-        } else if matches!(self.interaction, Interaction::Help(_)) {
-            " j/k · Esc close"
+        } else if matches!(self.interaction, Interaction::Help) {
+            " Esc close"
         } else if self.is_creating() {
             " ⏎ create · Esc cancel"
         } else if self.edit().is_some_and(|e| e.field() == FieldId::Notes) {
@@ -1634,6 +1681,11 @@ impl App {
             ) {
                 self.interaction = Interaction::Idle;
             }
+        }
+
+        if self.shelf && area.width < COL_MIN + 24 {
+            self.draw_shelf(f, area, t);
+            return;
         }
 
         // Columns share the width evenly within limits; the shelf takes a fixed slot.
@@ -1713,13 +1765,15 @@ impl App {
     }
 
     /// The shelf while a new task is being typed: just a title input.
-    fn draw_new_shelf(&self, f: &mut Frame, area: Rect, t: &Theme) {
+    fn draw_new_shelf(&mut self, f: &mut Frame, area: Rect, t: &Theme) {
         let col = &self.columns[self.focus];
-        let Some(e) = self.edit() else { return };
-        let EditTarget::New { parent, .. } = &e.target else { return };
-        let parent_id = parent.as_deref();
-        let parent = parent_id.and_then(|id| col.rows.iter().find(|r| r.task.id == id));
-        let heading = if parent_id.is_some() { " New subtask " } else { " New task " };
+        let parent_id = match self.edit().map(|edit| &edit.target) {
+            Some(EditTarget::New { parent, .. }) => parent.clone(),
+            _ => return,
+        };
+        let parent_ref = parent_id.as_deref();
+        let parent = parent_ref.and_then(|id| col.rows.iter().find(|r| r.task.id == id));
+        let heading = if parent_ref.is_some() { " New subtask " } else { " New task " };
         let block = Block::bordered()
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(t.green))
@@ -1729,15 +1783,23 @@ impl App {
         let inner = block.inner(area);
         f.render_widget(block, area);
         if inner.width < 8 || inner.height < 3 {
+            f.render_widget(
+                Paragraph::new("Terminal too small; Esc cancels")
+                    .style(Style::default().fg(t.yellow)),
+                inner,
+            );
             return;
         }
         let w = inner.width as usize - 2;
+        self.edit_width = w;
+        let Some(e) = self.edit() else { return };
         let (text, offset) = e.view(w);
+        let text = clean(text);
         let input = Line::styled(
-            format!("{text:<w$}"),
+            pad_to_width(&text, w),
             Style::default().fg(t.sel_fg).bg(t.sel_bg).bold(),
         );
-        let caption = match (parent, parent_id.is_some()) {
+        let caption = match (parent, parent_ref.is_some()) {
             (Some(p), _) => format!("  under {}", title_of(&p.task)),
             (None, true) => "  under the selected task".to_string(),
             (None, false) => format!("  in {}", col.list.title),
@@ -1751,7 +1813,7 @@ impl App {
         f.set_cursor_position((inner.x + 2 + offset as u16, inner.y));
     }
 
-    fn draw_shelf(&self, f: &mut Frame, area: Rect, t: &Theme) {
+    fn draw_shelf(&mut self, f: &mut Frame, area: Rect, t: &Theme) {
         if self.is_creating() {
             self.draw_new_shelf(f, area, t);
             return;
@@ -1771,10 +1833,18 @@ impl App {
         let inner = block.inner(area);
         f.render_widget(block, area);
         if inner.width < 8 || inner.height < 8 {
+            f.render_widget(
+                Paragraph::new("Terminal too small; Esc closes details")
+                    .style(Style::default().fg(t.yellow)),
+                inner,
+            );
             return;
         }
         // Two columns go to the focus marker.
         let w = inner.width as usize - 2;
+        if self.edit().is_some() {
+            self.edit_width = w;
+        }
         let editing = self.edit().filter(|e| {
             e.existing()
                 .is_some_and(|(list_id, task_id, _)| task_id == task.id && list_id == col.list.id)
@@ -1820,6 +1890,13 @@ impl App {
             Some(FieldId::Title) => 1,
             _ => wrap(&title_of(task), w).len().min(3) as u16,
         };
+        let max_meta = inner.height.saturating_sub(title_h + 7).max(1) as usize;
+        if meta.len() > max_meta {
+            meta.truncate(max_meta);
+            if let Some(last) = meta.last_mut() {
+                *last = field("More", "…".into(), t);
+            }
+        }
         let meta_h = meta.len() as u16;
         let notes_h = inner.height.saturating_sub(title_h + meta_h + 5).max(1);
         let [title_a, _, meta_a, _, notes_label_a, notes_a, _, updated_a] = Layout::vertical([
@@ -1839,7 +1916,10 @@ impl App {
             Some(e) => {
                 let (text, offset) = e.view(w);
                 cursor = Some((title_a.x + 2 + offset as u16, title_a.y));
-                vec![Line::styled(format!("{text:<w$}"), input.bold())]
+                vec![Line::styled(
+                    pad_to_width(&clean(text), w),
+                    input.bold(),
+                )]
             }
             None => wrap(&title, w)
                 .into_iter()
@@ -1876,7 +1956,7 @@ impl App {
             segs.into_iter()
                 .skip(scroll)
                 .take(rows)
-                .map(|(s, e)| Line::styled(format!("{:<w$}", &notes_text[s..e]), style))
+                .map(|(s, e)| Line::styled(pad_to_width(&notes_text[s..e], w), style))
                 .collect()
         };
         let on_notes = self.field == FieldId::Notes;
@@ -1894,9 +1974,9 @@ impl App {
         let bg = self.bg(t.bg);
         let wrap_titles = self.config.wrap_titles;
         let Interaction::Browse(browse) = &mut self.interaction else { return };
-        let width = area.width.clamp(28, 80);
+        let rect = modal_rect(area, 80, 3);
         // Two borders and the selection marker eat into the usable width.
-        let text_w = (width as usize).saturating_sub(4);
+        let text_w = (rect.width as usize).saturating_sub(4).max(1);
         let items: Vec<ListItem> = browse
             .links
             .iter()
@@ -1927,10 +2007,7 @@ impl App {
             })
             .collect();
         let rows: u16 = items.iter().map(|i| i.height() as u16).sum();
-        let height = (rows + 2).clamp(3, area.height.max(3));
-        let x = area.x + area.width.saturating_sub(width) / 2;
-        let y = area.y + area.height.saturating_sub(height) / 2;
-        let rect = Rect::new(x, y, width, height);
+        let rect = modal_rect(area, 80, rows.saturating_add(2));
         let block = Block::bordered()
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(t.accent))
@@ -1948,11 +2025,7 @@ impl App {
     fn draw_move(&mut self, f: &mut Frame, area: Rect, t: &Theme) {
         let bg = self.bg(t.bg);
         let Interaction::Move(pick) = &mut self.interaction else { return };
-        let width = area.width.min(72).max(24);
-        let height = (pick.lists.len() as u16 + 2).clamp(3, area.height.max(3));
-        let x = area.x + area.width.saturating_sub(width) / 2;
-        let y = area.y + area.height.saturating_sub(height) / 2;
-        let rect = Rect::new(x, y, width, height);
+        let rect = modal_rect(area, 72, pick.lists.len() as u16 + 2);
         let block = Block::bordered()
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(t.accent))
@@ -1973,19 +2046,22 @@ impl App {
             .highlight_style(Style::default().fg(t.sel_fg).bg(t.sel_bg).add_modifier(Modifier::BOLD))
             .highlight_symbol("▌")
             .highlight_spacing(HighlightSpacing::Always);
+        f.render_widget(Clear, rect);
         f.render_stateful_widget(list, rect, &mut pick.state);
     }
 
     fn draw_help(&mut self, f: &mut Frame, area: Rect, t: &Theme) {
         let bg = self.bg(t.bg);
-        let Interaction::Help(help) = &mut self.interaction else { return };
+        if !matches!(self.interaction, Interaction::Help) {
+            return;
+        }
         let keys = help_keys();
-        let key_w = keys.iter().map(|(k, _)| k.len()).max().unwrap_or(0);
-        let width = area.width.min(56).max(28);
-        let height = (keys.len() as u16 + 2).clamp(3, area.height.max(3));
-        let x = area.x + area.width.saturating_sub(width) / 2;
-        let y = area.y + area.height.saturating_sub(height) / 2;
-        let rect = Rect::new(x, y, width, height);
+        let key_w = keys
+            .iter()
+            .map(|(key, _)| UnicodeWidthStr::width(*key))
+            .max()
+            .unwrap_or(0);
+        let rect = modal_rect(area, 56, keys.len() as u16 + 2);
         let block = Block::bordered()
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(t.accent))
@@ -2000,13 +2076,28 @@ impl App {
                 ]))
             })
             .collect();
-        let list = List::new(items)
-            .block(block)
-            .highlight_style(Style::default().fg(t.sel_fg).bg(t.sel_bg).add_modifier(Modifier::BOLD))
-            .highlight_symbol("▌")
-            .highlight_spacing(HighlightSpacing::Always);
-        f.render_stateful_widget(list, rect, &mut help.state);
+        f.render_widget(Clear, rect);
+        f.render_widget(List::new(items).block(block), rect);
     }
+}
+
+fn modal_rect(area: Rect, max_width: u16, desired_height: u16) -> Rect {
+    let width = area.width.min(max_width);
+    let height = area.height.min(desired_height.max(3));
+    Rect::new(
+        area.x + area.width.saturating_sub(width) / 2,
+        area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    )
+}
+
+fn no_modifiers(modifiers: KeyModifiers) -> bool {
+    modifiers.is_empty()
+}
+
+fn shifted(modifiers: KeyModifiers) -> bool {
+    modifiers == KeyModifiers::SHIFT
 }
 
 fn help_keys() -> Vec<(&'static str, &'static str)> {
@@ -2084,12 +2175,26 @@ fn task_links(task: &Task) -> Vec<BrowseLink> {
     out
 }
 
-/// Cut `s` to `width` characters, marking the cut with an ellipsis.
+/// Cut `s` to terminal cells, marking the cut with an ellipsis.
 fn ellipsize(s: &str, width: usize) -> String {
-    if s.chars().count() <= width {
+    if UnicodeWidthStr::width(s) <= width {
         return s.to_string();
     }
-    s.chars().take(width.saturating_sub(1)).chain(['…']).collect()
+    let target = width.saturating_sub(1);
+    let mut out = String::new();
+    for grapheme in s.graphemes(true) {
+        if UnicodeWidthStr::width(out.as_str()) + UnicodeWidthStr::width(grapheme) > target {
+            break;
+        }
+        out.push_str(grapheme);
+    }
+    out.push('…');
+    out
+}
+
+fn pad_to_width(text: &str, width: usize) -> String {
+    let padding = width.saturating_sub(UnicodeWidthStr::width(text));
+    format!("{text}{}", " ".repeat(padding))
 }
 
 /// http(s) URLs in notes, first-seen order, no duplicates.
@@ -2134,13 +2239,28 @@ fn wrap(text: &str, width: usize) -> Vec<(usize, usize)> {
         let mut start = 0;
         loop {
             let rest = &line[start..];
-            if rest.chars().count() <= width {
+            if UnicodeWidthStr::width(rest) <= width {
                 out.push((base + start, base + line.len()));
                 break;
             }
-            let hard = rest.char_indices().nth(width).map_or(rest.len(), |(i, _)| i);
-            // Break on the last space that fits, else mid-word.
-            let cut = rest[..hard].rfind(' ').map_or(hard, |i| i + 1);
+            let mut cells = 0;
+            let mut hard = 0;
+            let mut whitespace = None;
+            for (offset, grapheme) in rest.grapheme_indices(true) {
+                let next = cells + UnicodeWidthStr::width(grapheme);
+                if next > width && hard > 0 {
+                    break;
+                }
+                cells = next;
+                hard = offset + grapheme.len();
+                if grapheme.chars().all(char::is_whitespace) {
+                    whitespace = Some(hard);
+                }
+                if cells >= width {
+                    break;
+                }
+            }
+            let cut = whitespace.unwrap_or(hard).max(1);
             out.push((base + start, base + start + cut));
             start += cut;
         }
@@ -2158,9 +2278,24 @@ fn cursor_rc(segs: &[(usize, usize)], text: &str, cursor: usize) -> (usize, usiz
         if cursor < *s {
             break;
         }
-        out = (row, text[*s..cursor.min(*e)].chars().count());
+        out = (
+            row,
+            UnicodeWidthStr::width(&text[*s..cursor.min(*e)]),
+        );
     }
     out
+}
+
+fn byte_at_column(text: &str, start: usize, end: usize, column: usize) -> usize {
+    let mut cells = 0;
+    for (offset, grapheme) in text[start..end].grapheme_indices(true) {
+        let next = cells + UnicodeWidthStr::width(grapheme);
+        if next > column {
+            return start + offset;
+        }
+        cells = next;
+    }
+    end
 }
 
 /// Prefix each line with the focus marker so focused fields stand out.
@@ -2607,6 +2742,12 @@ mod tests {
         assert_eq!(e.buf, "Buy ");
         e.kill_to_start();
         assert_eq!((e.buf.as_str(), e.cursor), ("", 0));
+
+        let mut e = edit("e\u{301}x");
+        e.left();
+        assert_eq!(e.cursor, "e\u{301}".len());
+        e.left();
+        assert_eq!(e.cursor, 0);
     }
 
     #[test]
@@ -3091,6 +3232,17 @@ mod tests {
         e.cursor = 0;
         assert_eq!(e.view(4), ("abcd", 0));
         assert_eq!(edit("").view(4), ("", 0));
+        assert_eq!(edit("任务a").view(3), ("a", 1));
+    }
+
+    #[test]
+    fn visual_line_navigation_uses_the_same_wrapping_as_rendering() {
+        let mut e = edit("abcdef");
+        e.cursor = 2;
+        e.step_visual_line(3, true);
+        assert_eq!(e.cursor, 5);
+        e.step_visual_line(3, false);
+        assert_eq!(e.cursor, 2);
     }
 
     #[test]
@@ -3251,6 +3403,17 @@ mod tests {
         let segs = wrap(trail, 10);
         assert_eq!(cursor_rc(&segs, trail, 3), (1, 0));
         assert_eq!(cursor_rc(&wrap("", 10), "", 0), (0, 0));
+
+        let wide = "任务ab";
+        let segments = wrap(wide, 3);
+        assert_eq!(
+            segments
+                .iter()
+                .map(|(start, end)| &wide[*start..*end])
+                .collect::<Vec<_>>(),
+            ["任", "务a", "b"]
+        );
+        assert_eq!(cursor_rc(&segments, wide, "任务".len()), (1, 2));
     }
 
     #[test]
@@ -3395,6 +3558,31 @@ mod tests {
     }
 
     #[test]
+    fn modified_shortcuts_do_not_trigger_plain_commands() {
+        let (mut app, _cmds) = app_with_lists(&["a"]);
+        app.sync = SyncState::Ready;
+
+        app.on_key(KeyEvent::new(
+            KeyCode::Char('d'),
+            KeyModifiers::CONTROL,
+        ));
+        assert!(matches!(app.interaction, Interaction::Idle));
+
+        app.on_key(KeyEvent::new(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL,
+        ));
+        assert!(app.quit);
+    }
+
+    #[test]
+    fn modal_rect_never_exceeds_the_terminal() {
+        let area = Rect::new(3, 4, 12, 2);
+        let modal = modal_rect(area, 80, 30);
+        assert_eq!(modal, area);
+    }
+
+    #[test]
     fn subtask_parent_is_the_row_or_its_own_parent() {
         let rows = order(vec![
             task("a", None, "1", false),
@@ -3506,6 +3694,82 @@ mod render_tests {
         for (i, row) in rows.iter().enumerate() {
             assert_eq!(row.chars().count(), 62, "row {i} is {row:?}");
         }
+    }
+
+    #[test]
+    fn shelf_keeps_notes_and_updated_visible_with_many_links() {
+        let (tx, _rx) = mpsc::channel();
+        let task = Task {
+            id: "task".into(),
+            title: "Task".into(),
+            notes: Some("Important notes".into()),
+            status: "needsAction".into(),
+            links: (0..12)
+                .map(|index| crate::api::Link {
+                    description: format!("Link {index}"),
+                    link: format!("https://example.test/{index}"),
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let cached = cache::Cache {
+            lists: vec![cache::CachedList {
+                list: TaskList {
+                    id: "list".into(),
+                    title: "List".into(),
+                    ..Default::default()
+                },
+                tasks: vec![task],
+            }],
+        };
+        let mut app = App::new(tx, cached, Config::default());
+        app.shelf = true;
+        let mut terminal = Terminal::new(TestBackend::new(90, 18)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let screen: String = (0..18)
+            .flat_map(|y| {
+                (0..90)
+                    .map(move |x| buffer[(x, y)].symbol())
+                    .chain(std::iter::once("\n"))
+            })
+            .collect();
+
+        assert!(screen.contains("Notes"), "{screen}");
+        assert!(screen.contains("Important notes"), "{screen}");
+        assert!(screen.contains("Updated"), "{screen}");
+        assert!(screen.contains("More"), "{screen}");
+    }
+
+    #[test]
+    fn narrow_terminal_uses_a_visible_full_width_editor() {
+        let (tx, _rx) = mpsc::channel();
+        let cached = cache::Cache {
+            lists: vec![cache::CachedList {
+                list: TaskList {
+                    id: "list".into(),
+                    title: "List".into(),
+                    ..Default::default()
+                },
+                tasks: Vec::new(),
+            }],
+        };
+        let mut app = App::new(tx, cached, Config::default());
+        app.sync = SyncState::Ready;
+        app.start_create(false);
+        let mut terminal = Terminal::new(TestBackend::new(36, 10)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+
+        assert!(app.edit_width > 0);
+        let buffer = terminal.backend().buffer();
+        let screen: String = (0..10)
+            .flat_map(|y| {
+                (0..36)
+                    .map(move |x| buffer[(x, y)].symbol())
+                    .chain(std::iter::once("\n"))
+            })
+            .collect();
+        assert!(screen.contains("New task"), "{screen}");
     }
 }
 

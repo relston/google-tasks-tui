@@ -140,21 +140,21 @@ Centralize OS integration and make failures visible.
 Make text measurement and modal behavior consistent across terminal sizes and
 Unicode input.
 
-- [ ] a) Use terminal-cell width and grapheme-aware cursor movement for edit
+- [x] a) Use terminal-cell width and grapheme-aware cursor movement for edit
   views, wrapping, clipping, padding, and cursor placement.
-- [ ] b) Share one text-layout calculation between wrapped notes rendering and
+- [x] b) Share one text-layout calculation between wrapped notes rendering and
   up/down cursor movement.
-- [ ] c) Sanitize every rendered edit buffer, including malformed titles,
+- [x] c) Sanitize every rendered edit buffer, including malformed titles,
   without invalidating byte offsets.
-- [ ] d) Introduce one bounded modal layout helper that clamps to the available
+- [x] d) Introduce one bounded modal layout helper that clamps to the available
   area and always renders `Clear` before Browse, Move, and Keyboard content.
-- [ ] e) Add a compact fallback or minimum-size message when a details shelf
+- [x] e) Add a compact fallback or minimum-size message when a details shelf
   cannot be displayed. Never capture input in an invisible editor.
-- [ ] f) Reserve space for Notes and Updated in the details shelf; cap,
+- [x] f) Reserve space for Notes and Updated in the details shelf; cap,
   aggregate, or scroll large metadata/link sections.
-- [ ] g) Make Keyboard a static command table rather than a selectable list
+- [x] g) Make Keyboard a static command table rather than a selectable list
   whose selection has no action.
-- [ ] h) Normalize key events and require exact modifiers. Handle `Ctrl-C`
+- [x] h) Normalize key events and require exact modifiers. Handle `Ctrl-C`
   deliberately and prevent modified characters from triggering create,
   delete, confirmation, or refresh commands.
 
