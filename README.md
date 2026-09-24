@@ -74,12 +74,16 @@ available as subcommands for scripts and agents (`google-tasks-tui lists`,
   subtasks, preserving their order) and closes the overlay. Both lists are
   refreshed afterward; a partial move identifies the task that failed.
   `Esc` cancels. If there is only one list, the status bar says so.
+- `<` promotes a subtask to the top level of its current list. `>` on a
+  top-level task opens **Select Parent**, listing the other available open
+  top-level tasks in that list; `j`/`k` choose one and `Enter` reparents.
+  Assigned, hidden, completed, nested, and self candidates are excluded.
 - `?` opens a static **Keyboard** overlay listing the board commands;
   `Esc`/`q`/`?` close it.
 - API calls run on a background thread, so the UI never blocks. Lists fill in
   as they load. One write runs at a time; navigation stays available while
   other mutation keys wait. If you quit while a write is pending, the app
-  waits for it; press `q` or `Esc` again to force quit.
+  waits for it; press `q` again to force quit.
 - Startup is instant: the board is painted from a local snapshot before any
   network call, then Google's copy replaces it in the background. The board is
   read-only until every list in the current sync succeeds, so you never edit
@@ -217,6 +221,7 @@ requires `--yes` because Google removes every task in that list.
 | Read lists/tasks/details | Yes | Yes | Shared canonical ordering and filtering |
 | Create/edit/complete/delete tasks | Yes | Yes | Same validation and API contracts |
 | Create subtasks | `C` | `create --parent` | Same one-level Google constraint |
+| Reparent/unparent tasks | `<` / `>` | No | Interactive same-list parent picker |
 | Edit notes | Yes | Yes | Assigned Docs/Chat tasks are rejected |
 | Edit due date/status directly | Status via `Space` | Yes | Due-date editor remains future TUI work |
 | Move tasks between lists | Yes | No | Interactive destination picker; CLI move remains deferred |
@@ -237,6 +242,7 @@ requires `--yes` because Google removes every task in that list.
 | `y`            | Copy the task as markdown       |
 | `b`            | Open a link from the notes      |
 | `m`            | Move the task to another list   |
+| `<` / `>`      | Unparent / choose a parent      |
 | `Tab`          | Move between shelf fields       |
 | `Space`        | Tick / untick the task          |
 | `Enter`        | Open / close the details shelf  |
@@ -245,7 +251,7 @@ requires `--yes` because Google removes every task in that list.
 | `r`            | Refresh from Google             |
 | `t`            | Toggle transparent background   |
 | `?`            | List the keyboard commands      |
-| `Esc`          | Close the shelf, or quit        |
+| `Esc`          | Close or cancel the current view |
 | `q`            | Quit                            |
 
 ## How theming works

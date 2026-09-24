@@ -55,6 +55,7 @@ impl App {
         self.draw_board(f, body, &t);
         self.draw_browse(f, body, &t);
         self.draw_move(f, body, &t);
+        self.draw_parent(f, body, &t);
         self.draw_help(f, body, &t);
 
         let hints = if self.quitting {
@@ -63,6 +64,8 @@ impl App {
             " j/k · ⏎ open · ⇧⏎ all · Esc close"
         } else if matches!(self.interaction, Interaction::Move(_)) {
             " j/k · ⏎ move · Esc close"
+        } else if matches!(self.interaction, Interaction::Parent(_)) {
+            " j/k · ⏎ choose parent · Esc close"
         } else if matches!(self.interaction, Interaction::Help) {
             " Esc close"
         } else if self.is_creating() {
@@ -74,9 +77,9 @@ impl App {
         } else if self.sync != SyncState::Ready {
             " syncing with Google… board is read-only until it lands"
         } else if self.shelf {
-            " Tab field · i edit · c new · C subtask · ␣ done · y copy · b link · m move · d delete · ? help · q quit"
+            " Tab field · i edit · c new · C subtask · </> parent · ␣ done · y copy · b link · m move · d delete · ? help · q quit"
         } else {
-            " h/l list · j/k task · ␣ done · ⏎ details · c new · C subtask · i edit · y copy · b link · m move · d delete · ? help · q quit"
+            " h/l list · j/k task · </> parent · ␣ done · ⏎ details · c new · C subtask · i edit · y copy · b link · m move · d delete · ? help · q quit"
         };
         let pending = match &self.interaction {
             Interaction::ConfirmDelete(pending) => Some(pending),
@@ -565,6 +568,44 @@ impl App {
         f.render_stateful_widget(list, rect, &mut pick.state);
     }
 
+    fn draw_parent(&mut self, f: &mut Frame, area: Rect, t: &Theme) {
+        let bg = self.bg(t.bg);
+        let Interaction::Parent(picker) = &mut self.interaction else {
+            return;
+        };
+        let rect = modal_rect(area, 72, picker.tasks.len() as u16 + 2);
+        let block = Block::bordered()
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(t.accent))
+            .title(Line::styled(
+                " Select Parent ",
+                Style::default().fg(t.accent).bold(),
+            ))
+            .style(Style::default().bg(bg));
+        let items: Vec<ListItem> = picker
+            .tasks
+            .iter()
+            .map(|task| {
+                ListItem::new(Line::styled(
+                    title_of(task).into_owned(),
+                    Style::default().fg(t.fg),
+                ))
+            })
+            .collect();
+        let list = List::new(items)
+            .block(block)
+            .highlight_style(
+                Style::default()
+                    .fg(t.sel_fg)
+                    .bg(t.sel_bg)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .highlight_symbol("▌")
+            .highlight_spacing(HighlightSpacing::Always);
+        f.render_widget(Clear, rect);
+        f.render_stateful_widget(list, rect, &mut picker.state);
+    }
+
     fn draw_help(&mut self, f: &mut Frame, area: Rect, t: &Theme) {
         let bg = self.bg(t.bg);
         if !matches!(self.interaction, Interaction::Help) {
@@ -628,10 +669,12 @@ pub(super) fn help_keys() -> Vec<(&'static str, &'static str)> {
         ("y", "copy task as markdown"),
         ("b", "browse links in notes"),
         ("m", "move to another list"),
+        ("< / >", "unparent / choose parent"),
         ("r", "refresh from Google"),
         ("t", "transparent background"),
         ("?", "keyboard commands"),
-        ("q / Esc", "quit (Esc closes overlays)"),
+        ("Esc", "close / cancel current view"),
+        ("q", "quit (closes overlays first)"),
         ("⇧Enter", "new line (notes) / open all (browse)"),
     ]
 }
@@ -757,7 +800,7 @@ mod render_tests {
     use crate::api::{Task, TaskList};
     use crate::cache;
     use crate::config::Config;
-    use crate::tui::app::{App, Browse, BrowseLink, Interaction, MovePick, SyncState};
+    use crate::tui::app::{App, Browse, BrowseLink, Interaction, MovePick, ParentPick, SyncState};
     use ratatui::{
         backend::TestBackend,
         crossterm::event::{KeyCode, KeyEvent, KeyModifiers},
@@ -1007,6 +1050,21 @@ mod render_tests {
         let screen = render_app(&mut movement, 50, 14);
         assert!(screen.contains("Move"), "{screen}");
         assert!(screen.contains("Destination"), "{screen}");
+
+        let mut parent = one_list_app();
+        parent.interaction = Interaction::Parent(ParentPick {
+            list_id: "list".into(),
+            task_id: "task".into(),
+            tasks: vec![Task {
+                id: "parent".into(),
+                title: "Parent task".into(),
+                ..Default::default()
+            }],
+            state: ListState::default().with_selected(Some(0)),
+        });
+        let screen = render_app(&mut parent, 50, 14);
+        assert!(screen.contains("Select Parent"), "{screen}");
+        assert!(screen.contains("Parent task"), "{screen}");
 
         let mut help = one_list_app();
         help.interaction = Interaction::Help;

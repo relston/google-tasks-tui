@@ -671,18 +671,21 @@ mod tests {
             task_id: &str,
             movement: &crate::api::MoveTask,
         ) -> crate::api::Result<Task> {
-            let source = self
-                .tasks
-                .get_mut(list_id)
-                .ok_or_else(|| ApiError::Transport("no list".into()))?;
-            let index = source
-                .iter()
-                .position(|task| task.id == task_id)
-                .ok_or_else(|| ApiError::Transport("no task".into()))?;
-            let mut task = source.remove(index);
+            let mut task = {
+                let source = self
+                    .tasks
+                    .get_mut(list_id)
+                    .ok_or_else(|| ApiError::Transport("no list".into()))?;
+                let index = source
+                    .iter()
+                    .position(|task| task.id == task_id)
+                    .ok_or_else(|| ApiError::Transport("no task".into()))?;
+                source.remove(index)
+            };
             task.parent = movement.parent.clone();
+            let destination = movement.destination_list.as_deref().unwrap_or(list_id);
             self.tasks
-                .entry(movement.destination_list.clone())
+                .entry(destination.to_string())
                 .or_default()
                 .push(task.clone());
             Ok(task)

@@ -1,10 +1,23 @@
 use crate::{
-    api::{MoveTask, TaskList},
+    api::{MoveTask, Task, TaskList},
     board::Row,
 };
 
 pub(super) fn other_lists<'a>(lists: &'a [TaskList], current_id: &str) -> Vec<&'a TaskList> {
     lists.iter().filter(|list| list.id != current_id).collect()
+}
+
+pub(super) fn eligible_parents(rows: &[Row], task_id: &str) -> Vec<Task> {
+    rows.iter()
+        .filter(|row| {
+            row.depth == 0
+                && row.task.id != task_id
+                && !row.task.is_done()
+                && !row.task.hidden
+                && row.task.assignment_info.is_none()
+        })
+        .map(|row| row.task.clone())
+        .collect()
 }
 
 /// The selected task, then its direct subtasks.
@@ -39,7 +52,7 @@ pub(super) fn move_requests(destination: &str, ids: &[String]) -> Vec<(String, M
             (
                 id.clone(),
                 MoveTask {
-                    destination_list: destination.to_string(),
+                    destination_list: Some(destination.to_string()),
                     parent: (index > 0).then(|| root.clone()),
                     previous: (index > 1).then(|| ids[index - 1].clone()),
                 },

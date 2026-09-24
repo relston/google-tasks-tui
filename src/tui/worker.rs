@@ -1,6 +1,6 @@
 use std::sync::mpsc::{Receiver, Sender};
 
-use crate::api::{CreateTask, Task, TaskList, TaskPatch, TasksApi};
+use crate::api::{CreateTask, MoveTask, Task, TaskList, TaskPatch, TasksApi};
 
 use super::board::move_requests;
 
@@ -32,6 +32,12 @@ pub(super) enum Cmd {
         to: String,
         ids: Vec<String>,
     },
+    Reparent {
+        operation: u64,
+        list_id: String,
+        task_id: String,
+        parent: Option<String>,
+    },
 }
 
 pub(super) enum Msg {
@@ -61,6 +67,13 @@ pub(super) enum Msg {
         to: String,
         ids: Vec<String>,
         result: MoveOutcome,
+    },
+    Reparented {
+        operation: u64,
+        list_id: String,
+        task_id: String,
+        parent: Option<String>,
+        result: Result<Task, String>,
     },
 }
 
@@ -163,6 +176,28 @@ pub(super) fn worker<A: TasksApi>(mut client: A, commands: Receiver<Cmd>, output
                     },
                 })
             }
+            Cmd::Reparent {
+                operation,
+                list_id,
+                task_id,
+                parent,
+            } => output.send(Msg::Reparented {
+                operation,
+                result: client
+                    .move_task(
+                        &list_id,
+                        &task_id,
+                        &MoveTask {
+                            destination_list: None,
+                            parent: parent.clone(),
+                            previous: None,
+                        },
+                    )
+                    .map_err(|error| error.to_string()),
+                list_id,
+                task_id,
+                parent,
+            }),
             Cmd::Refresh(generation) => {
                 let lists = client.tasklists().map_err(|error| error.to_string());
                 let ids: Vec<String> = lists.iter().flatten().map(|list| list.id.clone()).collect();
@@ -187,7 +222,7 @@ pub(super) fn worker<A: TasksApi>(mut client: A, commands: Receiver<Cmd>, output
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::{Error, ListPatch, MoveTask, Result};
+    use crate::api::{Error, ListPatch, Result};
     use std::sync::{mpsc, Arc, Mutex};
 
     #[derive(Clone, Default)]
@@ -267,7 +302,7 @@ mod tests {
         fn move_task(&mut self, list_id: &str, task_id: &str, movement: &MoveTask) -> Result<Task> {
             self.record(format!(
                 "move:{list_id}:{task_id}:{}:{}:{}",
-                movement.destination_list,
+                movement.destination_list.as_deref().unwrap_or(""),
                 movement.parent.as_deref().unwrap_or(""),
                 movement.previous.as_deref().unwrap_or("")
             ));
@@ -430,6 +465,37 @@ mod tests {
             (99, "list", "task")
         );
         assert_eq!(result.unwrap().id, "task");
+    }
+
+    #[test]
+    fn reparent_uses_a_same_list_move_and_preserves_context() {
+        let fake = Fake::default();
+        let message = run_one(
+            fake.clone(),
+            Cmd::Reparent {
+                operation: 7,
+                list_id: "list".into(),
+                task_id: "child".into(),
+                parent: Some("parent".into()),
+            },
+        );
+
+        assert_eq!(fake.calls(), ["move:list:child::parent:"]);
+        let Msg::Reparented {
+            operation,
+            list_id,
+            task_id,
+            parent,
+            result,
+        } = message
+        else {
+            panic!("expected reparent result");
+        };
+        assert_eq!(operation, 7);
+        assert_eq!(list_id, "list");
+        assert_eq!(task_id, "child");
+        assert_eq!(parent.as_deref(), Some("parent"));
+        assert_eq!(result.unwrap().parent.as_deref(), Some("parent"));
     }
 
     #[test]

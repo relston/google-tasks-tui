@@ -32,9 +32,14 @@ Work directly on `main`; do not create feature branches.
 - Serialize mutations. Every optimistic mutation must retain enough context to
   roll back, and failures must return the app to read-only recovery.
 - Preserve editor, selection, and operation identity across delayed worker
-  responses. Graceful shutdown waits for pending writes; force quit is explicit.
+  responses. `q` is the only quit key; Escape only closes/cancels the current
+  view. Graceful shutdown waits for pending writes; a second `q` force-quits.
 - Cross-list moves preserve parent/child order, report partial completion, and
   reconcile both source and destination lists.
+- Same-list reparenting uses `tasks.move` without `destinationTasklist`.
+  Parent candidates are other open top-level tasks that Google permits as
+  parents; optimistic parent changes retain rollback context and task-ID
+  selection.
 - Bound all network operations. Retry only safe reads for 429/5xx, honor
   `Retry-After`, and retry at most once after an unexpected 401 refresh.
 - Keep terminal text grapheme-aware and terminal-cell-aware. Sanitize controls

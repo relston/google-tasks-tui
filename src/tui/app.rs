@@ -18,7 +18,7 @@ use crate::platform::{self, Clipboard};
 use crate::presentation::{md_yank, normalize_title, urls_in};
 use crate::theme::{self, Theme};
 
-use super::board::{move_ids, other_lists, subtask_parent};
+use super::board::{eligible_parents, move_ids, other_lists, subtask_parent};
 use super::text::{byte_at_column, clean, cursor_rc, title_of, wrap};
 use super::worker::{Cmd, Msg};
 #[cfg(test)]
@@ -51,6 +51,14 @@ pub(super) struct Browse {
 /// Overlay listing destination lists for a move.
 pub(super) struct MovePick {
     pub(super) lists: Vec<TaskList>,
+    pub(super) state: ListState,
+}
+
+/// Overlay listing possible parent tasks in the current list.
+pub(super) struct ParentPick {
+    pub(super) list_id: String,
+    pub(super) task_id: String,
+    pub(super) tasks: Vec<Task>,
     pub(super) state: ListState,
 }
 
@@ -217,6 +225,7 @@ pub(super) enum Interaction {
     ConfirmDelete(Pending),
     Browse(Browse),
     Move(MovePick),
+    Parent(ParentPick),
     Help,
 }
 
@@ -238,6 +247,11 @@ enum MutationContext {
         ids: Vec<String>,
         source_before: Vec<Task>,
         destination_before: Vec<Task>,
+    },
+    Reparent {
+        list_id: String,
+        task_id: String,
+        before: Box<Task>,
     },
 }
 
@@ -503,6 +517,9 @@ impl App {
                 self.interaction = Interaction::Editing(edit);
             }
             MutationContext::Patch {
+                list_id, before, ..
+            }
+            | MutationContext::Reparent {
                 list_id, before, ..
             } => {
                 self.board.upsert_task(&list_id, *before);
@@ -1098,6 +1115,42 @@ impl App {
                     }
                 }
             }
+            Msg::Reparented {
+                operation,
+                list_id,
+                task_id,
+                parent,
+                result,
+            } => {
+                let Some(context) = self.mutation_finished(operation) else {
+                    return;
+                };
+                if !matches!(
+                    &context,
+                    MutationContext::Reparent {
+                        list_id: expected_list,
+                        task_id: expected_task,
+                        ..
+                    } if expected_list == &list_id && expected_task == &task_id
+                ) {
+                    self.recover("reparent response did not match the pending operation".into());
+                    return;
+                }
+                match result {
+                    Ok(task) if task.id == task_id && task.parent == parent => {
+                        self.board.upsert_task(&list_id, task);
+                        self.rebuild_column(&list_id);
+                    }
+                    Ok(_) => {
+                        self.rollback(context);
+                        self.recover("Google returned a mismatched reparented task".into());
+                    }
+                    Err(error) => {
+                        self.rollback(context);
+                        self.recover(format!("reparent failed: {error}"));
+                    }
+                }
+            }
             Msg::Updated {
                 operation,
                 list_id,
@@ -1237,6 +1290,118 @@ impl App {
         self.interaction = Interaction::Idle;
     }
 
+    fn start_parent_pick(&mut self) {
+        if !self.writable() {
+            return;
+        }
+        let Some(column) = self.columns.get(self.focus) else {
+            return;
+        };
+        let Some(selected) = column.selected() else {
+            return;
+        };
+        if selected.task.parent.is_some() {
+            self.error = Some("unparent this task before choosing a new parent".into());
+            return;
+        }
+        if selected.task.assignment_info.is_some() {
+            self.error = Some("assigned tasks cannot become subtasks".into());
+            return;
+        }
+        let tasks = eligible_parents(&column.rows, &selected.task.id);
+        if tasks.is_empty() {
+            self.error = Some("no available parent tasks in this list".into());
+            return;
+        }
+        self.error = None;
+        self.interaction = Interaction::Parent(ParentPick {
+            list_id: column.list.id.clone(),
+            task_id: selected.task.id.clone(),
+            tasks,
+            state: ListState::default().with_selected(Some(0)),
+        });
+    }
+
+    fn step_parent(&mut self, delta: isize) {
+        let Interaction::Parent(picker) = &mut self.interaction else {
+            return;
+        };
+        let Some(last) = picker.tasks.len().checked_sub(1) else {
+            return;
+        };
+        let current = picker.state.selected().unwrap_or(0) as isize;
+        picker
+            .state
+            .select(Some((current + delta).clamp(0, last as isize) as usize));
+    }
+
+    fn confirm_parent(&mut self) {
+        let selection = {
+            let Interaction::Parent(picker) = &self.interaction else {
+                return;
+            };
+            let Some(index) = picker.state.selected() else {
+                return;
+            };
+            let Some(parent) = picker.tasks.get(index) else {
+                return;
+            };
+            (
+                picker.list_id.clone(),
+                picker.task_id.clone(),
+                parent.id.clone(),
+            )
+        };
+        self.interaction = Interaction::Idle;
+        self.reparent_task(&selection.0, &selection.1, Some(selection.2));
+    }
+
+    fn unparent_task(&mut self) {
+        if !self.writable() {
+            return;
+        }
+        let Some(column) = self.columns.get(self.focus) else {
+            return;
+        };
+        let Some(selected) = column.selected() else {
+            return;
+        };
+        if selected.task.parent.is_none() {
+            self.error = Some("task is already top-level".into());
+            return;
+        }
+        let list_id = column.list.id.clone();
+        let task_id = selected.task.id.clone();
+        self.reparent_task(&list_id, &task_id, None);
+    }
+
+    fn reparent_task(&mut self, list_id: &str, task_id: &str, parent: Option<String>) {
+        let Some(before) = self.board.task(list_id, task_id).cloned() else {
+            self.error = Some("task disappeared before it could move".into());
+            return;
+        };
+        if let Some(task) = self.board.task_mut(list_id, task_id) {
+            task.parent = parent.clone();
+        }
+        self.rebuild_column(list_id);
+        self.error = None;
+        let list_id = list_id.to_string();
+        let task_id = task_id.to_string();
+        self.send_mutation(
+            MutationContext::Reparent {
+                list_id: list_id.clone(),
+                task_id: task_id.clone(),
+                before: Box::new(before),
+            },
+            |operation| Cmd::Reparent {
+                operation,
+                list_id,
+                task_id,
+                parent,
+            },
+        );
+    }
+
     fn start_move(&mut self) {
         if !self.writable() {
             return;
@@ -1337,12 +1502,8 @@ impl App {
     pub(super) fn on_key(&mut self, k: KeyEvent) {
         // A notice is for the keypress that earned it, and no longer.
         self.notice = None;
-        if k.code == KeyCode::Char('c') && k.modifiers == KeyModifiers::CONTROL {
-            self.request_quit();
-            return;
-        }
         if self.quitting {
-            if no_modifiers(k.modifiers) && matches!(k.code, KeyCode::Esc | KeyCode::Char('q')) {
+            if no_modifiers(k.modifiers) && k.code == KeyCode::Char('q') {
                 self.request_quit();
             }
             return;
@@ -1390,12 +1551,28 @@ impl App {
             }
             return;
         }
+        if matches!(self.interaction, Interaction::Parent(_)) {
+            match k.code {
+                KeyCode::Esc | KeyCode::Char('q') if no_modifiers(k.modifiers) => {
+                    self.interaction = Interaction::Idle
+                }
+                KeyCode::Char('j') | KeyCode::Down if no_modifiers(k.modifiers) => {
+                    self.step_parent(1)
+                }
+                KeyCode::Char('k') | KeyCode::Up if no_modifiers(k.modifiers) => {
+                    self.step_parent(-1)
+                }
+                KeyCode::Enter if no_modifiers(k.modifiers) => self.confirm_parent(),
+                _ => {}
+            }
+            return;
+        }
         if matches!(self.interaction, Interaction::Help) {
             match k.code {
                 KeyCode::Esc | KeyCode::Char('q') if no_modifiers(k.modifiers) => {
                     self.interaction = Interaction::Idle
                 }
-                KeyCode::Char('?') if shifted(k.modifiers) => self.interaction = Interaction::Idle,
+                _ if shifted_symbol(&k, '?', '/') => self.interaction = Interaction::Idle,
                 _ => {}
             }
             return;
@@ -1403,7 +1580,6 @@ impl App {
         match k.code {
             KeyCode::Char('q') if no_modifiers(k.modifiers) => self.request_quit(),
             KeyCode::Esc if no_modifiers(k.modifiers) && self.shelf => self.shelf = false,
-            KeyCode::Esc if no_modifiers(k.modifiers) => self.request_quit(),
             KeyCode::Char('h') | KeyCode::Left if no_modifiers(k.modifiers) => {
                 self.focus = self.focus.saturating_sub(1)
             }
@@ -1443,7 +1619,9 @@ impl App {
             KeyCode::Char('y') if no_modifiers(k.modifiers) => self.yank(),
             KeyCode::Char('b') if no_modifiers(k.modifiers) => self.start_browse(),
             KeyCode::Char('m') if no_modifiers(k.modifiers) => self.start_move(),
-            KeyCode::Char('?') if shifted(k.modifiers) => self.start_help(),
+            _ if shifted_symbol(&k, '<', ',') => self.unparent_task(),
+            _ if shifted_symbol(&k, '>', '.') => self.start_parent_pick(),
+            _ if shifted_symbol(&k, '?', '/') => self.start_help(),
             _ => {}
         }
     }
@@ -1501,6 +1679,17 @@ fn no_modifiers(modifiers: KeyModifiers) -> bool {
 
 fn shifted(modifiers: KeyModifiers) -> bool {
     modifiers == KeyModifiers::SHIFT
+}
+
+fn shifted_symbol(event: &KeyEvent, symbol: char, base: char) -> bool {
+    matches!(
+        (event.code, event.modifiers),
+        (KeyCode::Char(character), KeyModifiers::NONE | KeyModifiers::SHIFT)
+            if character == symbol
+    ) || matches!(
+        (event.code, event.modifiers),
+        (KeyCode::Char(character), KeyModifiers::SHIFT) if character == base
+    )
 }
 
 /// Everything the task links to: the links Google attached to it (a Gmail
@@ -2477,10 +2666,144 @@ mod tests {
     }
 
     #[test]
+    fn less_than_unparents_the_selected_task() {
+        let (mut app, commands) = app_with_lists(&["a"]);
+        let _ = commands.recv().unwrap(); // startup refresh
+        app.sync = SyncState::Ready;
+        set_tasks(
+            &mut app,
+            "a",
+            vec![
+                task("parent", None, "1", false),
+                task("child", Some("parent"), "2", false),
+            ],
+            "child",
+        );
+
+        // Some enhanced terminals report the shifted symbol with no modifier.
+        app.on_key(KeyEvent::new(KeyCode::Char('<'), KeyModifiers::NONE));
+
+        assert_eq!(app.board.task("a", "child").unwrap().parent, None);
+        assert_eq!(app.columns[0].selected_id.as_deref(), Some("child"));
+        assert!(matches!(
+            commands.recv().unwrap(),
+            Cmd::Reparent {
+                list_id,
+                task_id,
+                parent: None,
+                ..
+            } if list_id == "a" && task_id == "child"
+        ));
+    }
+
+    #[test]
+    fn failed_reparent_rolls_back_and_enters_recovery() {
+        let (mut app, commands) = app_with_lists(&["a"]);
+        let _ = commands.recv().unwrap(); // startup refresh
+        app.sync = SyncState::Ready;
+        set_tasks(
+            &mut app,
+            "a",
+            vec![
+                task("parent", None, "1", false),
+                task("child", Some("parent"), "2", false),
+            ],
+            "child",
+        );
+
+        app.unparent_task();
+        let Cmd::Reparent { operation, .. } = commands.recv().unwrap() else {
+            panic!("expected reparent command");
+        };
+        app.on_msg(Msg::Reparented {
+            operation,
+            list_id: "a".into(),
+            task_id: "child".into(),
+            parent: None,
+            result: Err("offline".into()),
+        });
+
+        assert_eq!(
+            app.board
+                .task("a", "child")
+                .and_then(|task| task.parent.as_deref()),
+            Some("parent")
+        );
+        assert_eq!(app.columns[0].selected_id.as_deref(), Some("child"));
+        assert_eq!(app.sync, SyncState::Refreshing);
+        assert!(app
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("reparent failed")));
+    }
+
+    #[test]
+    fn greater_than_lists_only_available_parents_and_reparents() {
+        let (mut app, commands) = app_with_lists(&["a"]);
+        let _ = commands.recv().unwrap(); // startup refresh
+        app.sync = SyncState::Ready;
+        let assigned = Task {
+            assignment_info: Some(crate::api::AssignmentInfo {
+                link_to_task: "https://docs.google.com/document/d/1".into(),
+                surface_type: "DOCUMENT".into(),
+            }),
+            ..task("assigned", None, "5", false)
+        };
+        let hidden = Task {
+            hidden: true,
+            ..task("hidden", None, "6", false)
+        };
+        set_tasks(
+            &mut app,
+            "a",
+            vec![
+                task("selected", None, "1", false),
+                task("available", None, "2", false),
+                task("completed", None, "3", true),
+                task("subtask", Some("available"), "4", false),
+                assigned,
+                hidden,
+            ],
+            "selected",
+        );
+
+        // Other terminals retain the base key and report Shift separately.
+        app.on_key(KeyEvent::new(KeyCode::Char('.'), KeyModifiers::SHIFT));
+        let Interaction::Parent(picker) = &app.interaction else {
+            panic!("expected parent picker");
+        };
+        assert_eq!(
+            picker
+                .tasks
+                .iter()
+                .map(|task| task.id.as_str())
+                .collect::<Vec<_>>(),
+            ["available"]
+        );
+
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            app.board
+                .task("a", "selected")
+                .and_then(|task| task.parent.as_deref()),
+            Some("available")
+        );
+        assert!(matches!(
+            commands.recv().unwrap(),
+            Cmd::Reparent {
+                list_id,
+                task_id,
+                parent: Some(parent),
+                ..
+            } if list_id == "a" && task_id == "selected" && parent == "available"
+        ));
+    }
+
+    #[test]
     fn help_keys_lists_the_board_commands() {
         let keys: Vec<&str> = help_keys().iter().map(|(k, _)| *k).collect();
         for need in [
-            "h / l", "j / k", "Enter", "Space", "c", "C", "i", "d", "b", "m", "?", "q",
+            "h / l", "j / k", "Enter", "Space", "c", "C", "i", "d", "b", "m", "< / >", "?", "q",
         ] {
             assert!(
                 keys.iter().any(|k| k.contains(need)),
@@ -2502,7 +2825,33 @@ mod tests {
         assert!(matches!(app.interaction, Interaction::Idle));
 
         app.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert!(!app.quit);
+    }
+
+    #[test]
+    fn escape_never_quits_from_the_main_board() {
+        let (mut app, _commands) = app_with_lists(&["a"]);
+
+        app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!app.quit);
+
+        app.on_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
         assert!(app.quit);
+    }
+
+    #[test]
+    fn question_mark_works_with_both_terminal_key_reports() {
+        for event in [
+            KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('/'), KeyModifiers::SHIFT),
+        ] {
+            let (mut app, _commands) = app_with_lists(&["a"]);
+            app.on_key(event);
+            assert!(matches!(app.interaction, Interaction::Help));
+
+            app.on_key(event);
+            assert!(matches!(app.interaction, Interaction::Idle));
+        }
     }
 
     #[test]

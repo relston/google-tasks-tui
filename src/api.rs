@@ -80,7 +80,8 @@ pub struct TaskPatch {
 
 #[derive(Clone, Debug)]
 pub struct MoveTask {
-    pub destination_list: String,
+    /// `None` moves within the current list.
+    pub destination_list: Option<String>,
     pub parent: Option<String>,
     pub previous: Option<String>,
 }
@@ -323,8 +324,10 @@ impl Client {
         self.request(false, |agent, token| {
             let mut request = agent
                 .post(&url)
-                .header("Authorization", format!("Bearer {token}"))
-                .query("destinationTasklist", &movement.destination_list);
+                .header("Authorization", format!("Bearer {token}"));
+            if let Some(destination) = &movement.destination_list {
+                request = request.query("destinationTasklist", destination);
+            }
             if let Some(parent) = &movement.parent {
                 request = request.query("parent", parent);
             }
@@ -839,6 +842,35 @@ mod tests {
             serde_json::from_str::<Value>(&create.body).unwrap(),
             json!({"title": "New", "notes": "Notes"})
         );
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn same_list_move_omits_destination_tasklist() {
+        let (base, requests, server) = scripted(vec![Reply {
+            status: 200,
+            headers: vec![],
+            body: r#"{"id":"child","parent":"parent"}"#,
+        }]);
+        let mut client = test_client(&base, agent());
+
+        client
+            .move_task(
+                "list",
+                "child",
+                &MoveTask {
+                    destination_list: None,
+                    parent: Some("parent".into()),
+                    previous: None,
+                },
+            )
+            .unwrap();
+
+        let request = requests.recv().unwrap();
+        let url = url::Url::parse(&format!("{base}{}", request.target)).unwrap();
+        let query: HashMap<_, _> = url.query_pairs().into_owned().collect();
+        assert_eq!(query.get("parent").map(String::as_str), Some("parent"));
+        assert!(!query.contains_key("destinationTasklist"));
         server.join().unwrap();
     }
 
