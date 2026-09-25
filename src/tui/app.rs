@@ -42,24 +42,198 @@ pub(super) struct BrowseLink {
     pub(super) url: String,
 }
 
-/// Overlay listing everything the selected task links to.
-pub(super) struct Browse {
-    pub(super) links: Vec<BrowseLink>,
+/// One row of a modal list. `value` is what the caller acts on — a URL for
+/// Browse, a list id for Move, nothing for the Keyboard table — and `filter`
+/// is the lowercased haystack the `/` query matches against.
+pub(super) struct PickerRow {
+    pub(super) title: String,
+    pub(super) subtitle: Option<String>,
+    pub(super) value: String,
+    filter: String,
+}
+
+impl PickerRow {
+    pub(super) fn new(title: String, subtitle: Option<String>, value: String) -> Self {
+        let mut filter = title.to_lowercase();
+        if let Some(subtitle) = &subtitle {
+            filter.push(' ');
+            filter.push_str(&subtitle.to_lowercase());
+        }
+        Self {
+            title,
+            subtitle,
+            value,
+            filter,
+        }
+    }
+}
+
+/// A modal list with a `/` filter. One of these backs Browse, Move and the
+/// Keyboard overlay, so all three share layout, filtering and empty state.
+pub(super) struct Picker {
+    rows: Vec<PickerRow>,
+    /// Indexes into `rows` that survive the current query, in source order.
+    shown: Vec<usize>,
+    query: String,
+    /// `/` was pressed: keys go to the query instead of the list.
+    typing: bool,
+    /// The Keyboard table is a reference card, so it has nothing to select.
+    selectable: bool,
+    /// Render `title` as a key column beside `subtitle` rather than above it.
+    columns: bool,
     pub(super) state: ListState,
 }
 
-/// Overlay listing destination lists for a move.
-pub(super) struct MovePick {
-    pub(super) lists: Vec<TaskList>,
-    pub(super) state: ListState,
+impl Picker {
+    pub(super) fn new(rows: Vec<PickerRow>) -> Self {
+        Self {
+            shown: (0..rows.len()).collect(),
+            rows,
+            query: String::new(),
+            typing: false,
+            selectable: true,
+            columns: false,
+            state: ListState::default().with_selected(Some(0)),
+        }
+    }
+
+    pub(super) fn columns(mut self) -> Self {
+        self.columns = true;
+        self
+    }
+
+    pub(super) fn read_only(mut self) -> Self {
+        self.selectable = false;
+        self.state.select(None);
+        self
+    }
+
+    pub(super) fn rows(&self) -> impl Iterator<Item = &PickerRow> {
+        self.shown.iter().map(|index| &self.rows[*index])
+    }
+
+    pub(super) fn is_empty(&self) -> bool {
+        self.shown.is_empty()
+    }
+
+    pub(super) fn query(&self) -> &str {
+        &self.query
+    }
+
+    pub(super) fn typing(&self) -> bool {
+        self.typing
+    }
+
+    pub(super) fn is_columns(&self) -> bool {
+        self.columns
+    }
+
+    pub(super) fn selected(&self) -> Option<&PickerRow> {
+        self.state
+            .selected()
+            .and_then(|index| self.shown.get(index))
+            .map(|index| &self.rows[*index])
+    }
+
+    /// Every value still passing the filter, so "open all" opens what you
+    /// narrowed to rather than everything.
+    pub(super) fn values(&self) -> Vec<String> {
+        self.rows().map(|row| row.value.clone()).collect()
+    }
+
+    pub(super) fn step(&mut self, delta: isize) {
+        let Some(last) = self.shown.len().checked_sub(1) else {
+            return;
+        };
+        let current = self.state.selected().unwrap_or(0) as isize;
+        self.state
+            .select(Some((current + delta).clamp(0, last as isize) as usize));
+    }
+
+    /// Case-insensitive substring match over the title and subtitle. Selection
+    /// returns to the top, because the row it pointed at may be gone.
+    fn refilter(&mut self) {
+        let needle = self.query.to_lowercase();
+        self.shown = self
+            .rows
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| needle.is_empty() || row.filter.contains(&needle))
+            .map(|(index, _)| index)
+            .collect();
+        let has_selection = self.selectable && !self.shown.is_empty();
+        self.state.select(has_selection.then_some(0));
+    }
+}
+
+/// What a key meant to the overlay that owns the picker.
+enum PickerKey {
+    Consumed,
+    Close,
+    Accept,
+    AcceptAll,
+}
+
+/// Shared key handling for every picker overlay. While typing, printable keys
+/// extend the query and only the arrows move the selection, so `j` and `q`
+/// stay typeable.
+fn picker_key(picker: &mut Picker, k: KeyEvent) -> PickerKey {
+    if picker.typing {
+        return match k.code {
+            KeyCode::Esc if no_modifiers(k.modifiers) => {
+                picker.typing = false;
+                PickerKey::Consumed
+            }
+            KeyCode::Enter if k.modifiers == KeyModifiers::SHIFT => PickerKey::AcceptAll,
+            KeyCode::Enter if no_modifiers(k.modifiers) => PickerKey::Accept,
+            KeyCode::Backspace if no_modifiers(k.modifiers) => {
+                picker.query.pop();
+                picker.refilter();
+                PickerKey::Consumed
+            }
+            KeyCode::Down if no_modifiers(k.modifiers) => {
+                picker.step(1);
+                PickerKey::Consumed
+            }
+            KeyCode::Up if no_modifiers(k.modifiers) => {
+                picker.step(-1);
+                PickerKey::Consumed
+            }
+            KeyCode::Char(c) if typed(k.modifiers) => {
+                picker.query.push(c);
+                picker.refilter();
+                PickerKey::Consumed
+            }
+            _ => PickerKey::Consumed,
+        };
+    }
+    match k.code {
+        KeyCode::Esc | KeyCode::Char('q') if no_modifiers(k.modifiers) => PickerKey::Close,
+        KeyCode::Char('/') if typed(k.modifiers) => {
+            picker.typing = true;
+            PickerKey::Consumed
+        }
+        KeyCode::Char('j') | KeyCode::Down if no_modifiers(k.modifiers) => {
+            picker.step(1);
+            PickerKey::Consumed
+        }
+        KeyCode::Char('k') | KeyCode::Up if no_modifiers(k.modifiers) => {
+            picker.step(-1);
+            PickerKey::Consumed
+        }
+        KeyCode::Enter if k.modifiers == KeyModifiers::SHIFT => PickerKey::AcceptAll,
+        KeyCode::Enter if no_modifiers(k.modifiers) => PickerKey::Accept,
+        _ => PickerKey::Consumed,
+    }
 }
 
 /// Overlay listing possible parent tasks in the current list.
+/// Reparenting needs the task being moved as well as the candidates, so the
+/// picker carries the context the rows cannot.
 pub(super) struct ParentPick {
     pub(super) list_id: String,
     pub(super) task_id: String,
-    pub(super) tasks: Vec<Task>,
-    pub(super) state: ListState,
+    pub(super) picker: Picker,
 }
 
 /// The editable fields of the shelf.
@@ -223,10 +397,38 @@ pub(super) enum Interaction {
     Idle,
     Editing(Edit),
     ConfirmDelete(Pending),
-    Browse(Browse),
-    Move(MovePick),
+    Browse(Picker),
+    Move(Picker),
     Parent(ParentPick),
-    Help,
+    Help(Picker),
+}
+
+impl Interaction {
+    pub(super) fn picker(&self) -> Option<&Picker> {
+        match self {
+            Interaction::Browse(p) | Interaction::Move(p) | Interaction::Help(p) => Some(p),
+            Interaction::Parent(parent) => Some(&parent.picker),
+            _ => None,
+        }
+    }
+
+    pub(super) fn picker_mut(&mut self) -> Option<&mut Picker> {
+        match self {
+            Interaction::Browse(p) | Interaction::Move(p) | Interaction::Help(p) => Some(p),
+            Interaction::Parent(parent) => Some(&mut parent.picker),
+            _ => None,
+        }
+    }
+
+    /// The heading drawn in the overlay's border.
+    pub(super) fn picker_title(&self) -> &'static str {
+        match self {
+            Interaction::Browse(_) => " Browse Link ",
+            Interaction::Move(_) => " Move ",
+            Interaction::Parent(_) => " Select Parent ",
+            _ => " Keyboard ",
+        }
+    }
 }
 
 enum MutationContext {
@@ -1250,37 +1452,33 @@ impl App {
             return;
         }
         self.error = None;
-        self.interaction = Interaction::Browse(Browse {
-            links,
-            state: ListState::default().with_selected(Some(0)),
-        });
-    }
-
-    fn move_browse(&mut self, delta: isize) {
-        let Interaction::Browse(b) = &mut self.interaction else {
-            return;
-        };
-        let Some(last) = b.links.len().checked_sub(1) else {
-            return;
-        };
-        let cur = b.state.selected().unwrap_or(0) as isize;
-        b.state
-            .select(Some((cur + delta).clamp(0, last as isize) as usize));
+        // A named link shows its URL underneath; a bare one is its own label.
+        let rows = links
+            .into_iter()
+            .map(|link| match link.name {
+                Some(name) => PickerRow::new(name, Some(link.url.clone()), link.url),
+                None => PickerRow::new(link.url.clone(), None, link.url),
+            })
+            .collect();
+        self.interaction = Interaction::Browse(Picker::new(rows));
     }
 
     fn open_browse(&mut self, all: bool) {
-        let urls = {
-            let Interaction::Browse(b) = &self.interaction else {
+        let urls: Vec<String> = {
+            let Interaction::Browse(picker) = &self.interaction else {
                 return;
             };
-            if all {
-                b.links.iter().map(|l| l.url.clone()).collect()
-            } else {
-                let Some(i) = b.state.selected() else { return };
-                let Some(l) = b.links.get(i) else { return };
-                vec![l.url.clone()]
+            match all {
+                true => picker.values(),
+                false => picker
+                    .selected()
+                    .map(|row| vec![row.value.clone()])
+                    .unwrap_or_default(),
             }
         };
+        if urls.is_empty() {
+            return;
+        }
         for url in &urls {
             if let Err(error) = platform::open_url(url) {
                 self.error = Some(format!("could not open {url}: {error}"));
@@ -1314,42 +1512,29 @@ impl App {
             return;
         }
         self.error = None;
+        let rows = tasks
+            .into_iter()
+            .map(|task| PickerRow::new(title_of(&task).into_owned(), None, task.id))
+            .collect();
         self.interaction = Interaction::Parent(ParentPick {
             list_id: column.list.id.clone(),
             task_id: selected.task.id.clone(),
-            tasks,
-            state: ListState::default().with_selected(Some(0)),
+            picker: Picker::new(rows),
         });
-    }
-
-    fn step_parent(&mut self, delta: isize) {
-        let Interaction::Parent(picker) = &mut self.interaction else {
-            return;
-        };
-        let Some(last) = picker.tasks.len().checked_sub(1) else {
-            return;
-        };
-        let current = picker.state.selected().unwrap_or(0) as isize;
-        picker
-            .state
-            .select(Some((current + delta).clamp(0, last as isize) as usize));
     }
 
     fn confirm_parent(&mut self) {
         let selection = {
-            let Interaction::Parent(picker) = &self.interaction else {
+            let Interaction::Parent(parent) = &self.interaction else {
                 return;
             };
-            let Some(index) = picker.state.selected() else {
-                return;
-            };
-            let Some(parent) = picker.tasks.get(index) else {
+            let Some(row) = parent.picker.selected() else {
                 return;
             };
             (
-                picker.list_id.clone(),
-                picker.task_id.clone(),
-                parent.id.clone(),
+                parent.list_id.clone(),
+                parent.task_id.clone(),
+                row.value.clone(),
             )
         };
         self.interaction = Interaction::Idle;
@@ -1429,32 +1614,20 @@ impl App {
             return;
         }
         self.error = None;
-        self.interaction = Interaction::Move(MovePick {
-            lists,
-            state: ListState::default().with_selected(Some(0)),
-        });
-    }
-
-    fn step_move(&mut self, delta: isize) {
-        let Interaction::Move(m) = &mut self.interaction else {
-            return;
-        };
-        let Some(last) = m.lists.len().checked_sub(1) else {
-            return;
-        };
-        let cur = m.state.selected().unwrap_or(0) as isize;
-        m.state
-            .select(Some((cur + delta).clamp(0, last as isize) as usize));
+        let rows = lists
+            .into_iter()
+            .map(|list| PickerRow::new(clean(&list.title).into_owned(), None, list.id))
+            .collect();
+        self.interaction = Interaction::Move(Picker::new(rows));
     }
 
     fn confirm_move(&mut self) {
         let dest_id = {
-            let Interaction::Move(m) = &self.interaction else {
+            let Interaction::Move(picker) = &self.interaction else {
                 return;
             };
-            let Some(i) = m.state.selected() else { return };
-            let Some(list) = m.lists.get(i) else { return };
-            list.id.clone()
+            let Some(row) = picker.selected() else { return };
+            row.value.clone()
         };
         self.interaction = Interaction::Idle;
         let Some(src) = self.columns.get(self.focus) else {
@@ -1496,7 +1669,17 @@ impl App {
     }
 
     fn start_help(&mut self) {
-        self.interaction = Interaction::Help;
+        let rows = super::render::help_keys()
+            .into_iter()
+            .map(|(key, description)| {
+                PickerRow::new(
+                    key.to_string(),
+                    Some(description.to_string()),
+                    String::new(),
+                )
+            })
+            .collect();
+        self.interaction = Interaction::Help(Picker::new(rows).columns().read_only());
     }
 
     pub(super) fn on_key(&mut self, k: KeyEvent) {
@@ -1520,60 +1703,30 @@ impl App {
             }
             return;
         }
-        if matches!(self.interaction, Interaction::Browse(_)) {
-            match k.code {
-                KeyCode::Esc | KeyCode::Char('q') if no_modifiers(k.modifiers) => {
-                    self.interaction = Interaction::Idle
+        if self.interaction.picker().is_some() {
+            // `?` toggles the Keyboard overlay shut, but only when not typing,
+            // and only through the detection that copes with both key reports.
+            let close_on_question = matches!(self.interaction, Interaction::Help(_))
+                && shifted_symbol(&k, '?', '/')
+                && !self.interaction.picker().is_some_and(Picker::typing);
+            let outcome = match self.interaction.picker_mut() {
+                Some(picker) if !close_on_question => picker_key(picker, k),
+                _ => PickerKey::Close,
+            };
+            match outcome {
+                PickerKey::Consumed => {}
+                PickerKey::Close => self.interaction = Interaction::Idle,
+                PickerKey::Accept => match self.interaction {
+                    Interaction::Browse(_) => self.open_browse(false),
+                    Interaction::Move(_) => self.confirm_move(),
+                    Interaction::Parent(_) => self.confirm_parent(),
+                    _ => self.interaction = Interaction::Idle,
+                },
+                PickerKey::AcceptAll => {
+                    if matches!(self.interaction, Interaction::Browse(_)) {
+                        self.open_browse(true);
+                    }
                 }
-                KeyCode::Char('j') | KeyCode::Down if no_modifiers(k.modifiers) => {
-                    self.move_browse(1)
-                }
-                KeyCode::Char('k') | KeyCode::Up if no_modifiers(k.modifiers) => {
-                    self.move_browse(-1)
-                }
-                KeyCode::Enter if k.modifiers == KeyModifiers::SHIFT => self.open_browse(true),
-                KeyCode::Enter if no_modifiers(k.modifiers) => self.open_browse(false),
-                _ => {}
-            }
-            return;
-        }
-        if matches!(self.interaction, Interaction::Move(_)) {
-            match k.code {
-                KeyCode::Esc | KeyCode::Char('q') if no_modifiers(k.modifiers) => {
-                    self.interaction = Interaction::Idle
-                }
-                KeyCode::Char('j') | KeyCode::Down if no_modifiers(k.modifiers) => {
-                    self.step_move(1)
-                }
-                KeyCode::Char('k') | KeyCode::Up if no_modifiers(k.modifiers) => self.step_move(-1),
-                KeyCode::Enter if no_modifiers(k.modifiers) => self.confirm_move(),
-                _ => {}
-            }
-            return;
-        }
-        if matches!(self.interaction, Interaction::Parent(_)) {
-            match k.code {
-                KeyCode::Esc | KeyCode::Char('q') if no_modifiers(k.modifiers) => {
-                    self.interaction = Interaction::Idle
-                }
-                KeyCode::Char('j') | KeyCode::Down if no_modifiers(k.modifiers) => {
-                    self.step_parent(1)
-                }
-                KeyCode::Char('k') | KeyCode::Up if no_modifiers(k.modifiers) => {
-                    self.step_parent(-1)
-                }
-                KeyCode::Enter if no_modifiers(k.modifiers) => self.confirm_parent(),
-                _ => {}
-            }
-            return;
-        }
-        if matches!(self.interaction, Interaction::Help) {
-            match k.code {
-                KeyCode::Esc | KeyCode::Char('q') if no_modifiers(k.modifiers) => {
-                    self.interaction = Interaction::Idle
-                }
-                _ if shifted_symbol(&k, '?', '/') => self.interaction = Interaction::Idle,
-                _ => {}
             }
             return;
         }
@@ -1681,6 +1834,9 @@ fn shifted(modifiers: KeyModifiers) -> bool {
     modifiers == KeyModifiers::SHIFT
 }
 
+/// Crossterm synthesizes `SHIFT` for an uppercase letter but not for shifted
+/// punctuation, so a symbol key can arrive bare, shifted, or as the unshifted
+/// base key plus SHIFT depending on the terminal. Accept all three.
 fn shifted_symbol(event: &KeyEvent, symbol: char, base: char) -> bool {
     matches!(
         (event.code, event.modifiers),
@@ -1690,6 +1846,11 @@ fn shifted_symbol(event: &KeyEvent, symbol: char, base: char) -> bool {
         (event.code, event.modifiers),
         (KeyCode::Char(character), KeyModifiers::SHIFT) if character == base
     )
+}
+
+/// A printable key the user typed, with or without shift held.
+fn typed(modifiers: KeyModifiers) -> bool {
+    no_modifiers(modifiers) || modifiers == KeyModifiers::SHIFT
 }
 
 /// Everything the task links to: the links Google attached to it (a Gmail
@@ -2087,6 +2248,106 @@ mod tests {
             Some(1)
         );
         assert_ne!(app.columns[0].rows[0].task.title, "wrong response");
+    }
+
+    fn typed_keys(app: &mut App, keys: &str) {
+        for c in keys.chars() {
+            app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+    }
+
+    #[test]
+    fn slash_filters_a_picker_case_insensitively() {
+        let (mut app, _cmds) = app_with_lists(&["a"]);
+        app.interaction = Interaction::Move(Picker::new(vec![
+            PickerRow::new("Inbox".into(), None, "l1".into()),
+            PickerRow::new("Tinker Time".into(), None, "l2".into()),
+            PickerRow::new("Writing".into(), None, "l3".into()),
+        ]));
+
+        // Without a query every row is offered.
+        assert_eq!(app.interaction.picker().unwrap().rows().count(), 3);
+
+        app.on_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+        assert!(app.interaction.picker().unwrap().typing());
+        typed_keys(&mut app, "TIN");
+
+        // Substring, not fuzzy, and not anchored: "wriTINg" matches too. Case
+        // is folded on both sides.
+        let picker = app.interaction.picker().unwrap();
+        assert_eq!(picker.query(), "TIN");
+        let titles: Vec<&str> = picker.rows().map(|row| row.title.as_str()).collect();
+        assert_eq!(titles, ["Tinker Time", "Writing"]);
+        // Selection follows the filter rather than pointing at a hidden row.
+        assert_eq!(picker.selected().map(|row| row.value.as_str()), Some("l2"));
+
+        typed_keys(&mut app, "ker");
+        let picker = app.interaction.picker().unwrap();
+        let titles: Vec<&str> = picker.rows().map(|row| row.title.as_str()).collect();
+        assert_eq!(titles, ["Tinker Time"]);
+
+        // Backspace widens it again.
+        for _ in 0..6 {
+            app.on_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        }
+        assert_eq!(app.interaction.picker().unwrap().rows().count(), 3);
+    }
+
+    #[test]
+    fn a_filter_that_matches_nothing_has_no_selection_to_act_on() {
+        let (mut app, _cmds) = app_with_lists(&["a"]);
+        app.interaction = Interaction::Move(Picker::new(vec![PickerRow::new(
+            "Inbox".into(),
+            None,
+            "l1".into(),
+        )]));
+        app.on_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+        typed_keys(&mut app, "zzz");
+        let picker = app.interaction.picker().unwrap();
+        assert!(picker.is_empty());
+        assert!(picker.selected().is_none());
+        // Enter cannot act on nothing, so the overlay simply stays put.
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(app.interaction, Interaction::Move(_)));
+    }
+
+    #[test]
+    fn letters_type_into_the_query_instead_of_closing_the_picker() {
+        let (mut app, _cmds) = app_with_lists(&["a"]);
+        app.interaction = Interaction::Move(Picker::new(vec![PickerRow::new(
+            "quilting".into(),
+            None,
+            "l1".into(),
+        )]));
+        app.on_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+        // `q` and `j` would close or move the list when not filtering.
+        typed_keys(&mut app, "qj");
+        assert!(matches!(app.interaction, Interaction::Move(_)));
+        assert_eq!(app.interaction.picker().unwrap().query(), "qj");
+
+        // Esc leaves the filter but keeps the overlay and the query.
+        app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!app.interaction.picker().unwrap().typing());
+        assert_eq!(app.interaction.picker().unwrap().query(), "qj");
+        // A second Esc closes it.
+        app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(matches!(app.interaction, Interaction::Idle));
+    }
+
+    #[test]
+    fn the_keyboard_table_filters_but_never_selects() {
+        let (mut app, _cmds) = app_with_lists(&["a"]);
+        app.on_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
+        assert!(app.interaction.picker().unwrap().selected().is_none());
+        app.on_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+        typed_keys(&mut app, "subtask");
+        let picker = app.interaction.picker().unwrap();
+        assert_eq!(picker.rows().count(), 1);
+        assert_eq!(picker.rows().next().unwrap().title, "C");
+        assert!(
+            picker.selected().is_none(),
+            "the reference card has no action"
+        );
     }
 
     #[test]
@@ -2774,9 +3035,9 @@ mod tests {
         };
         assert_eq!(
             picker
-                .tasks
-                .iter()
-                .map(|task| task.id.as_str())
+                .picker
+                .rows()
+                .map(|row| row.value.as_str())
                 .collect::<Vec<_>>(),
             ["available"]
         );
@@ -2847,7 +3108,7 @@ mod tests {
         ] {
             let (mut app, _commands) = app_with_lists(&["a"]);
             app.on_key(event);
-            assert!(matches!(app.interaction, Interaction::Help));
+            assert!(matches!(app.interaction, Interaction::Help(_)));
 
             app.on_key(event);
             assert!(matches!(app.interaction, Interaction::Idle));

@@ -78,8 +78,16 @@ available as subcommands for scripts and agents (`google-tasks-tui lists`,
   top-level task opens **Select Parent**, listing the other available open
   top-level tasks in that list; `j`/`k` choose one and `Enter` reparents.
   Assigned, hidden, completed, nested, and self candidates are excluded.
-- `?` opens a static **Keyboard** overlay listing the board commands;
-  `Esc`/`q`/`?` close it.
+- `?` opens a **Keyboard** overlay listing the board commands; `Esc`/`q`/`?`
+  close it.
+- Every overlay — Browse Link, Move, Select Parent, Keyboard — filters. Press
+  `/` and type: the list narrows as you go and the query shows in the bottom
+  border. It is a plain case-insensitive substring match on what you can see,
+  so `tin` finds both "Tinker Time" and "Wri**tin**g". While filtering, `↑`/`↓`
+  move and `Enter` picks; letters go to the query, so `q` and `j` type rather
+  than closing or moving. `Esc` leaves the filter and keeps the overlay, `Esc`
+  again closes it. On Browse Link, `Shift+Enter` opens everything still
+  matching rather than everything on the task.
 - API calls run on a background thread, so the UI never blocks. Lists fill in
   as they load. One write runs at a time; navigation stays available while
   other mutation keys wait. If you quit while a write is pending, the app
@@ -251,6 +259,7 @@ requires `--yes` because Google removes every task in that list.
 | `r`            | Refresh from Google             |
 | `t`            | Toggle transparent background   |
 | `?`            | List the keyboard commands      |
+| `/`            | Filter the open overlay          |
 | `Esc`          | Close or cancel the current view |
 | `q`            | Quit                            |
 

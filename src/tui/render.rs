@@ -1,7 +1,7 @@
 use chrono::{DateTime, Datelike, Local, NaiveDate};
 use ratatui::{
     layout::{Constraint, Layout, Rect},
-    style::{Color, Modifier, Style, Stylize},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, BorderType, Clear, HighlightSpacing, List, ListItem, Padding, Paragraph},
     Frame,
@@ -12,7 +12,7 @@ use crate::api::Task;
 use crate::board::Row;
 use crate::theme::Theme;
 
-use super::app::{App, Edit, EditTarget, FieldId, Interaction, LoadState, SyncState};
+use super::app::{App, Edit, EditTarget, FieldId, Interaction, LoadState, Picker, SyncState};
 use super::text::{clean, cursor_rc, ellipsize, pad_to_width, title_of, wrap};
 
 const COL_MIN: u16 = 30;
@@ -53,21 +53,20 @@ impl App {
         f.render_widget(Line::from(head), header);
 
         self.draw_board(f, body, &t);
-        self.draw_browse(f, body, &t);
-        self.draw_move(f, body, &t);
-        self.draw_parent(f, body, &t);
-        self.draw_help(f, body, &t);
+        self.draw_picker(f, body, &t);
 
         let hints = if self.quitting {
             " waiting for pending saves… q again to force quit"
+        } else if self.interaction.picker().is_some_and(Picker::typing) {
+            " type to filter · ↑/↓ move · ⏎ pick · Esc stop filtering"
         } else if matches!(self.interaction, Interaction::Browse(_)) {
-            " j/k · ⏎ open · ⇧⏎ all · Esc close"
+            " j/k · ⏎ open · ⇧⏎ all · / filter · Esc close"
         } else if matches!(self.interaction, Interaction::Move(_)) {
-            " j/k · ⏎ move · Esc close"
+            " j/k · ⏎ move · / filter · Esc close"
         } else if matches!(self.interaction, Interaction::Parent(_)) {
-            " j/k · ⏎ choose parent · Esc close"
-        } else if matches!(self.interaction, Interaction::Help) {
-            " Esc close"
+            " j/k · ⏎ choose parent · / filter · Esc close"
+        } else if matches!(self.interaction, Interaction::Help(_)) {
+            " / filter · Esc close"
         } else if self.is_creating() {
             " ⏎ create · Esc cancel"
         } else if self.edit().is_some_and(|e| e.field() == FieldId::Notes) {
@@ -471,53 +470,90 @@ impl App {
         }
     }
 
-    fn draw_browse(&mut self, f: &mut Frame, area: Rect, t: &Theme) {
+    /// Every modal list draws through here: Browse, Move and Keyboard differ
+    /// only in their rows, so layout, filtering and the empty state are shared.
+    fn draw_picker(&mut self, f: &mut Frame, area: Rect, t: &Theme) {
         let bg = self.bg(t.bg);
         let wrap_titles = self.config.wrap_titles;
-        let Interaction::Browse(browse) = &mut self.interaction else {
+        let title = self.interaction.picker_title();
+        let Some(picker) = self.interaction.picker_mut() else {
             return;
         };
-        let rect = modal_rect(area, 80, 3);
+
+        let max_width = if picker.is_columns() { 56 } else { 80 };
         // Two borders and the selection marker eat into the usable width.
-        let text_w = (rect.width as usize).saturating_sub(4).max(1);
-        let items: Vec<ListItem> = browse
-            .links
-            .iter()
-            .map(|l| {
-                // A bare URL from the notes has no title to put above it.
-                let Some(name) = &l.name else {
-                    return ListItem::new(Line::styled(
-                        ellipsize(&l.url, text_w),
-                        Style::default().fg(t.blue),
-                    ));
-                };
-                let style = Style::default().fg(t.fg).bold();
-                let mut lines: Vec<Line> = if wrap_titles {
-                    wrap(name, text_w)
-                        .into_iter()
-                        .map(|(from, to)| Line::styled(name[from..to].to_string(), style))
-                        .collect()
-                } else {
-                    vec![Line::styled(ellipsize(name, text_w), style)]
-                };
-                // The URL stays on one line: wrapping one only makes it harder
-                // to read, and it is a subtitle here, not the label.
-                lines.push(Line::styled(
-                    format!("  {}", ellipsize(&l.url, text_w.saturating_sub(2))),
-                    Style::default().fg(t.muted),
-                ));
-                ListItem::new(lines)
-            })
-            .collect();
-        let rows: u16 = items.iter().map(|i| i.height() as u16).sum();
-        let rect = modal_rect(area, 80, rows.saturating_add(2));
+        let text_w = (area.width.min(max_width) as usize)
+            .saturating_sub(4)
+            .max(1);
+        let key_w = picker
+            .rows()
+            .map(|row| UnicodeWidthStr::width(row.title.as_str()))
+            .max()
+            .unwrap_or(0);
+
+        let items: Vec<ListItem> = if picker.is_empty() {
+            vec![ListItem::new(Line::styled(
+                " no matches",
+                Style::default().fg(t.muted),
+            ))]
+        } else {
+            picker
+                .rows()
+                .map(|row| {
+                    if picker.is_columns() {
+                        return ListItem::new(Line::from(vec![
+                            Span::styled(
+                                format!(" {:<key_w$}  ", row.title),
+                                Style::default().fg(t.accent).bold(),
+                            ),
+                            Span::styled(
+                                row.subtitle.clone().unwrap_or_default(),
+                                Style::default().fg(t.fg),
+                            ),
+                        ]));
+                    }
+                    let style = match row.subtitle {
+                        // A bare URL is the label itself, so it keeps the link color.
+                        None => Style::default().fg(t.blue),
+                        Some(_) => Style::default().fg(t.fg).bold(),
+                    };
+                    let mut lines: Vec<Line> = if wrap_titles {
+                        wrap(&row.title, text_w)
+                            .into_iter()
+                            .map(|(from, to)| Line::styled(row.title[from..to].to_string(), style))
+                            .collect()
+                    } else {
+                        vec![Line::styled(ellipsize(&row.title, text_w), style)]
+                    };
+                    if let Some(subtitle) = &row.subtitle {
+                        // The subtitle stays on one line: wrapping a URL only
+                        // makes it harder to read, and it is not the label.
+                        lines.push(Line::styled(
+                            format!("  {}", ellipsize(subtitle, text_w.saturating_sub(2))),
+                            Style::default().fg(t.muted),
+                        ));
+                    }
+                    ListItem::new(lines)
+                })
+                .collect()
+        };
+
+        let rows: u16 = items.iter().map(|item| item.height() as u16).sum();
+        let rect = modal_rect(area, max_width, rows.saturating_add(2));
+        let filter = match (picker.typing(), picker.query().is_empty()) {
+            (true, _) => format!(" / {}▏", picker.query()),
+            (false, false) => format!(" / {} ", picker.query()),
+            (false, true) => " / filter ".to_string(),
+        };
+        let filter_style = match picker.typing() || !picker.query().is_empty() {
+            true => Style::default().fg(t.yellow),
+            false => Style::default().fg(t.muted),
+        };
         let block = Block::bordered()
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(t.accent))
-            .title(Line::styled(
-                " Browse Link ",
-                Style::default().fg(t.accent).bold(),
-            ))
+            .title(Line::styled(title, Style::default().fg(t.accent).bold()))
+            .title_bottom(Line::styled(filter, filter_style))
             .style(Style::default().bg(bg));
         let list = List::new(items)
             .block(block)
@@ -530,116 +566,7 @@ impl App {
             .highlight_symbol("▌")
             .highlight_spacing(HighlightSpacing::Always);
         f.render_widget(Clear, rect); // a Block restyles cells but leaves their text
-        f.render_stateful_widget(list, rect, &mut browse.state);
-    }
-
-    fn draw_move(&mut self, f: &mut Frame, area: Rect, t: &Theme) {
-        let bg = self.bg(t.bg);
-        let Interaction::Move(pick) = &mut self.interaction else {
-            return;
-        };
-        let rect = modal_rect(area, 72, pick.lists.len() as u16 + 2);
-        let block = Block::bordered()
-            .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(t.accent))
-            .title(Line::styled(" Move ", Style::default().fg(t.accent).bold()))
-            .style(Style::default().bg(bg));
-        let items: Vec<ListItem> = pick
-            .lists
-            .iter()
-            .map(|l| {
-                ListItem::new(Line::styled(
-                    clean(&l.title).into_owned(),
-                    Style::default().fg(t.fg),
-                ))
-            })
-            .collect();
-        let list = List::new(items)
-            .block(block)
-            .highlight_style(
-                Style::default()
-                    .fg(t.sel_fg)
-                    .bg(t.sel_bg)
-                    .add_modifier(Modifier::BOLD),
-            )
-            .highlight_symbol("▌")
-            .highlight_spacing(HighlightSpacing::Always);
-        f.render_widget(Clear, rect);
-        f.render_stateful_widget(list, rect, &mut pick.state);
-    }
-
-    fn draw_parent(&mut self, f: &mut Frame, area: Rect, t: &Theme) {
-        let bg = self.bg(t.bg);
-        let Interaction::Parent(picker) = &mut self.interaction else {
-            return;
-        };
-        let rect = modal_rect(area, 72, picker.tasks.len() as u16 + 2);
-        let block = Block::bordered()
-            .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(t.accent))
-            .title(Line::styled(
-                " Select Parent ",
-                Style::default().fg(t.accent).bold(),
-            ))
-            .style(Style::default().bg(bg));
-        let items: Vec<ListItem> = picker
-            .tasks
-            .iter()
-            .map(|task| {
-                ListItem::new(Line::styled(
-                    title_of(task).into_owned(),
-                    Style::default().fg(t.fg),
-                ))
-            })
-            .collect();
-        let list = List::new(items)
-            .block(block)
-            .highlight_style(
-                Style::default()
-                    .fg(t.sel_fg)
-                    .bg(t.sel_bg)
-                    .add_modifier(Modifier::BOLD),
-            )
-            .highlight_symbol("▌")
-            .highlight_spacing(HighlightSpacing::Always);
-        f.render_widget(Clear, rect);
         f.render_stateful_widget(list, rect, &mut picker.state);
-    }
-
-    fn draw_help(&mut self, f: &mut Frame, area: Rect, t: &Theme) {
-        let bg = self.bg(t.bg);
-        if !matches!(self.interaction, Interaction::Help) {
-            return;
-        }
-        let keys = help_keys();
-        let key_w = keys
-            .iter()
-            .map(|(key, _)| UnicodeWidthStr::width(*key))
-            .max()
-            .unwrap_or(0);
-        let rect = modal_rect(area, 56, keys.len() as u16 + 2);
-        let block = Block::bordered()
-            .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(t.accent))
-            .title(Line::styled(
-                " Keyboard ",
-                Style::default().fg(t.accent).bold(),
-            ))
-            .style(Style::default().bg(bg));
-        let items: Vec<ListItem> = keys
-            .iter()
-            .map(|(k, d)| {
-                ListItem::new(Line::from(vec![
-                    Span::styled(
-                        format!(" {k:<key_w$}  "),
-                        Style::default().fg(t.accent).bold(),
-                    ),
-                    Span::styled(*d, Style::default().fg(t.fg)),
-                ]))
-            })
-            .collect();
-        f.render_widget(Clear, rect);
-        f.render_widget(List::new(items).block(block), rect);
     }
 }
 
@@ -800,11 +727,10 @@ mod render_tests {
     use crate::api::{Task, TaskList};
     use crate::cache;
     use crate::config::Config;
-    use crate::tui::app::{App, Browse, BrowseLink, Interaction, MovePick, ParentPick, SyncState};
+    use crate::tui::app::{App, Interaction, ParentPick, Picker, PickerRow, SyncState};
     use ratatui::{
         backend::TestBackend,
         crossterm::event::{KeyCode, KeyEvent, KeyModifiers},
-        widgets::ListState,
         Terminal,
     };
     use std::sync::mpsc;
@@ -1027,26 +953,21 @@ mod render_tests {
     #[test]
     fn every_overlay_renders_on_a_cleared_bounded_surface() {
         let mut browse = one_list_app();
-        browse.interaction = Interaction::Browse(Browse {
-            links: vec![BrowseLink {
-                name: Some("Example".into()),
-                url: "https://example.test".into(),
-            }],
-            state: ListState::default().with_selected(Some(0)),
-        });
+        browse.interaction = Interaction::Browse(Picker::new(vec![PickerRow::new(
+            "Example".into(),
+            Some("https://example.test".into()),
+            "https://example.test".into(),
+        )]));
         let screen = render_app(&mut browse, 50, 14);
         assert!(screen.contains("Browse Link"), "{screen}");
         assert!(screen.contains("Example"), "{screen}");
 
         let mut movement = one_list_app();
-        movement.interaction = Interaction::Move(MovePick {
-            lists: vec![TaskList {
-                id: "destination".into(),
-                title: "Destination".into(),
-                ..Default::default()
-            }],
-            state: ListState::default().with_selected(Some(0)),
-        });
+        movement.interaction = Interaction::Move(Picker::new(vec![PickerRow::new(
+            "Destination".into(),
+            None,
+            "destination".into(),
+        )]));
         let screen = render_app(&mut movement, 50, 14);
         assert!(screen.contains("Move"), "{screen}");
         assert!(screen.contains("Destination"), "{screen}");
@@ -1055,19 +976,29 @@ mod render_tests {
         parent.interaction = Interaction::Parent(ParentPick {
             list_id: "list".into(),
             task_id: "task".into(),
-            tasks: vec![Task {
-                id: "parent".into(),
-                title: "Parent task".into(),
-                ..Default::default()
-            }],
-            state: ListState::default().with_selected(Some(0)),
+            picker: Picker::new(vec![PickerRow::new(
+                "Parent task".into(),
+                None,
+                "parent".into(),
+            )]),
         });
         let screen = render_app(&mut parent, 50, 14);
         assert!(screen.contains("Select Parent"), "{screen}");
         assert!(screen.contains("Parent task"), "{screen}");
 
         let mut help = one_list_app();
-        help.interaction = Interaction::Help;
+        help.interaction = Interaction::Help(
+            Picker::new(
+                super::help_keys()
+                    .into_iter()
+                    .map(|(key, description)| {
+                        PickerRow::new(key.into(), Some(description.into()), String::new())
+                    })
+                    .collect(),
+            )
+            .columns()
+            .read_only(),
+        );
         let screen = render_app(&mut help, 50, 20);
         assert!(screen.contains("Keyboard"), "{screen}");
         assert!(screen.contains("new task"), "{screen}");

@@ -13,6 +13,12 @@ Work directly on `main`; do not create feature branches.
 - [`src/tui/app.rs`](src/tui/app.rs) owns pure UI transitions and optimistic
   rollback context. [`src/tui/worker.rs`](src/tui/worker.rs) owns blocking API
   execution. [`src/tui/render.rs`](src/tui/render.rs) only lays out and draws.
+- `Picker` backs every modal list (Browse, Move, Keyboard). Rows carry display
+  text plus an opaque `value`, so one `draw_picker` and one `picker_key` serve
+  all three. `/` filters by case-insensitive substring over title and subtitle;
+  selection resets to the top on every query change so it can never point at a
+  hidden row. Keep presentation out of app state: rows hold `String`s, not
+  `Line`s.
 - [`src/paths.rs`](src/paths.rs) owns path discovery. Inject `Paths` or explicit
   roots in tests; never mutate process-wide environment variables.
 - [`src/storage.rs`](src/storage.rs) is the only private atomic-write
