@@ -1506,6 +1506,18 @@ impl App {
             self.error = Some("assigned tasks cannot become subtasks".into());
             return;
         }
+        if column
+            .rows
+            .iter()
+            .any(|row| row.task.parent.as_deref() == Some(selected.task.id.as_str()))
+        {
+            self.error = Some("a task with subtasks cannot become a subtask".into());
+            return;
+        }
+        if selected.task.hidden && selected.task.is_done() {
+            self.error = Some("a completed hidden task cannot become a subtask".into());
+            return;
+        }
         let tasks = eligible_parents(&column.rows, &selected.task.id);
         if tasks.is_empty() {
             self.error = Some("no available parent tasks in this list".into());
@@ -1538,7 +1550,7 @@ impl App {
             )
         };
         self.interaction = Interaction::Idle;
-        self.reparent_task(&selection.0, &selection.1, Some(selection.2));
+        self.reparent_task(&selection.0, &selection.1, Some(selection.2), None);
     }
 
     fn unparent_task(&mut self) {
@@ -1557,10 +1569,17 @@ impl App {
         }
         let list_id = column.list.id.clone();
         let task_id = selected.task.id.clone();
-        self.reparent_task(&list_id, &task_id, None);
+        let previous = selected.task.parent.clone();
+        self.reparent_task(&list_id, &task_id, None, previous);
     }
 
-    fn reparent_task(&mut self, list_id: &str, task_id: &str, parent: Option<String>) {
+    fn reparent_task(
+        &mut self,
+        list_id: &str,
+        task_id: &str,
+        parent: Option<String>,
+        previous: Option<String>,
+    ) {
         let Some(before) = self.board.task(list_id, task_id).cloned() else {
             self.error = Some("task disappeared before it could move".into());
             return;
@@ -1583,6 +1602,7 @@ impl App {
                 list_id,
                 task_id,
                 parent,
+                previous,
             },
         );
     }
@@ -2952,8 +2972,9 @@ mod tests {
                 list_id,
                 task_id,
                 parent: None,
+                previous: Some(previous),
                 ..
-            } if list_id == "a" && task_id == "child"
+            } if list_id == "a" && task_id == "child" && previous == "parent"
         ));
     }
 
@@ -3058,6 +3079,36 @@ mod tests {
                 ..
             } if list_id == "a" && task_id == "selected" && parent == "available"
         ));
+    }
+
+    #[test]
+    fn tasks_with_children_or_completed_hidden_tasks_cannot_become_subtasks() {
+        for selected in ["has-children", "completed-hidden"] {
+            let (mut app, _commands) = app_with_lists(&["a"]);
+            app.sync = SyncState::Ready;
+            set_tasks(
+                &mut app,
+                "a",
+                vec![
+                    task("has-children", None, "1", false),
+                    task("child", Some("has-children"), "2", false),
+                    Task {
+                        hidden: true,
+                        ..task("completed-hidden", None, "3", true)
+                    },
+                    task("available", None, "4", false),
+                ],
+                selected,
+            );
+
+            app.start_parent_pick();
+
+            assert!(matches!(app.interaction, Interaction::Idle));
+            assert!(app
+                .error
+                .as_deref()
+                .is_some_and(|error| { error.contains("cannot become a subtask") }));
+        }
     }
 
     #[test]

@@ -78,6 +78,8 @@ available as subcommands for scripts and agents (`google-tasks-tui lists`,
   top-level task opens **Select Parent**, listing the other available open
   top-level tasks in that list; `j`/`k` choose one and `Enter` reparents.
   Assigned, hidden, completed, nested, and self candidates are excluded.
+  A task that already owns subtasks, or is completed and hidden, cannot itself
+  become a subtask. Promoting a task places it after its former parent.
 - `?` opens a **Keyboard** overlay listing the board commands; `Esc`/`q`/`?`
   close it.
 - Every overlay — Browse Link, Move, Select Parent, Keyboard — filters. Press

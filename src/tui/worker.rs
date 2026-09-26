@@ -37,6 +37,7 @@ pub(super) enum Cmd {
         list_id: String,
         task_id: String,
         parent: Option<String>,
+        previous: Option<String>,
     },
 }
 
@@ -181,6 +182,7 @@ pub(super) fn worker<A: TasksApi>(mut client: A, commands: Receiver<Cmd>, output
                 list_id,
                 task_id,
                 parent,
+                previous,
             } => output.send(Msg::Reparented {
                 operation,
                 result: client
@@ -190,7 +192,7 @@ pub(super) fn worker<A: TasksApi>(mut client: A, commands: Receiver<Cmd>, output
                         &MoveTask {
                             destination_list: None,
                             parent: parent.clone(),
-                            previous: None,
+                            previous,
                         },
                     )
                     .map_err(|error| error.to_string()),
@@ -468,7 +470,7 @@ mod tests {
     }
 
     #[test]
-    fn reparent_uses_a_same_list_move_and_preserves_context() {
+    fn unparent_uses_previous_sibling_and_preserves_context() {
         let fake = Fake::default();
         let message = run_one(
             fake.clone(),
@@ -476,11 +478,12 @@ mod tests {
                 operation: 7,
                 list_id: "list".into(),
                 task_id: "child".into(),
-                parent: Some("parent".into()),
+                parent: None,
+                previous: Some("former-parent".into()),
             },
         );
 
-        assert_eq!(fake.calls(), ["move:list:child::parent:"]);
+        assert_eq!(fake.calls(), ["move:list:child:::former-parent"]);
         let Msg::Reparented {
             operation,
             list_id,
@@ -494,8 +497,8 @@ mod tests {
         assert_eq!(operation, 7);
         assert_eq!(list_id, "list");
         assert_eq!(task_id, "child");
-        assert_eq!(parent.as_deref(), Some("parent"));
-        assert_eq!(result.unwrap().parent.as_deref(), Some("parent"));
+        assert_eq!(parent, None);
+        assert_eq!(result.unwrap().parent, None);
     }
 
     #[test]

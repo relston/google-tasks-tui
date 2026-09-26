@@ -45,7 +45,9 @@ Work directly on `main`; do not create feature branches.
 - Same-list reparenting uses `tasks.move` without `destinationTasklist`.
   Parent candidates are other open top-level tasks that Google permits as
   parents; optimistic parent changes retain rollback context and task-ID
-  selection.
+  selection. Tasks with children and completed-hidden tasks cannot become
+  subtasks. Unparenting sets `previous` to the former parent so promotion does
+  not jump to the top of the list.
 - Bound all network operations. Retry only safe reads for 429/5xx, honor
   `Retry-After`, and retry at most once after an unexpected 401 refresh.
 - Keep terminal text grapheme-aware and terminal-cell-aware. Sanitize controls
