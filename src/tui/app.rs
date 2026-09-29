@@ -13,6 +13,7 @@ use crate::board::ordered as order;
 use crate::board::{Board, Row};
 use crate::cache;
 use crate::config::Config;
+use crate::keybindings::{Action, BindingContext, KeyResolution, Keymap};
 use crate::paths::Paths;
 use crate::platform::{self, Clipboard};
 use crate::presentation::{md_yank, normalize_title, urls_in};
@@ -174,32 +175,34 @@ enum PickerKey {
     AcceptAll,
 }
 
-/// Shared key handling for every picker overlay. While typing, printable keys
-/// extend the query and only the arrows move the selection, so `j` and `q`
-/// stay typeable.
-fn picker_key(picker: &mut Picker, k: KeyEvent) -> PickerKey {
+/// Apply an already-resolved picker action. While filtering, unmatched
+/// printable keys extend the query, so command letters remain typeable.
+fn picker_key(picker: &mut Picker, action: Option<Action>, k: KeyEvent) -> PickerKey {
     if picker.typing {
-        return match k.code {
-            KeyCode::Esc if no_modifiers(k.modifiers) => {
+        return match action {
+            Some(Action::StopFilter) => {
                 picker.typing = false;
                 PickerKey::Consumed
             }
-            KeyCode::Enter if k.modifiers == KeyModifiers::SHIFT => PickerKey::AcceptAll,
-            KeyCode::Enter if no_modifiers(k.modifiers) => PickerKey::Accept,
-            KeyCode::Backspace if no_modifiers(k.modifiers) => {
+            Some(Action::FilterAcceptAll) => PickerKey::AcceptAll,
+            Some(Action::FilterAccept) => PickerKey::Accept,
+            Some(Action::FilterBackspace) => {
                 picker.query.pop();
                 picker.refilter();
                 PickerKey::Consumed
             }
-            KeyCode::Down if no_modifiers(k.modifiers) => {
+            Some(Action::FilterNext) => {
                 picker.step(1);
                 PickerKey::Consumed
             }
-            KeyCode::Up if no_modifiers(k.modifiers) => {
+            Some(Action::FilterPrevious) => {
                 picker.step(-1);
                 PickerKey::Consumed
             }
-            KeyCode::Char(c) if typed(k.modifiers) => {
+            None if matches!(k.code, KeyCode::Char(_)) && typed(k.modifiers) => {
+                let KeyCode::Char(c) = k.code else {
+                    unreachable!()
+                };
                 picker.query.push(c);
                 picker.refilter();
                 PickerKey::Consumed
@@ -207,22 +210,22 @@ fn picker_key(picker: &mut Picker, k: KeyEvent) -> PickerKey {
             _ => PickerKey::Consumed,
         };
     }
-    match k.code {
-        KeyCode::Esc | KeyCode::Char('q') if no_modifiers(k.modifiers) => PickerKey::Close,
-        KeyCode::Char('/') if typed(k.modifiers) => {
+    match action {
+        Some(Action::ClosePicker) => PickerKey::Close,
+        Some(Action::StartFilter) => {
             picker.typing = true;
             PickerKey::Consumed
         }
-        KeyCode::Char('j') | KeyCode::Down if no_modifiers(k.modifiers) => {
+        Some(Action::PickerNext) => {
             picker.step(1);
             PickerKey::Consumed
         }
-        KeyCode::Char('k') | KeyCode::Up if no_modifiers(k.modifiers) => {
+        Some(Action::PickerPrevious) => {
             picker.step(-1);
             PickerKey::Consumed
         }
-        KeyCode::Enter if k.modifiers == KeyModifiers::SHIFT => PickerKey::AcceptAll,
-        KeyCode::Enter if no_modifiers(k.modifiers) => PickerKey::Accept,
+        Some(Action::PickerAcceptAll) => PickerKey::AcceptAll,
+        Some(Action::PickerAccept) => PickerKey::Accept,
         _ => PickerKey::Consumed,
     }
 }
@@ -509,6 +512,7 @@ impl Column {
 
 pub(super) struct App {
     pub(super) config: Config,
+    pub(super) keymap: Keymap<Action>,
     pub(super) theme: Theme,
     pub(super) fingerprint: theme::Fingerprint,
     pub(super) transparent: bool,
@@ -563,6 +567,12 @@ impl App {
         cache_meta: cache::Meta,
         warning: Option<String>,
     ) -> Self {
+        let (keymap, key_diagnostics) = config.keymap();
+        let key_warning = (!key_diagnostics.is_empty()).then(|| key_diagnostics.join("; "));
+        let warning = match (warning, key_warning) {
+            (Some(existing), Some(keys)) => Some(format!("{existing}; {keys}")),
+            (warning, None) | (None, warning) => warning,
+        };
         // Paint the last known board straight away; the sync replaces it.
         let board = Board::from_cache(cached);
         let columns = board
@@ -581,6 +591,7 @@ impl App {
             .collect();
         let mut app = Self {
             config,
+            keymap,
             theme: theme::load(),
             fingerprint: theme::fingerprint(),
             transparent: false,
@@ -598,14 +609,14 @@ impl App {
             sync: SyncState::Cached,
             next_operation: 0,
             pending_operation: None,
-            error: warning,
+            error: None,
             notice: None,
             cmds,
             quitting: false,
             force_quit: false,
             quit: false,
         };
-        app.refresh();
+        app.begin_refresh(warning);
         app
     }
 
@@ -1019,11 +1030,13 @@ impl App {
         self.send_patch(list_id, task_id, fields, before);
     }
 
-    /// Ask before deleting; `confirm_delete` does the work on "y".
+    /// Ask before deleting; `confirm_delete` does the work after the configured
+    /// confirmation key.
     fn ask_delete(&mut self) {
         if !self.writable() {
             return;
         }
+        let confirm = self.keymap.labels_for(Action::ConfirmDelete).join("/");
         let Some(col) = self.columns.get(self.focus) else {
             return;
         };
@@ -1047,7 +1060,10 @@ impl App {
             list_id: col.list.id.clone(),
             task_id: row.task.id.clone(),
             etag: row.task.etag.clone(),
-            prompt: format!("Delete \"{}\"{also}?{assigned}  y/n", title_of(&row.task)),
+            prompt: format!(
+                "Delete \"{}\"{also}?{assigned}  {confirm} confirms · any other key cancels",
+                title_of(&row.task)
+            ),
         });
     }
 
@@ -1689,14 +1705,15 @@ impl App {
     }
 
     fn start_help(&mut self) {
-        let rows = super::render::help_keys()
-            .into_iter()
-            .map(|(key, description)| {
-                PickerRow::new(
-                    key.to_string(),
-                    Some(description.to_string()),
-                    String::new(),
-                )
+        let rows = Action::ALL
+            .iter()
+            .filter_map(|action| {
+                let labels = self.keymap.labels_for(*action);
+                (!labels.is_empty()).then(|| {
+                    let key = labels.join(" / ");
+                    let description = action.description();
+                    PickerRow::new(key, Some(description.to_string()), String::new())
+                })
             })
             .collect();
         self.interaction = Interaction::Help(Picker::new(rows).columns().read_only());
@@ -1706,7 +1723,10 @@ impl App {
         // A notice is for the keypress that earned it, and no longer.
         self.notice = None;
         if self.quitting {
-            if no_modifiers(k.modifiers) && k.code == KeyCode::Char('q') {
+            if matches!(
+                self.keymap.resolve(BindingContext::Board, &k),
+                KeyResolution::Action(Action::Quit)
+            ) {
                 self.request_quit();
             }
             return;
@@ -1717,20 +1737,26 @@ impl App {
         }
         if matches!(self.interaction, Interaction::ConfirmDelete(_)) {
             // Only "y" deletes; every other key cancels.
-            match k.code {
-                KeyCode::Char('y') if no_modifiers(k.modifiers) => self.confirm_delete(),
+            match self.keymap.resolve(BindingContext::Confirm, &k) {
+                KeyResolution::Action(Action::ConfirmDelete) => self.confirm_delete(),
                 _ => self.interaction = Interaction::Idle,
             }
             return;
         }
         if self.interaction.picker().is_some() {
-            // `?` toggles the Keyboard overlay shut, but only when not typing,
-            // and only through the detection that copes with both key reports.
-            let close_on_question = matches!(self.interaction, Interaction::Help(_))
-                && shifted_symbol(&k, '?', '/')
-                && !self.interaction.picker().is_some_and(Picker::typing);
+            let context = if self.interaction.picker().is_some_and(Picker::typing) {
+                BindingContext::Filter
+            } else {
+                BindingContext::Picker
+            };
+            let action = match self.keymap.resolve(context, &k) {
+                KeyResolution::Action(action) => Some(action),
+                KeyResolution::None => None,
+            };
+            let close_on_help =
+                matches!(self.interaction, Interaction::Help(_)) && action == Some(Action::Help);
             let outcome = match self.interaction.picker_mut() {
-                Some(picker) if !close_on_question => picker_key(picker, k),
+                Some(picker) if !close_on_help => picker_key(picker, action, k),
                 _ => PickerKey::Close,
             };
             match outcome {
@@ -1750,51 +1776,43 @@ impl App {
             }
             return;
         }
-        match k.code {
-            KeyCode::Char('q') if no_modifiers(k.modifiers) => self.request_quit(),
-            KeyCode::Esc if no_modifiers(k.modifiers) && self.shelf => self.shelf = false,
-            KeyCode::Char('h') | KeyCode::Left if no_modifiers(k.modifiers) => {
-                self.focus = self.focus.saturating_sub(1)
-            }
-            KeyCode::Char('l') | KeyCode::Right if no_modifiers(k.modifiers) => {
+        let KeyResolution::Action(action) = self.keymap.resolve(BindingContext::Board, &k) else {
+            return;
+        };
+        match action {
+            Action::Quit => self.request_quit(),
+            Action::CloseShelf if self.shelf => self.shelf = false,
+            Action::PreviousList => self.focus = self.focus.saturating_sub(1),
+            Action::NextList => {
                 self.focus = (self.focus + 1).min(self.columns.len().saturating_sub(1))
             }
-            KeyCode::Char('j') | KeyCode::Down if no_modifiers(k.modifiers) => self.move_task(1),
-            KeyCode::Char('k') | KeyCode::Up if no_modifiers(k.modifiers) => self.move_task(-1),
-            KeyCode::Char('g') | KeyCode::Home if no_modifiers(k.modifiers) => {
-                self.move_task(isize::MIN / 2)
-            }
-            KeyCode::Char('G') if shifted(k.modifiers) => self.move_task(isize::MAX / 2),
-            KeyCode::End if no_modifiers(k.modifiers) => self.move_task(isize::MAX / 2),
-            KeyCode::Enter if no_modifiers(k.modifiers) => {
+            Action::NextTask => self.move_task(1),
+            Action::PreviousTask => self.move_task(-1),
+            Action::FirstTask => self.move_task(isize::MIN / 2),
+            Action::LastTask => self.move_task(isize::MAX / 2),
+            Action::ToggleDetails => {
                 self.shelf = !self.shelf && self.selected_task().is_some();
                 self.field = FieldId::Title;
             }
-            KeyCode::Tab if no_modifiers(k.modifiers) && self.shelf => {
+            Action::NextField | Action::PreviousField if self.shelf => {
                 self.field = match self.field {
                     FieldId::Title => FieldId::Notes,
                     FieldId::Notes => FieldId::Title,
                 }
             }
-            KeyCode::BackTab if shifted(k.modifiers) && self.shelf => {
-                self.field = match self.field {
-                    FieldId::Title => FieldId::Notes,
-                    FieldId::Notes => FieldId::Title,
-                }
-            }
-            KeyCode::Char('i') if no_modifiers(k.modifiers) => self.start_edit(),
-            KeyCode::Char(' ') if no_modifiers(k.modifiers) => self.toggle_done(),
-            KeyCode::Char('d') if no_modifiers(k.modifiers) => self.ask_delete(),
-            KeyCode::Char('c') if no_modifiers(k.modifiers) => self.start_create(false),
-            KeyCode::Char('C') if shifted(k.modifiers) => self.start_create(true),
-            KeyCode::Char('r') if no_modifiers(k.modifiers) => self.refresh(),
-            KeyCode::Char('t') if no_modifiers(k.modifiers) => self.transparent = !self.transparent,
-            KeyCode::Char('y') if no_modifiers(k.modifiers) => self.yank(),
-            KeyCode::Char('b') if no_modifiers(k.modifiers) => self.start_browse(),
-            KeyCode::Char('m') if no_modifiers(k.modifiers) => self.start_move(),
-            _ if shifted_symbol(&k, '<', ',') => self.unparent_task(),
-            _ if shifted_symbol(&k, '>', '.') => self.start_parent_pick(),
-            _ if shifted_symbol(&k, '?', '/') => self.start_help(),
+            Action::Edit => self.start_edit(),
+            Action::ToggleDone => self.toggle_done(),
+            Action::DeleteTask => self.ask_delete(),
+            Action::CreateTask => self.start_create(false),
+            Action::CreateSubtask => self.start_create(true),
+            Action::Refresh => self.refresh(),
+            Action::ToggleTransparent => self.transparent = !self.transparent,
+            Action::CopyTask => self.yank(),
+            Action::BrowseLinks => self.start_browse(),
+            Action::MoveTask => self.start_move(),
+            Action::UnparentTask => self.unparent_task(),
+            Action::ChooseParent => self.start_parent_pick(),
+            Action::Help => self.start_help(),
             _ => {}
         }
     }
@@ -1803,19 +1821,24 @@ impl App {
     /// Shift+Enter (or Alt+Enter / Ctrl+J where the terminal can't report it)
     /// starts a new line.
     fn edit_key(&mut self, k: KeyEvent) {
-        if self.edit_width == 0 && !(k.code == KeyCode::Esc && no_modifiers(k.modifiers)) {
-            self.error = Some("terminal too small to show the editor; Esc cancels".into());
+        let action = match self.keymap.resolve(BindingContext::Editor, &k) {
+            KeyResolution::Action(action) => Some(action),
+            KeyResolution::None => None,
+        };
+        if self.edit_width == 0 && action != Some(Action::CancelEdit) {
+            let cancel = self.keymap.labels_for(Action::CancelEdit).join("/");
+            self.error = Some(format!(
+                "terminal too small to show the editor; {cancel} cancels"
+            ));
             return;
         }
-        let ctrl = k.modifiers == KeyModifiers::CONTROL;
-        let newline = k.modifiers == KeyModifiers::SHIFT || k.modifiers == KeyModifiers::ALT;
         let notes = self.edit().is_some_and(|e| e.field() == FieldId::Notes);
-        match k.code {
-            KeyCode::Esc if no_modifiers(k.modifiers) => {
+        match action {
+            Some(Action::CancelEdit) => {
                 self.interaction = Interaction::Idle;
                 return;
             }
-            KeyCode::Enter if no_modifiers(k.modifiers) => {
+            Some(Action::SaveEdit) => {
                 self.commit_edit();
                 return;
             }
@@ -1823,24 +1846,26 @@ impl App {
         }
         let width = self.edit_width.max(1);
         let Some(e) = self.edit_mut() else { return };
-        match k.code {
-            KeyCode::Enter if notes && newline => e.insert('\n'),
-            KeyCode::Char('j') if ctrl && notes => e.insert('\n'),
-            KeyCode::Char('w') if ctrl => e.kill_word(),
-            KeyCode::Char('u') if ctrl => e.kill_to_start(),
-            KeyCode::Char('a') if ctrl => e.cursor = e.line_start(),
-            KeyCode::Char('e') if ctrl => e.cursor = e.line_end(),
-            KeyCode::Char(c) if no_modifiers(k.modifiers) || k.modifiers == KeyModifiers::SHIFT => {
+        match action {
+            Some(Action::InsertNewline) if notes => e.insert('\n'),
+            Some(Action::DeleteWord) => e.kill_word(),
+            Some(Action::ClearToLineStart) => e.kill_to_start(),
+            Some(Action::CursorLineStart) => e.cursor = e.line_start(),
+            Some(Action::CursorLineEnd) => e.cursor = e.line_end(),
+            Some(Action::EditorBackspace) => e.backspace(),
+            Some(Action::EditorDelete) => e.delete(),
+            Some(Action::CursorLeft) => e.left(),
+            Some(Action::CursorRight) => e.right(),
+            Some(Action::CursorUp) if notes => e.step_visual_line(width, false),
+            Some(Action::CursorDown) if notes => e.step_visual_line(width, true),
+            None if matches!(k.code, KeyCode::Char(_))
+                && (no_modifiers(k.modifiers) || k.modifiers == KeyModifiers::SHIFT) =>
+            {
+                let KeyCode::Char(c) = k.code else {
+                    unreachable!()
+                };
                 e.insert(c)
             }
-            KeyCode::Backspace if no_modifiers(k.modifiers) => e.backspace(),
-            KeyCode::Delete if no_modifiers(k.modifiers) => e.delete(),
-            KeyCode::Left if no_modifiers(k.modifiers) => e.left(),
-            KeyCode::Right if no_modifiers(k.modifiers) => e.right(),
-            KeyCode::Up if notes && no_modifiers(k.modifiers) => e.step_visual_line(width, false),
-            KeyCode::Down if notes && no_modifiers(k.modifiers) => e.step_visual_line(width, true),
-            KeyCode::Home if no_modifiers(k.modifiers) => e.cursor = e.line_start(),
-            KeyCode::End if no_modifiers(k.modifiers) => e.cursor = e.line_end(),
             _ => {}
         }
     }
@@ -1848,24 +1873,6 @@ impl App {
 
 fn no_modifiers(modifiers: KeyModifiers) -> bool {
     modifiers.is_empty()
-}
-
-fn shifted(modifiers: KeyModifiers) -> bool {
-    modifiers == KeyModifiers::SHIFT
-}
-
-/// Crossterm synthesizes `SHIFT` for an uppercase letter but not for shifted
-/// punctuation, so a symbol key can arrive bare, shifted, or as the unshifted
-/// base key plus SHIFT depending on the terminal. Accept all three.
-fn shifted_symbol(event: &KeyEvent, symbol: char, base: char) -> bool {
-    matches!(
-        (event.code, event.modifiers),
-        (KeyCode::Char(character), KeyModifiers::NONE | KeyModifiers::SHIFT)
-            if character == symbol
-    ) || matches!(
-        (event.code, event.modifiers),
-        (KeyCode::Char(character), KeyModifiers::SHIFT) if character == base
-    )
 }
 
 /// A printable key the user typed, with or without shift held.
@@ -1899,8 +1906,9 @@ fn task_links(task: &Task) -> Vec<BrowseLink> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::keybindings::BindingConfig;
     use crate::tui::board::move_requests;
-    use crate::tui::render::{help_keys, modal_rect, task_item};
+    use crate::tui::render::{modal_rect, task_item};
     use crate::tui::text::ellipsize;
     use chrono::Local;
     use ratatui::layout::Rect;
@@ -1908,6 +1916,10 @@ mod tests {
     use std::sync::mpsc::{self, Receiver};
 
     fn app_with_lists(ids: &[&str]) -> (App, Receiver<Cmd>) {
+        app_with_lists_and_config(ids, Config::default())
+    }
+
+    fn app_with_lists_and_config(ids: &[&str], config: Config) -> (App, Receiver<Cmd>) {
         let (tx, rx) = mpsc::channel();
         let cached = cache::Cache {
             lists: ids
@@ -1922,7 +1934,7 @@ mod tests {
                 })
                 .collect(),
         };
-        (App::new(tx, cached, Config::default()), rx)
+        (App::new(tx, cached, config), rx)
     }
 
     fn set_tasks(app: &mut App, list_id: &str, tasks: Vec<Task>, selected: &str) {
@@ -2360,10 +2372,10 @@ mod tests {
         app.on_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
         assert!(app.interaction.picker().unwrap().selected().is_none());
         app.on_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
-        typed_keys(&mut app, "subtask");
+        typed_keys(&mut app, "new subtask");
         let picker = app.interaction.picker().unwrap();
         assert_eq!(picker.rows().count(), 1);
-        assert_eq!(picker.rows().next().unwrap().title, "C");
+        assert_eq!(picker.rows().next().unwrap().title, "shift+c");
         assert!(
             picker.selected().is_none(),
             "the reference card has no action"
@@ -3113,19 +3125,30 @@ mod tests {
 
     #[test]
     fn help_keys_lists_the_board_commands() {
-        let keys: Vec<&str> = help_keys().iter().map(|(k, _)| *k).collect();
+        let (mut app, _commands) = app_with_lists(&["a"]);
+        app.start_help();
+        let picker = app.interaction.picker().unwrap();
         for need in [
-            "h / l", "j / k", "Enter", "Space", "c", "C", "i", "d", "b", "m", "< / >", "?", "q",
+            "previous list",
+            "next task",
+            "new task",
+            "new subtask",
+            "delete task",
+            "move to another list",
+            "choose parent",
+            "keyboard commands",
+            "quit",
         ] {
             assert!(
-                keys.iter().any(|k| k.contains(need)),
-                "missing {need} in {keys:?}"
+                picker
+                    .rows()
+                    .any(|row| row.subtitle.as_deref() == Some(need)),
+                "missing {need}"
             );
         }
-        assert!(!help_keys().is_empty());
-        assert!(help_keys()
-            .iter()
-            .all(|(k, d)| !k.is_empty() && !d.is_empty()));
+        assert!(picker
+            .rows()
+            .all(|row| !row.title.is_empty() && row.subtitle.is_some()));
     }
 
     #[test]
@@ -3138,6 +3161,70 @@ mod tests {
 
         app.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
         assert!(!app.quit);
+    }
+
+    #[test]
+    fn configured_board_binding_replaces_its_default() {
+        let mut config = Config::default();
+        config.keys.create_task = Some(BindingConfig::one("n"));
+        let (mut app, _commands) = app_with_lists_and_config(&["a"], config);
+        app.sync = SyncState::Ready;
+
+        app.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
+        assert!(matches!(app.interaction, Interaction::Idle));
+
+        app.on_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+        assert!(matches!(app.interaction, Interaction::Editing(_)));
+    }
+
+    #[test]
+    fn empty_configured_binding_disables_the_action() {
+        let mut config = Config::default();
+        config.keys.delete_task = Some(BindingConfig::empty());
+        let (mut app, _commands) = app_with_lists_and_config(&["a"], config);
+        app.sync = SyncState::Ready;
+
+        app.on_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+        assert!(matches!(app.interaction, Interaction::Idle));
+    }
+
+    #[test]
+    fn configured_modified_chord_dispatches_directly() {
+        let mut config = Config::default();
+        config.keys.create_task = Some(BindingConfig::one("ctrl+b"));
+        let (mut app, _commands) = app_with_lists_and_config(&["a"], config);
+        app.sync = SyncState::Ready;
+
+        app.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
+        assert!(matches!(app.interaction, Interaction::Idle));
+        app.on_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL));
+        assert!(matches!(app.interaction, Interaction::Editing(_)));
+    }
+
+    #[test]
+    fn picker_and_editor_actions_use_their_contextual_bindings() {
+        let mut config = Config::default();
+        config.keys.close_picker = Some(BindingConfig::one("x"));
+        config.keys.save_edit = Some(BindingConfig::one("ctrl+s"));
+        let (mut app, _commands) = app_with_lists_and_config(&["a"], config);
+
+        app.interaction = Interaction::Move(Picker::new(vec![PickerRow::new(
+            "Inbox".into(),
+            None,
+            "l1".into(),
+        )]));
+        app.on_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
+        assert!(matches!(app.interaction, Interaction::Move(_)));
+        app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert!(matches!(app.interaction, Interaction::Idle));
+
+        app.sync = SyncState::Ready;
+        app.edit_width = 20;
+        app.interaction = Interaction::Editing(new_edit("a", None, "draft"));
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(app.interaction, Interaction::Editing(_)));
+        app.on_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        assert!(matches!(app.interaction, Interaction::Idle));
     }
 
     #[test]
@@ -3164,6 +3251,38 @@ mod tests {
             app.on_key(event);
             assert!(matches!(app.interaction, Interaction::Idle));
         }
+    }
+
+    #[test]
+    fn keyboard_overlay_uses_active_bindings_and_omits_disabled_actions() {
+        let mut config = Config::default();
+        config.keys.help = Some(BindingConfig::one("f1"));
+        config.keys.create_task = Some(BindingConfig::one("n"));
+        config.keys.delete_task = Some(BindingConfig::empty());
+        let (mut app, _commands) = app_with_lists_and_config(&["a"], config);
+
+        app.on_key(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE));
+        let Interaction::Help(picker) = &app.interaction else {
+            panic!("expected help");
+        };
+        assert!(picker
+            .rows()
+            .any(|row| { row.title == "n" && row.subtitle.as_deref() == Some("new task") }));
+        assert!(!picker
+            .rows()
+            .any(|row| { row.subtitle.as_deref() == Some("delete task") }));
+    }
+
+    #[test]
+    fn invalid_keybinding_diagnostics_survive_startup_refresh() {
+        let mut config = Config::default();
+        config.keys.help = Some(BindingConfig::one("not-a-key"));
+        let (app, _commands) = app_with_lists_and_config(&["a"], config);
+
+        assert!(app
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("invalid keybinding")));
     }
 
     #[test]

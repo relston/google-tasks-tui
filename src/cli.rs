@@ -27,6 +27,9 @@ pub struct Args {
     /// Output format. `md` is the default; `json` is for scripts.
     #[arg(short = 'f', long, value_enum, default_value_t = Format::Md, global = true)]
     pub format: Format,
+    /// Print the complete documented default configuration and exit.
+    #[arg(long, global = true)]
+    pub default_config: bool,
     #[command(subcommand)]
     pub command: Option<Command>,
 }
@@ -775,6 +778,13 @@ mod tests {
     fn no_subcommand_means_tui() {
         let a = Args::try_parse_from(["google-tasks-tui"]).unwrap();
         assert!(a.command.is_none());
+    }
+
+    #[test]
+    fn default_config_flag_needs_no_subcommand() {
+        let args = Args::try_parse_from(["google-tasks-tui", "--default-config"]).unwrap();
+        assert!(args.default_config);
+        assert!(args.command.is_none());
     }
 
     #[test]

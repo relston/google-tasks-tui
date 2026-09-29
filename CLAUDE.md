@@ -10,10 +10,15 @@ Work directly on `main`; do not create feature branches.
   `TasksApi`; keep request bodies typed and operation responses authoritative.
 - [`src/board.rs`](src/board.rs) owns canonical task data and shared ordering.
   Rendered rows are projections, never persisted state.
+- [`src/keybindings.rs`](src/keybindings.rs) owns action metadata, default
+  bindings, parsing, terminal-event normalization, contextual conflict
+  detection, and active labels. [`src/config.rs`](src/config.rs)
+  provides optional `[keys]` overrides; input dispatch, help, and status hints
+  must all use the resolved keymap rather than hard-coded keys.
 - [`src/tui/app.rs`](src/tui/app.rs) owns pure UI transitions and optimistic
   rollback context. [`src/tui/worker.rs`](src/tui/worker.rs) owns blocking API
   execution. [`src/tui/render.rs`](src/tui/render.rs) only lays out and draws.
-- `Picker` backs every modal list (Browse, Move, Keyboard). Rows carry display
+- `Picker` backs every modal list (Browse, Move, Select Parent, Keyboard). Rows carry display
   text plus an opaque `value`, so one `draw_picker` and one `picker_key` serve
   all three. `/` filters by case-insensitive substring over title and subtitle;
   selection resets to the top on every query change so it can never point at a
@@ -38,8 +43,13 @@ Work directly on `main`; do not create feature branches.
 - Serialize mutations. Every optimistic mutation must retain enough context to
   roll back, and failures must return the app to read-only recovery.
 - Preserve editor, selection, and operation identity across delayed worker
-  responses. `q` is the only quit key; Escape only closes/cancels the current
-  view. Graceful shutdown waits for pending writes; a second `q` force-quits.
+  responses. The `quit` action defaults to `q`; Escape defaults to
+  close/cancel and never quits. Graceful shutdown waits for pending writes; a
+  second invocation of the configured quit action force-quits.
+- Keep keybindings context-specific. Unmodified printable bindings are valid
+  in command contexts but must not intercept text entry in editors or picker
+  filters. User overrides displace conflicting defaults; duplicate user
+  bindings produce a visible diagnostic.
 - Cross-list moves preserve parent/child order, report partial completion, and
   reconcile both source and destination lists.
 - Same-list reparenting uses `tasks.move` without `destinationTasklist`.

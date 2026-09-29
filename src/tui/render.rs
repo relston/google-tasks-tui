@@ -10,6 +10,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::api::Task;
 use crate::board::Row;
+use crate::keybindings::Action;
 use crate::theme::Theme;
 
 use super::app::{App, Edit, EditTarget, FieldId, Interaction, LoadState, Picker, SyncState};
@@ -25,6 +26,21 @@ impl App {
             Color::Reset
         } else {
             color
+        }
+    }
+
+    fn hints(&self, commands: &[(Action, &str)]) -> String {
+        let hints = commands
+            .iter()
+            .filter_map(|(action, description)| {
+                let labels = self.keymap.labels_for(*action);
+                (!labels.is_empty()).then(|| format!("{} {description}", labels.join("/")))
+            })
+            .collect::<Vec<_>>();
+        if hints.is_empty() {
+            " no commands bound".into()
+        } else {
+            format!(" {}", hints.join(" · "))
         }
     }
 
@@ -56,29 +72,98 @@ impl App {
         self.draw_picker(f, body, &t);
 
         let hints = if self.quitting {
-            " waiting for pending saves… q again to force quit"
+            let quit = self.keymap.labels_for(Action::Quit).join("/");
+            format!(" waiting for pending saves… {quit} again to force quit")
         } else if self.interaction.picker().is_some_and(Picker::typing) {
-            " type to filter · ↑/↓ move · ⏎ pick · Esc stop filtering"
+            self.hints(&[
+                (Action::FilterNext, "next"),
+                (Action::FilterPrevious, "previous"),
+                (Action::FilterAccept, "pick"),
+                (Action::FilterAcceptAll, "all"),
+                (Action::StopFilter, "stop filtering"),
+            ])
         } else if matches!(self.interaction, Interaction::Browse(_)) {
-            " j/k · ⏎ open · ⇧⏎ all · / filter · Esc close"
+            self.hints(&[
+                (Action::PickerNext, "next"),
+                (Action::PickerPrevious, "previous"),
+                (Action::PickerAccept, "open"),
+                (Action::PickerAcceptAll, "all"),
+                (Action::StartFilter, "filter"),
+                (Action::ClosePicker, "close"),
+            ])
         } else if matches!(self.interaction, Interaction::Move(_)) {
-            " j/k · ⏎ move · / filter · Esc close"
+            self.hints(&[
+                (Action::PickerNext, "next"),
+                (Action::PickerPrevious, "previous"),
+                (Action::PickerAccept, "move"),
+                (Action::StartFilter, "filter"),
+                (Action::ClosePicker, "close"),
+            ])
         } else if matches!(self.interaction, Interaction::Parent(_)) {
-            " j/k · ⏎ choose parent · / filter · Esc close"
+            self.hints(&[
+                (Action::PickerNext, "next"),
+                (Action::PickerPrevious, "previous"),
+                (Action::PickerAccept, "choose parent"),
+                (Action::StartFilter, "filter"),
+                (Action::ClosePicker, "close"),
+            ])
         } else if matches!(self.interaction, Interaction::Help(_)) {
-            " / filter · Esc close"
+            self.hints(&[
+                (Action::StartFilter, "filter"),
+                (Action::ClosePicker, "close"),
+            ])
         } else if self.is_creating() {
-            " ⏎ create · Esc cancel"
+            self.hints(&[(Action::SaveEdit, "create"), (Action::CancelEdit, "cancel")])
         } else if self.edit().is_some_and(|e| e.field() == FieldId::Notes) {
-            " ⏎ save · ⇧⏎ new line · Esc cancel · ^W delete word"
+            self.hints(&[
+                (Action::SaveEdit, "save"),
+                (Action::InsertNewline, "new line"),
+                (Action::CancelEdit, "cancel"),
+                (Action::DeleteWord, "delete word"),
+            ])
         } else if self.edit().is_some() {
-            " ⏎ save · Esc cancel · ^W delete word · ^U clear"
+            self.hints(&[
+                (Action::SaveEdit, "save"),
+                (Action::CancelEdit, "cancel"),
+                (Action::DeleteWord, "delete word"),
+                (Action::ClearToLineStart, "clear"),
+            ])
         } else if self.sync != SyncState::Ready {
-            " syncing with Google… board is read-only until it lands"
+            " syncing with Google… board is read-only until it lands".into()
         } else if self.shelf {
-            " Tab field · i edit · c new · C subtask · </> parent · ␣ done · y copy · b link · m move · d delete · ? help · q quit"
+            self.hints(&[
+                (Action::NextField, "field"),
+                (Action::Edit, "edit"),
+                (Action::CreateTask, "new"),
+                (Action::CreateSubtask, "subtask"),
+                (Action::ChooseParent, "parent"),
+                (Action::ToggleDone, "done"),
+                (Action::CopyTask, "copy"),
+                (Action::BrowseLinks, "link"),
+                (Action::MoveTask, "move"),
+                (Action::DeleteTask, "delete"),
+                (Action::Help, "help"),
+                (Action::Quit, "quit"),
+            ])
         } else {
-            " h/l list · j/k task · </> parent · ␣ done · ⏎ details · c new · C subtask · i edit · y copy · b link · m move · d delete · ? help · q quit"
+            self.hints(&[
+                (Action::PreviousList, "previous list"),
+                (Action::NextList, "next list"),
+                (Action::PreviousTask, "previous task"),
+                (Action::NextTask, "next task"),
+                (Action::ChooseParent, "parent"),
+                (Action::ToggleDone, "done"),
+                (Action::ToggleDetails, "details"),
+                (Action::CreateTask, "new"),
+                (Action::CreateSubtask, "subtask"),
+                (Action::Edit, "edit"),
+                (Action::CopyTask, "copy"),
+                (Action::BrowseLinks, "link"),
+                (Action::MoveTask, "move"),
+                (Action::DeleteTask, "delete"),
+                (Action::Help, "help"),
+                (Action::Quit, "quit"),
+            ])
         };
         let pending = match &self.interaction {
             Interaction::ConfirmDelete(pending) => Some(pending),
@@ -581,31 +666,6 @@ pub(super) fn modal_rect(area: Rect, max_width: u16, desired_height: u16) -> Rec
     )
 }
 
-pub(super) fn help_keys() -> Vec<(&'static str, &'static str)> {
-    vec![
-        ("h / l", "previous / next list"),
-        ("j / k", "previous / next task"),
-        ("g / G", "first / last task"),
-        ("Enter", "open / close details"),
-        ("Tab", "title / notes (shelf)"),
-        ("Space", "tick / untick"),
-        ("c", "new task"),
-        ("C", "new subtask"),
-        ("i", "edit focused field"),
-        ("d", "delete task"),
-        ("y", "copy task as markdown"),
-        ("b", "browse links in notes"),
-        ("m", "move to another list"),
-        ("< / >", "unparent / choose parent"),
-        ("r", "refresh from Google"),
-        ("t", "transparent background"),
-        ("?", "keyboard commands"),
-        ("Esc", "close / cancel current view"),
-        ("q", "quit (closes overlays first)"),
-        ("⇧Enter", "new line (notes) / open all (browse)"),
-    ]
-}
-
 /// Prefix each line with the focus marker so focused fields stand out.
 fn marked<'a>(lines: Vec<Line<'a>>, focused: bool, t: &Theme) -> Vec<Line<'a>> {
     lines
@@ -727,6 +787,7 @@ mod render_tests {
     use crate::api::{Task, TaskList};
     use crate::cache;
     use crate::config::Config;
+    use crate::keybindings::BindingConfig;
     use crate::tui::app::{App, Interaction, ParentPick, Picker, PickerRow, SyncState};
     use ratatui::{
         backend::TestBackend,
@@ -798,7 +859,14 @@ mod render_tests {
                 })
                 .collect(),
         };
-        let mut app = App::new(tx, cached, Config { wrap_titles });
+        let mut app = App::new(
+            tx,
+            cached,
+            Config {
+                wrap_titles,
+                ..Config::default()
+            },
+        );
         let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
         term.draw(|f| app.draw(f)).unwrap();
         let buf = term.backend().buffer().clone();
@@ -823,6 +891,22 @@ mod render_tests {
         for (i, row) in rows.iter().enumerate() {
             assert_eq!(row.chars().count(), 30, "row {i} is {row:?}");
         }
+    }
+
+    #[test]
+    fn status_hints_use_the_active_keymap() {
+        let mut app = one_list_app();
+        let mut config = Config::default();
+        config.keys.create_task = Some(BindingConfig::one("n"));
+        let (keymap, diagnostics) = config.keymap();
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        app.config = config;
+        app.keymap = keymap;
+        app.sync = SyncState::Ready;
+
+        let screen = render_app(&mut app, 160, 8);
+        assert!(screen.contains("n new"), "{screen}");
+        assert!(!screen.contains("c new"), "{screen}");
     }
 
     /// A control character reaching a cell is not cosmetic: printing `\r`
@@ -987,18 +1071,7 @@ mod render_tests {
         assert!(screen.contains("Parent task"), "{screen}");
 
         let mut help = one_list_app();
-        help.interaction = Interaction::Help(
-            Picker::new(
-                super::help_keys()
-                    .into_iter()
-                    .map(|(key, description)| {
-                        PickerRow::new(key.into(), Some(description.into()), String::new())
-                    })
-                    .collect(),
-            )
-            .columns()
-            .read_only(),
-        );
+        help.on_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
         let screen = render_app(&mut help, 50, 20);
         assert!(screen.contains("Keyboard"), "{screen}");
         assert!(screen.contains("new task"), "{screen}");

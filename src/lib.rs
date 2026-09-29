@@ -4,6 +4,7 @@ pub mod board;
 pub mod cache;
 pub mod cli;
 pub mod config;
+pub mod keybindings;
 pub mod paths;
 pub mod platform;
 pub mod presentation;
@@ -22,6 +23,10 @@ use cli::Args;
 /// No subcommand opens the TUI; any subcommand is a one-shot CLI.
 pub fn entry() -> auth::Result<()> {
     let args = Args::parse();
+    if args.default_config {
+        print!("{}", config::default_toml());
+        return Ok(());
+    }
     match args.command {
         None => tui::start(),
         Some(command) => {

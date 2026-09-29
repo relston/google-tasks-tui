@@ -6,7 +6,11 @@ use std::{fs, io};
 
 use serde::Deserialize;
 
-use crate::{paths::Paths, storage};
+use crate::{
+    keybindings::{default_binding_specs, Action, BindingConfig, BindingSource, Keymap},
+    paths::Paths,
+    storage,
+};
 
 /// What ships in a fresh `config.toml`. Keep it in step with `Config`:
 /// `template_matches_the_defaults` fails if it drifts.
@@ -17,18 +21,179 @@ const TEMPLATE: &str = "\
 # and in the Browse Link overlay. `false` keeps every task on one line and
 # clips what does not fit.
 wrap_titles = true
+
+# Keybindings accept one string or an array. An empty string or array disables
+# an action. Supported modifiers include ctrl, shift, alt, and cmd/super;
+# special keys include enter, esc, tab, arrows, home/end, and f1..f24.
+[keys]
+
+# Board
+# quit = \"q\"
+# close_shelf = \"esc\"
+# previous_list = [\"h\", \"left\"]
+# next_list = [\"l\", \"right\"]
+# previous_task = [\"k\", \"up\"]
+# next_task = [\"j\", \"down\"]
+# first_task = [\"g\", \"home\"]
+# last_task = [\"shift+g\", \"end\"]
+# toggle_details = \"enter\"
+# next_field = \"tab\"
+# previous_field = \"shift+tab\"
+# edit = \"i\"
+# toggle_done = \"space\"
+# delete_task = \"d\"
+# create_task = \"c\"
+# create_subtask = \"shift+c\"
+# refresh = \"r\"
+# toggle_transparent = \"t\"
+# copy_task = \"y\"
+# browse_links = \"b\"
+# move_task = \"m\"
+# unparent_task = \"shift+comma\"
+# choose_parent = \"shift+period\"
+# help = \"shift+slash\"
+
+# Picker overlays
+# close_picker = [\"esc\", \"q\"]
+# start_filter = \"slash\"
+# picker_next = [\"j\", \"down\"]
+# picker_previous = [\"k\", \"up\"]
+# picker_accept = \"enter\"
+# picker_accept_all = \"shift+enter\"
+
+# Picker filter input
+# stop_filter = \"esc\"
+# filter_next = \"down\"
+# filter_previous = \"up\"
+# filter_accept = \"enter\"
+# filter_accept_all = \"shift+enter\"
+# filter_backspace = \"backspace\"
+
+# Task editor
+# cancel_edit = \"esc\"
+# save_edit = \"enter\"
+# insert_newline = [\"shift+enter\", \"alt+enter\", \"ctrl+j\"]
+# delete_word = \"ctrl+w\"
+# clear_to_line_start = \"ctrl+u\"
+# cursor_line_start = [\"ctrl+a\", \"home\"]
+# cursor_line_end = [\"ctrl+e\", \"end\"]
+# cursor_left = \"left\"
+# cursor_right = \"right\"
+# cursor_up = \"up\"
+# cursor_down = \"down\"
+# editor_backspace = \"backspace\"
+# editor_delete = \"delete\"
+
+# Confirmation
+# confirm_delete = \"y\"
 ";
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+pub fn default_toml() -> &'static str {
+    TEMPLATE
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(default)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     pub wrap_titles: bool,
+    pub keys: KeysConfig,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Self { wrap_titles: true }
+        Self {
+            wrap_titles: true,
+            keys: KeysConfig::default(),
+        }
+    }
+}
+
+macro_rules! key_fields {
+    ($($field:ident => $action:ident),+ $(,)?) => {
+        #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+        #[serde(default)]
+        #[serde(deny_unknown_fields)]
+        pub struct KeysConfig {
+            $(pub $field: Option<BindingConfig>,)+
+        }
+
+        impl KeysConfig {
+            fn binding(&self, action: Action) -> Option<&BindingConfig> {
+                match action {
+                    $(Action::$action => self.$field.as_ref(),)+
+                }
+            }
+        }
+    };
+}
+
+key_fields! {
+    quit => Quit,
+    close_shelf => CloseShelf,
+    previous_list => PreviousList,
+    next_list => NextList,
+    previous_task => PreviousTask,
+    next_task => NextTask,
+    first_task => FirstTask,
+    last_task => LastTask,
+    toggle_details => ToggleDetails,
+    next_field => NextField,
+    previous_field => PreviousField,
+    edit => Edit,
+    toggle_done => ToggleDone,
+    delete_task => DeleteTask,
+    create_task => CreateTask,
+    create_subtask => CreateSubtask,
+    refresh => Refresh,
+    toggle_transparent => ToggleTransparent,
+    copy_task => CopyTask,
+    browse_links => BrowseLinks,
+    move_task => MoveTask,
+    unparent_task => UnparentTask,
+    choose_parent => ChooseParent,
+    help => Help,
+    close_picker => ClosePicker,
+    start_filter => StartFilter,
+    picker_next => PickerNext,
+    picker_previous => PickerPrevious,
+    picker_accept => PickerAccept,
+    picker_accept_all => PickerAcceptAll,
+    stop_filter => StopFilter,
+    filter_next => FilterNext,
+    filter_previous => FilterPrevious,
+    filter_accept => FilterAccept,
+    filter_accept_all => FilterAcceptAll,
+    filter_backspace => FilterBackspace,
+    cancel_edit => CancelEdit,
+    save_edit => SaveEdit,
+    insert_newline => InsertNewline,
+    delete_word => DeleteWord,
+    clear_to_line_start => ClearToLineStart,
+    cursor_line_start => CursorLineStart,
+    cursor_line_end => CursorLineEnd,
+    cursor_left => CursorLeft,
+    cursor_right => CursorRight,
+    cursor_up => CursorUp,
+    cursor_down => CursorDown,
+    editor_backspace => EditorBackspace,
+    editor_delete => EditorDelete,
+    confirm_delete => ConfirmDelete,
+}
+
+impl Config {
+    pub fn keymap(&self) -> (Keymap<Action>, Vec<String>) {
+        let specs = default_binding_specs()
+            .into_iter()
+            .map(|mut spec| {
+                if let Some(binding) = self.keys.binding(spec.action) {
+                    spec.config = binding.clone();
+                    spec.source = BindingSource::User;
+                }
+                spec
+            })
+            .collect::<Vec<_>>();
+        Keymap::build(&specs)
     }
 }
 
@@ -84,8 +249,100 @@ mod tests {
     #[test]
     fn malformed_and_unknown_settings_are_rejected() {
         assert_eq!(parse("").unwrap(), Config::default());
-        for raw in ["not toml at all", "wrap_titles = \"yes\"", "nonsense = 1"] {
+        for raw in [
+            "not toml at all",
+            "wrap_titles = \"yes\"",
+            "nonsense = 1",
+            "[keys]\nnonsense = \"x\"",
+        ] {
             assert!(parse(raw).is_err(), "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn keys_accept_single_multiple_disabled_and_modified_bindings() {
+        let config = parse(
+            r#"
+[keys]
+create_task = ["n", "ctrl+b"]
+delete_task = ""
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            config.keys.create_task.as_ref().unwrap().values(),
+            ["n", "ctrl+b"]
+        );
+        assert!(config
+            .keys
+            .delete_task
+            .as_ref()
+            .unwrap()
+            .values()
+            .is_empty());
+    }
+
+    #[test]
+    fn keymap_uses_overrides_disables_defaults_and_reports_bad_bindings() {
+        let config = parse(
+            r#"
+[keys]
+create_task = "n"
+delete_task = ""
+help = "not-a-key"
+"#,
+        )
+        .unwrap();
+        let (keymap, diagnostics) = config.keymap();
+
+        assert_eq!(
+            keymap.labels_for(crate::keybindings::Action::CreateTask),
+            ["n"]
+        );
+        assert!(keymap
+            .labels_for(crate::keybindings::Action::DeleteTask)
+            .is_empty());
+        assert!(keymap
+            .labels_for(crate::keybindings::Action::Help)
+            .is_empty());
+        assert_eq!(diagnostics.len(), 1);
+        assert!(diagnostics
+            .iter()
+            .any(|message| { message.contains("help") && message.contains("invalid keybinding") }));
+    }
+
+    #[test]
+    fn configured_modified_chord_resolves_directly() {
+        let config = parse(
+            r#"
+[keys]
+create_task = "ctrl+b"
+"#,
+        )
+        .unwrap();
+        let (keymap, diagnostics) = config.keymap();
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert_eq!(
+            keymap.labels_for(crate::keybindings::Action::CreateTask),
+            ["ctrl+b"]
+        );
+    }
+
+    #[test]
+    fn prefix_configuration_is_rejected() {
+        assert!(parse("[keys]\nprefix = \"ctrl+b\"").is_err());
+    }
+
+    #[test]
+    fn default_template_documents_every_configurable_action() {
+        assert!(TEMPLATE.contains("[keys]"));
+        for action in Action::ALL {
+            assert!(
+                TEMPLATE.contains(&format!("{} =", action.name())),
+                "missing {}",
+                action.name()
+            );
         }
     }
 

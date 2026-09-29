@@ -154,9 +154,56 @@ malformed, unknown, unreadable, or unwritable setting falls back safely and is
 reported in the status bar with its file path. The file is read at startup, so
 changes need a restart.
 
-| Setting       | Default | Effect                                        |
-| ------------- | ------- | --------------------------------------------- |
-| `wrap_titles` | `true`  | Wrap long task titles in the columns and long link titles in the Browse Link overlay onto more lines. `false` clips them to one line. |
+`wrap_titles = true` wraps long task and link titles. Set it to `false` to
+clip them to one line.
+
+Every keyboard command can be overridden under `[keys]`. A binding can be one
+string, an array of alternatives, or an empty string/array to disable the
+action:
+
+```toml
+[keys]
+next_task = ["j", "down"]
+create_task = "n"
+create_subtask = "shift+n"
+help = ["shift+slash", "f1"]
+delete_task = ""
+```
+
+Bindings accept plain keys, `ctrl`, `shift`, `alt`, `cmd`/`super`, function
+keys, arrows, `enter`, `esc`, `tab`, and named punctuation such as `comma`,
+`period`, `slash`, and `plus`. Uppercase letters imply Shift. Modifier chords
+such as `ctrl+b` are matched directly.
+
+The complete commented configuration, including every action and its default,
+is available without authentication:
+
+```sh
+google-tasks-tui --default-config
+```
+
+Action names are grouped as follows:
+
+- Board: `quit`, `close_shelf`, `previous_list`, `next_list`,
+  `previous_task`, `next_task`, `first_task`, `last_task`, `toggle_details`,
+  `next_field`, `previous_field`, `edit`, `toggle_done`, `delete_task`,
+  `create_task`, `create_subtask`, `refresh`, `toggle_transparent`,
+  `copy_task`, `browse_links`, `move_task`, `unparent_task`, `choose_parent`,
+  and `help`.
+- Picker: `close_picker`, `start_filter`, `picker_next`, `picker_previous`,
+  `picker_accept`, and `picker_accept_all`.
+- Filter input: `stop_filter`, `filter_next`, `filter_previous`,
+  `filter_accept`, `filter_accept_all`, and `filter_backspace`.
+- Editor: `cancel_edit`, `save_edit`, `insert_newline`, `delete_word`,
+  `clear_to_line_start`, `cursor_line_start`, `cursor_line_end`,
+  `cursor_left`, `cursor_right`, `cursor_up`, `cursor_down`,
+  `editor_backspace`, and `editor_delete`.
+- Confirmation: `confirm_delete`.
+
+The Keyboard overlay and status hints always show the active bindings.
+Conflicting user bindings report which action won. User overrides displace
+conflicting built-in defaults. Unmodified printable editor/filter bindings
+are rejected because they would prevent typing.
 
 ## Install and run
 
