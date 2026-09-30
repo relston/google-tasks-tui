@@ -5,10 +5,10 @@ A fast terminal client for **Google Tasks**, written in Rust
 its tasks run down the column. Press Enter on a task to open a details shelf
 beside it.
 
-It uses your active [Omarchy](https://omarchy.org) theme and
-**live-reloads when you switch themes**. It works in any terminal: without
-Omarchy it falls back to plain ANSI colors, so it picks up your terminal's
-own palette.
+It uses your terminal's own palette, follows your active
+[Omarchy](https://omarchy.org) theme when there is one, and
+**live-reloads when you switch themes**. Any color can be overridden in
+`config.toml`, and `NO_COLOR` is honored.
 
 Press `c` to create a task, `C` to create a subtask under the selected one,
 `Space` to tick one off, `d` to delete it, `b` to open URLs from its notes,
@@ -115,9 +115,13 @@ available as subcommands for scripts and agents (`google-tasks-tui lists`,
 - Editing supports `Ctrl-W` (delete word), `Ctrl-U` (clear to line start) and
   `Ctrl-A`/`Ctrl-E`. Changes show immediately; a failed save reports in the
   status bar and resyncs.
-- Reads the active Omarchy palette (`colors.toml`) and maps it to semantic
-  roles: background, foreground, surface, accent, muted, selection, red,
-  green, yellow, blue.
+- Colors come from semantic roles: background, foreground, surface, accent,
+  muted, selection, red, green, yellow, blue. By default they use the
+  terminal's ANSI palette; on Omarchy the roles with no ANSI equivalent come
+  from the active `colors.toml`. `[theme]` in `config.toml` overrides any
+  role.
+- Respects `NO_COLOR`, and falls back to the 256- or 16-color palette when
+  the terminal doesn't advertise truecolor.
 - Supports both current (named keys like `accent`, `muted`, `red`) and legacy
   (`color0`–`color15`, `selection_background`) palettes. Named keys take
   priority.
@@ -314,6 +318,39 @@ requires `--yes` because Google removes every task in that list.
 
 ## How theming works
 
+Colors resolve in three layers, each overriding the one before:
+
+1. **Terminal ANSI palette.** Every role defaults to an ANSI color (or the
+   terminal's default background and foreground), so the app matches
+   whatever your terminal is themed with.
+2. **Omarchy**, when `source = "auto"` (the default) finds an active theme.
+3. **`[theme]` in `config.toml`.**
+
+```toml
+[theme]
+source = "auto"          # or "ansi" to ignore Omarchy
+accent = "magenta"       # ANSI name: black, red, …, white, bright-<name>
+muted = 244              # 0-255 palette index
+selection = "#3b4252"    # 24-bit
+background = "reset"     # the terminal's default
+```
+
+Roles: `background`, `foreground`, `surface`, `accent`, `muted`,
+`selection`, `selection_foreground`, `red`, `green`, `yellow`, `blue`. An
+invalid color is reported in the status bar and the whole config falls back
+to its defaults.
+
+Finally, colors are fitted to the terminal:
+
+- A non-empty `NO_COLOR` turns color off. Selections switch to reverse video
+  so they stay visible.
+- 24-bit colors are used when `COLORTERM` is `truecolor` or `24bit`, or
+  `TERM` names a truecolor terminal (`*-direct`, kitty, ghostty, alacritty,
+  foot, wezterm). Otherwise they map to the nearest 256-color entry, or to
+  the nearest of the 16 ANSI colors when `TERM` has no 256-color support.
+
+### Omarchy
+
 The app looks for the active theme in this order:
 
 1. `$XDG_STATE_HOME/omarchy/current` (default `~/.local/state/omarchy/current`),
@@ -321,7 +358,11 @@ The app looks for the active theme in this order:
 2. `~/.config/omarchy/current` (legacy)
 
 It then reads `<current>/theme/colors.toml`, a flat file of
-`key = "#rrggbb"` entries. Each role uses the first key it finds:
+`key = "#rrggbb"` entries. Only roles with no ANSI equivalent are read from
+it. Red, green, yellow, and blue stay ANSI: Omarchy themes the terminal's
+palette with the same values, so they look identical and keep working if you
+run the app in a terminal Omarchy doesn't theme. Each role uses the first
+key it finds:
 
 | Role        | Keys tried (in order)                                        | Fallback        |
 | ----------- | ------------------------------------------------------------ | --------------- |
@@ -329,13 +370,9 @@ It then reads `<current>/theme/colors.toml`, a flat file of
 | `fg`        | `foreground`, `color7`                                       | terminal default |
 | `surface`   | `lighter_background`, `color0`                               | `bg`            |
 | `accent`    | `accent`, `color4`                                           | ANSI blue       |
-| `muted`     | `muted`, `dark_foreground`, `color8`                         | ANSI dark gray  |
+| `muted`     | `muted`, `dark_foreground`, `color8`                         | ANSI bright black |
 | `sel_bg`    | `selection`, `selection_background`                          | ANSI blue       |
 | `sel_fg`    | `selection_foreground`, `bright_foreground`, `foreground`    | `fg`            |
-| `red`       | `red`, `color1`                                              | ANSI red        |
-| `green`     | `green`, `color2`                                            | ANSI green      |
-| `yellow`    | `yellow`, `color3`                                           | ANSI yellow     |
-| `blue`      | `blue`, `color4`                                             | ANSI blue       |
 
 The theme name shown in the header comes from the symlink target
 (`.../themes/<name>`).
@@ -363,7 +400,7 @@ src/
 ├── presentation.rs # shared Markdown, validation, sanitization, URL extraction
 ├── storage.rs # locking and secure atomic writes
 ├── auth.rs    # OAuth: client secret, token cache, refresh, loopback sign-in
-└── theme.rs   # theme discovery, colors.toml parsing, role mapping, fingerprint
+└── theme.rs   # theme layers, Omarchy colors.toml, [theme] overrides, color support
 ```
 
 ## Development

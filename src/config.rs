@@ -10,6 +10,7 @@ use crate::{
     keybindings::{default_binding_specs, Action, BindingConfig, BindingSource, Keymap},
     paths::Paths,
     storage,
+    theme::ThemeConfig,
 };
 
 /// What ships in a fresh `config.toml`. Keep it in step with `Config`:
@@ -86,6 +87,26 @@ wrap_titles = true
 
 # Confirmation
 # confirm_delete = \"y\"
+
+# Colors. `source = \"auto\"` follows the active Omarchy theme when one is
+# installed and otherwise uses your terminal's own palette; \"ansi\" always
+# uses the terminal palette. Any role below overrides the source. A color is
+# an ANSI name (black, red, green, yellow, blue, magenta, cyan, white, or
+# bright-<name>), a 0-255 palette index, \"#rrggbb\", or \"reset\" for the
+# terminal default. Setting NO_COLOR turns color off entirely.
+[theme]
+# source = \"auto\"
+# background = \"reset\"
+# foreground = \"reset\"
+# surface = \"reset\"
+# accent = \"blue\"
+# muted = \"bright-black\"
+# selection = \"blue\"
+# selection_foreground = \"black\"
+# red = \"red\"
+# green = \"green\"
+# yellow = \"yellow\"
+# blue = \"blue\"
 ";
 
 pub fn default_toml() -> &'static str {
@@ -98,6 +119,7 @@ pub fn default_toml() -> &'static str {
 pub struct Config {
     pub wrap_titles: bool,
     pub keys: KeysConfig,
+    pub theme: ThemeConfig,
 }
 
 impl Default for Config {
@@ -105,6 +127,7 @@ impl Default for Config {
         Self {
             wrap_titles: true,
             keys: KeysConfig::default(),
+            theme: ThemeConfig::default(),
         }
     }
 }
@@ -254,6 +277,7 @@ mod tests {
             "wrap_titles = \"yes\"",
             "nonsense = 1",
             "[keys]\nnonsense = \"x\"",
+            "[theme]\naccent = \"chartreuse\"",
         ] {
             assert!(parse(raw).is_err(), "{raw:?}");
         }
@@ -344,6 +368,24 @@ create_task = "ctrl+b"
                 action.name()
             );
         }
+    }
+
+    #[test]
+    fn default_template_documents_every_theme_role() {
+        let theme = &TEMPLATE[TEMPLATE.find("[theme]").unwrap()..];
+        assert!(theme.contains("source ="));
+        for role in ThemeConfig::ROLES {
+            assert!(theme.contains(&format!("# {role} =")), "missing {role}");
+        }
+    }
+
+    #[test]
+    fn theme_overrides_parse_alongside_keys() {
+        let config = parse("[keys]\nquit = \"x\"\n[theme]\naccent = \"magenta\"").unwrap();
+        assert_eq!(
+            config.theme.accent,
+            Some(crate::theme::ColorSpec(ratatui::style::Color::Magenta))
+        );
     }
 
     #[test]

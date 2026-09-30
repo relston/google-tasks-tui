@@ -589,10 +589,11 @@ impl App {
                 }
             })
             .collect();
+        let theme = theme::load(&config.theme);
         let mut app = Self {
             config,
             keymap,
-            theme: theme::load(),
+            theme,
             fingerprint: theme::fingerprint(),
             transparent: false,
             board,
@@ -1116,7 +1117,7 @@ impl App {
         let fp = theme::fingerprint();
         if fp != self.fingerprint {
             self.fingerprint = fp;
-            self.theme = theme::load();
+            self.theme = theme::load(&self.config.theme);
         }
     }
 

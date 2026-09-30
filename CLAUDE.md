@@ -33,8 +33,11 @@ Work directly on `main`; do not create feature branches.
 - [`src/auth.rs`](src/auth.rs) owns OAuth, token refresh, and bounded HTTP
   configuration. Browser and clipboard effects belong in
   [`src/platform.rs`](src/platform.rs).
-- [`src/theme.rs`](src/theme.rs) maps Omarchy palettes to semantic roles and
-  falls back to terminal ANSI colors when theme data is missing or invalid.
+- [`src/theme.rs`](src/theme.rs) resolves semantic roles in layers: terminal
+  ANSI defaults, then Omarchy (`source = "auto"`) for roles with no ANSI
+  equivalent, then `[theme]` overrides. It then fits colors to the terminal
+  (`NO_COLOR`, 256/16-color fallback). Hue roles stay ANSI; render
+  selections through `Theme::selection()` so they survive `NO_COLOR`.
 
 ## Safety invariants
 

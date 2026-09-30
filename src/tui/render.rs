@@ -289,10 +289,7 @@ impl App {
             .map(|r| task_item(r, t, today, wrap_to))
             .collect();
         let highlight = if focused {
-            Style::default()
-                .fg(t.sel_fg)
-                .bg(t.sel_bg)
-                .add_modifier(Modifier::BOLD)
+            t.selection().add_modifier(Modifier::BOLD)
         } else {
             Style::default()
         };
@@ -339,10 +336,7 @@ impl App {
         let Some(e) = self.edit() else { return };
         let (text, offset) = e.view(w);
         let text = clean(text);
-        let input = Line::styled(
-            pad_to_width(&text, w),
-            Style::default().fg(t.sel_fg).bg(t.sel_bg).bold(),
-        );
+        let input = Line::styled(pad_to_width(&text, w), t.selection().bold());
         let caption = match (parent, parent_ref.is_some()) {
             (Some(p), _) => format!("  under {}", title_of(&p.task)),
             (None, true) => "  under the selected task".to_string(),
@@ -397,7 +391,7 @@ impl App {
                 .is_some_and(|(list_id, task_id, _)| task_id == task.id && list_id == col.list.id)
         });
         let editing_field = editing.map(Edit::field);
-        let input = Style::default().fg(t.sel_fg).bg(t.sel_bg);
+        let input = t.selection();
         let mut cursor = None;
 
         let mut meta = Vec::new();
@@ -642,12 +636,7 @@ impl App {
             .style(Style::default().bg(bg));
         let list = List::new(items)
             .block(block)
-            .highlight_style(
-                Style::default()
-                    .fg(t.sel_fg)
-                    .bg(t.sel_bg)
-                    .add_modifier(Modifier::BOLD),
-            )
+            .highlight_style(t.selection().add_modifier(Modifier::BOLD))
             .highlight_symbol("▌")
             .highlight_spacing(HighlightSpacing::Always);
         f.render_widget(Clear, rect); // a Block restyles cells but leaves their text
