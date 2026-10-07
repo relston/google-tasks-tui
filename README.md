@@ -22,7 +22,7 @@ available as subcommands for scripts and agents (`google-tasks-tui lists`,
 - Shows all your task lists side by side. Columns scroll horizontally when
   they don't fit.
 - Subtasks sit indented under their parent. Completed tasks appear struck
-  through at the bottom of their list.
+  through at the bottom of their list. `v` hides them.
 - Includes tasks assigned from Google Docs and Chat. Google does not allow
   those tasks to have notes or move between lists; deleting one also deletes
   its source task, so the confirmation calls that out.
@@ -190,10 +190,10 @@ Action names are grouped as follows:
 
 - Board: `quit`, `close_shelf`, `previous_list`, `next_list`,
   `previous_task`, `next_task`, `first_task`, `last_task`, `toggle_details`,
-  `next_field`, `previous_field`, `edit`, `toggle_done`, `delete_task`,
-  `create_task`, `create_subtask`, `refresh`, `toggle_transparent`,
-  `copy_task`, `browse_links`, `move_task`, `unparent_task`, `choose_parent`,
-  and `help`.
+  `next_field`, `previous_field`, `edit`, `toggle_done`, `toggle_completed`,
+  `delete_task`, `create_task`, `create_subtask`, `refresh`,
+  `toggle_transparent`, `copy_task`, `browse_links`, `move_task`,
+  `unparent_task`, `choose_parent`, and `help`.
 - Picker: `close_picker`, `start_filter`, `picker_next`, `picker_previous`,
   `picker_accept`, and `picker_accept_all`.
 - Filter input: `stop_filter`, `filter_next`, `filter_previous`,
@@ -306,6 +306,7 @@ requires `--yes` because Google removes every task in that list.
 | `<` / `>`      | Unparent / choose a parent      |
 | `Tab`          | Move between shelf fields       |
 | `Space`        | Tick / untick the task          |
+| `v`            | Show / hide completed tasks     |
 | `Enter`        | Open / close the details shelf  |
 | `i`            | Edit the focused shelf field    |
 | `d`            | Delete the task (asks y/n)      |

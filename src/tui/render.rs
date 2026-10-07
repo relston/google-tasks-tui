@@ -138,6 +138,7 @@ impl App {
                 (Action::CreateSubtask, "subtask"),
                 (Action::ChooseParent, "parent"),
                 (Action::ToggleDone, "done"),
+                (Action::ToggleCompleted, "completed"),
                 (Action::CopyTask, "copy"),
                 (Action::BrowseLinks, "link"),
                 (Action::MoveTask, "move"),
@@ -153,6 +154,7 @@ impl App {
                 (Action::NextTask, "next task"),
                 (Action::ChooseParent, "parent"),
                 (Action::ToggleDone, "done"),
+                (Action::ToggleCompleted, "completed"),
                 (Action::ToggleDetails, "details"),
                 (Action::CreateTask, "new"),
                 (Action::CreateSubtask, "subtask"),
@@ -254,6 +256,7 @@ impl App {
             .config
             .wrap_titles
             .then(|| (area.width as usize).saturating_sub(3));
+        let hide_completed = !self.show_completed;
         let col = &mut self.columns[i];
 
         let open = col.rows.iter().filter(|r| !r.task.is_done()).count();
@@ -271,6 +274,8 @@ impl App {
         if col.rows.is_empty() {
             let msg = if col.load == LoadState::Loading {
                 "Loading…"
+            } else if hide_completed {
+                "No open tasks"
             } else {
                 "No tasks"
             };
@@ -358,6 +363,7 @@ impl App {
         }
         let col = &self.columns[self.focus];
         let Some(row) = col.selected() else { return };
+        let tree = self.board.rows(&col.list.id);
         let task = &row.task;
         let today = Local::now().date_naive();
         let muted = Style::default().fg(t.muted);
@@ -424,12 +430,11 @@ impl App {
         if let Some(p) = task
             .parent
             .as_deref()
-            .and_then(|p| col.rows.iter().find(|r| r.task.id == p))
+            .and_then(|p| tree.iter().find(|r| r.task.id == p))
         {
             meta.push(field("Parent", title_of(&p.task).to_string().into(), t));
         }
-        let subtasks: Vec<&Task> = col
-            .rows
+        let subtasks: Vec<&Task> = tree
             .iter()
             .map(|r| &r.task)
             .filter(|c| c.parent.as_deref() == Some(task.id.as_str()))

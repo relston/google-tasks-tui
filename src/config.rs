@@ -42,6 +42,7 @@ wrap_titles = true
 # previous_field = \"shift+tab\"
 # edit = \"i\"
 # toggle_done = \"space\"
+# toggle_completed = \"v\"
 # delete_task = \"d\"
 # create_task = \"c\"
 # create_subtask = \"shift+c\"
@@ -165,6 +166,7 @@ key_fields! {
     previous_field => PreviousField,
     edit => Edit,
     toggle_done => ToggleDone,
+    toggle_completed => ToggleCompleted,
     delete_task => DeleteTask,
     create_task => CreateTask,
     create_subtask => CreateSubtask,

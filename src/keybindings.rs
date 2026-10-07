@@ -75,6 +75,7 @@ pub enum Action {
     PreviousField,
     Edit,
     ToggleDone,
+    ToggleCompleted,
     DeleteTask,
     CreateTask,
     CreateSubtask,
@@ -129,6 +130,7 @@ impl Action {
         Self::PreviousField,
         Self::Edit,
         Self::ToggleDone,
+        Self::ToggleCompleted,
         Self::DeleteTask,
         Self::CreateTask,
         Self::CreateSubtask,
@@ -183,6 +185,7 @@ impl Action {
             Self::PreviousField => "previous_field",
             Self::Edit => "edit",
             Self::ToggleDone => "toggle_done",
+            Self::ToggleCompleted => "toggle_completed",
             Self::DeleteTask => "delete_task",
             Self::CreateTask => "create_task",
             Self::CreateSubtask => "create_subtask",
@@ -238,6 +241,7 @@ impl Action {
             Self::PreviousField => "previous details field",
             Self::Edit => "edit focused field",
             Self::ToggleDone => "tick / untick",
+            Self::ToggleCompleted => "show / hide completed",
             Self::DeleteTask => "delete task",
             Self::CreateTask => "new task",
             Self::CreateSubtask => "new subtask",
@@ -481,6 +485,7 @@ pub fn default_binding_specs() -> Vec<BindingSpec<Action>> {
         spec(Board, PreviousField, &["shift+tab"]),
         spec(Board, Edit, &["i"]),
         spec(Board, ToggleDone, &["space"]),
+        spec(Board, ToggleCompleted, &["v"]),
         spec(Board, DeleteTask, &["d"]),
         spec(Board, CreateTask, &["c"]),
         spec(Board, CreateSubtask, &["shift+c"]),
@@ -967,7 +972,7 @@ mod tests {
 
     #[test]
     fn action_catalog_names_every_command_and_supplies_defaults() {
-        assert_eq!(Action::ALL.len(), 50);
+        assert_eq!(Action::ALL.len(), 51);
         let mut names = std::collections::HashSet::new();
         let specs = default_binding_specs();
 
@@ -988,6 +993,7 @@ mod tests {
         let cases = [
             (BindingContext::Board, "h", Action::PreviousList),
             (BindingContext::Board, "left", Action::PreviousList),
+            (BindingContext::Board, "v", Action::ToggleCompleted),
             (BindingContext::Board, "shift+c", Action::CreateSubtask),
             (BindingContext::Board, "shift+comma", Action::UnparentTask),
             (BindingContext::Board, "shift+slash", Action::Help),

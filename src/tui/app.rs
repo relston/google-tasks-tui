@@ -510,12 +510,26 @@ impl Column {
     }
 }
 
+/// Column rows. Completed tasks are omitted when the board is hiding them,
+/// and an open child of a hidden parent is shown at the top level.
+fn visible_rows(board: &Board, list_id: &str, show_completed: bool) -> Vec<Row> {
+    let tasks = board.tasks(list_id);
+    let tasks = if show_completed {
+        tasks
+    } else {
+        tasks.into_iter().filter(|task| !task.is_done()).collect()
+    };
+    crate::board::ordered(tasks)
+}
+
 pub(super) struct App {
     pub(super) config: Config,
     pub(super) keymap: Keymap<Action>,
     pub(super) theme: Theme,
     pub(super) fingerprint: theme::Fingerprint,
     pub(super) transparent: bool,
+    /// When false, completed tasks stay on the board but leave the columns.
+    pub(super) show_completed: bool,
     pub(super) board: Board,
     pub(super) paths: Paths,
     pub(super) cache_meta: cache::Meta,
@@ -578,7 +592,7 @@ impl App {
         let columns = board
             .lists()
             .map(|list| {
-                let rows = board.rows(&list.id);
+                let rows = visible_rows(&board, &list.id, true);
                 let selected_id = rows.first().map(|row| row.task.id.clone());
                 Column {
                     list: list.clone(),
@@ -596,6 +610,7 @@ impl App {
             theme,
             fingerprint: theme::fingerprint(),
             transparent: false,
+            show_completed: true,
             board,
             paths,
             cache_meta,
@@ -891,8 +906,27 @@ impl App {
         });
     }
 
+    fn toggle_completed(&mut self) {
+        let selected = self.selected_task().map(|row| row.task.id.clone());
+        self.show_completed = !self.show_completed;
+        let ids: Vec<String> = self
+            .columns
+            .iter()
+            .map(|column| column.list.id.clone())
+            .collect();
+        for id in ids {
+            self.rebuild_column(&id);
+        }
+        let still_selected = self
+            .selected_task()
+            .is_some_and(|row| Some(row.task.id.as_str()) == selected.as_deref());
+        if !still_selected {
+            self.shelf = false;
+        }
+    }
+
     fn rebuild_column(&mut self, list_id: &str) {
-        let rows = self.board.rows(list_id);
+        let rows = visible_rows(&self.board, list_id, self.show_completed);
         let Some(column) = self
             .columns
             .iter_mut()
@@ -1042,10 +1076,11 @@ impl App {
             return;
         };
         let Some(row) = col.selected() else { return };
-        let subtasks = col
-            .rows
+        let subtasks = self
+            .board
+            .rows(&col.list.id)
             .iter()
-            .filter(|r| r.task.parent.as_deref() == Some(row.task.id.as_str()))
+            .filter(|candidate| candidate.task.parent.as_deref() == Some(row.task.id.as_str()))
             .count();
         let also = match subtasks {
             0 => String::new(),
@@ -1143,7 +1178,7 @@ impl App {
                 self.columns = lists
                     .into_iter()
                     .map(|list| {
-                        let rows = self.board.rows(&list.id);
+                        let rows = visible_rows(&self.board, &list.id, self.show_completed);
                         let mut column =
                             match old.iter().position(|column| column.list.id == list.id) {
                                 Some(index) => old.swap_remove(index),
@@ -1180,7 +1215,7 @@ impl App {
                         col.load = LoadState::Loaded;
                         let keep = col.selected_id.clone();
                         let prev = col.state.selected();
-                        col.rows = self.board.rows(&id);
+                        col.rows = visible_rows(&self.board, &id, self.show_completed);
                         let last = col.rows.len().checked_sub(1);
                         let sel = keep
                             .and_then(|id| col.rows.iter().position(|r| r.task.id == id))
@@ -1392,18 +1427,11 @@ impl App {
                 }
                 match result {
                     Ok(task) => {
-                        let Some(col_index) =
-                            self.columns.iter().position(|c| c.list.id == list_id)
-                        else {
+                        if !self.columns.iter().any(|column| column.list.id == list_id) {
                             self.recover("save succeeded but its list disappeared".into());
                             return;
-                        };
-                        if task.id != task_id
-                            || !self.columns[col_index]
-                                .rows
-                                .iter()
-                                .any(|row| row.task.id == task_id)
-                        {
+                        }
+                        if task.id != task_id || self.board.task(&list_id, &task_id).is_none() {
                             self.recover("save succeeded but its task disappeared".into());
                             return;
                         }
@@ -1523,8 +1551,8 @@ impl App {
             self.error = Some("assigned tasks cannot become subtasks".into());
             return;
         }
-        if column
-            .rows
+        let tree = self.board.rows(&column.list.id);
+        if tree
             .iter()
             .any(|row| row.task.parent.as_deref() == Some(selected.task.id.as_str()))
         {
@@ -1535,7 +1563,7 @@ impl App {
             self.error = Some("a completed hidden task cannot become a subtask".into());
             return;
         }
-        let tasks = eligible_parents(&column.rows, &selected.task.id);
+        let tasks = eligible_parents(&tree, &selected.task.id);
         if tasks.is_empty() {
             self.error = Some("no available parent tasks in this list".into());
             return;
@@ -1635,7 +1663,7 @@ impl App {
             return;
         };
         if selected.task.assignment_info.is_some()
-            || col.rows.iter().any(|row| {
+            || self.board.rows(&col.list.id).iter().any(|row| {
                 row.task.parent.as_deref() == Some(selected.task.id.as_str())
                     && row.task.assignment_info.is_some()
             })
@@ -1673,7 +1701,7 @@ impl App {
         let from_id = src.list.id.clone();
         let Some(row) = src.selected() else { return };
         let task_id = row.task.id.clone();
-        let ids = move_ids(&src.rows, &task_id);
+        let ids = move_ids(&self.board.rows(&from_id), &task_id);
         if ids.is_empty() {
             return;
         }
@@ -1803,6 +1831,7 @@ impl App {
             }
             Action::Edit => self.start_edit(),
             Action::ToggleDone => self.toggle_done(),
+            Action::ToggleCompleted => self.toggle_completed(),
             Action::DeleteTask => self.ask_delete(),
             Action::CreateTask => self.start_create(false),
             Action::CreateSubtask => self.start_create(true),
@@ -2221,6 +2250,181 @@ mod tests {
         );
         assert_eq!(app.columns[0].selected_id.as_deref(), Some("a-one"));
         assert_eq!(app.columns[0].state.selected(), Some(1));
+    }
+
+    #[test]
+    fn v_toggles_completed_tasks_on_every_list() {
+        let (mut app, commands) = app_with_lists(&["a", "b"]);
+        let _ = commands.recv().unwrap();
+        app.sync = SyncState::Ready;
+        set_tasks(
+            &mut app,
+            "a",
+            vec![
+                task("open", None, "1", false),
+                task("done-child", Some("open"), "2", true),
+                task("done-parent", None, "3", true),
+                task("open-child", Some("done-parent"), "4", false),
+            ],
+            "done-parent",
+        );
+        set_tasks(
+            &mut app,
+            "b",
+            vec![
+                task("open-b", None, "1", false),
+                task("done-b", None, "2", true),
+            ],
+            "open-b",
+        );
+        app.shelf = true;
+
+        app.on_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE));
+
+        let shown = |app: &App, list: &str| -> Vec<(String, u8)> {
+            app.columns
+                .iter()
+                .find(|column| column.list.id == list)
+                .unwrap()
+                .rows
+                .iter()
+                .map(|row| (row.task.id.clone(), row.depth))
+                .collect()
+        };
+        assert_eq!(
+            shown(&app, "a"),
+            [("open".into(), 0), ("open-child".into(), 0)]
+        );
+        assert_eq!(shown(&app, "b"), [("open-b".into(), 0)]);
+        assert_eq!(app.columns[0].selected_id.as_deref(), Some("open-child"));
+        assert!(!app.shelf);
+        assert!(app.board.task("a", "done-parent").unwrap().is_done());
+        assert!(app.board.task("a", "done-child").unwrap().is_done());
+
+        app.on_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE));
+
+        assert_eq!(
+            shown(&app, "a"),
+            [
+                ("open".into(), 0),
+                ("done-child".into(), 1),
+                ("done-parent".into(), 0),
+                ("open-child".into(), 1),
+            ]
+        );
+        assert_eq!(
+            shown(&app, "b"),
+            [("open-b".into(), 0), ("done-b".into(), 0)]
+        );
+        assert_eq!(app.columns[0].selected_id.as_deref(), Some("open-child"));
+    }
+
+    #[test]
+    fn hidden_completed_subtasks_stay_part_of_their_parent() {
+        let (mut app, commands) = app_with_lists(&["a", "b"]);
+        let _ = commands.recv().unwrap();
+        app.sync = SyncState::Ready;
+        set_tasks(
+            &mut app,
+            "a",
+            vec![
+                task("open", None, "1", false),
+                task("done-child", Some("open"), "2", true),
+                task("other", None, "3", false),
+            ],
+            "open",
+        );
+        set_tasks(
+            &mut app,
+            "b",
+            vec![task("there", None, "1", false)],
+            "there",
+        );
+        app.on_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE));
+
+        app.ask_delete();
+        let Interaction::ConfirmDelete(pending) = &app.interaction else {
+            panic!("expected delete confirmation");
+        };
+        assert!(
+            pending.prompt.contains("subtask"),
+            "hidden completed subtask should still be mentioned: {}",
+            pending.prompt
+        );
+        app.interaction = Interaction::Idle;
+
+        app.start_parent_pick();
+        assert!(app
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("subtasks")));
+
+        app.start_move();
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        match commands.recv().unwrap() {
+            Cmd::Move { ids, from, to, .. } => {
+                assert_eq!(from, "a");
+                assert_eq!(to, "b");
+                assert_eq!(ids, ["open", "done-child"]);
+            }
+            _ => panic!("expected move"),
+        }
+    }
+
+    #[test]
+    fn completing_a_task_while_completed_are_hidden_keeps_the_save() {
+        let (mut app, commands) = app_with_lists(&["a"]);
+        let _ = commands.recv().unwrap();
+        app.sync = SyncState::Ready;
+        set_tasks(
+            &mut app,
+            "a",
+            vec![
+                task("a-one", None, "1", false),
+                task("a-two", None, "2", false),
+            ],
+            "a-one",
+        );
+        app.on_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+
+        assert_eq!(
+            app.columns[0]
+                .rows
+                .iter()
+                .map(|row| row.task.id.as_str())
+                .collect::<Vec<_>>(),
+            ["a-two"]
+        );
+        assert_eq!(app.columns[0].selected_id.as_deref(), Some("a-two"));
+        assert!(app.board.task("a", "a-one").unwrap().is_done());
+
+        let Cmd::Patch { operation, .. } = commands.recv().unwrap() else {
+            panic!("expected patch");
+        };
+        let mut saved = task("a-one", None, "1", true);
+        saved.title = "A one".into();
+        app.on_msg(Msg::Updated {
+            operation,
+            list_id: "a".into(),
+            task_id: "a-one".into(),
+            result: Ok(saved),
+        });
+
+        assert!(app.error.is_none(), "{:?}", app.error);
+        assert_eq!(app.sync, SyncState::Ready);
+        assert_eq!(
+            app.board.task("a", "a-one").map(|task| task.title.as_str()),
+            Some("A one")
+        );
+        assert_eq!(
+            app.columns[0]
+                .rows
+                .iter()
+                .map(|row| row.task.id.as_str())
+                .collect::<Vec<_>>(),
+            ["a-two"]
+        );
     }
 
     #[test]
@@ -3137,6 +3341,7 @@ mod tests {
             "delete task",
             "move to another list",
             "choose parent",
+            "show / hide completed",
             "keyboard commands",
             "quit",
         ] {
