@@ -227,6 +227,9 @@ above:
 - Edit task due dates in the TUI.
 - Manage task lists in the TUI.
 - Expose task moves through the CLI.
-- Add an Omarchy `theme-set.d` hook for immediate theme reload.
 - Honor light-mode theme metadata.
 - Reassess `toml` and ratatui upgrades against the chosen MSRV.
+
+Dropped: an Omarchy `theme-set.d` hook for faster theme reload. Omarchy
+swaps the palette before retheming other apps and runs `theme-set` hooks
+only after those finish, so the 500 ms theme poll already reloads first.
