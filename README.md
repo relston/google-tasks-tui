@@ -193,7 +193,8 @@ Action names are grouped as follows:
   `next_field`, `previous_field`, `edit`, `toggle_done`, `toggle_completed`,
   `delete_task`, `create_task`, `create_subtask`, `refresh`,
   `toggle_transparent`, `copy_task`, `browse_links`, `move_task`,
-  `unparent_task`, `choose_parent`, and `help`.
+  `move_task_up`, `move_task_down`, `unparent_task`, `choose_parent`, and
+  `help`.
 - Picker: `close_picker`, `start_filter`, `picker_next`, `picker_previous`,
   `picker_accept`, and `picker_accept_all`.
 - Filter input: `stop_filter`, `filter_next`, `filter_previous`,
@@ -283,6 +284,7 @@ requires `--yes` because Google removes every task in that list.
 | Create/edit/complete/delete tasks | Yes | Yes | Same validation and API contracts |
 | Create subtasks | `C` | `create --parent` | Same one-level Google constraint |
 | Reparent/unparent tasks | `<` / `>` | No | Interactive same-list parent picker |
+| Reorder tasks in a list | `Alt-j` / `Alt-k` | No | One place among open siblings |
 | Edit notes | Yes | Yes | Assigned Docs/Chat tasks are rejected |
 | Edit due date/status directly | Status via `Space` | Yes | Due-date editor remains future TUI work |
 | Move tasks between lists | Yes | No | Interactive destination picker; CLI move remains deferred |
@@ -303,6 +305,7 @@ requires `--yes` because Google removes every task in that list.
 | `y`            | Copy the task as markdown       |
 | `b`            | Open a link from the notes      |
 | `m`            | Move the task to another list   |
+| `Alt-j` / `Alt-k` | Move the task down / up one place |
 | `<` / `>`      | Unparent / choose a parent      |
 | `Tab`          | Move between shelf fields       |
 | `Space`        | Tick / untick the task          |

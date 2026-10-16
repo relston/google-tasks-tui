@@ -84,6 +84,8 @@ pub enum Action {
     CopyTask,
     BrowseLinks,
     MoveTask,
+    MoveTaskUp,
+    MoveTaskDown,
     UnparentTask,
     ChooseParent,
     Help,
@@ -139,6 +141,8 @@ impl Action {
         Self::CopyTask,
         Self::BrowseLinks,
         Self::MoveTask,
+        Self::MoveTaskUp,
+        Self::MoveTaskDown,
         Self::UnparentTask,
         Self::ChooseParent,
         Self::Help,
@@ -194,6 +198,8 @@ impl Action {
             Self::CopyTask => "copy_task",
             Self::BrowseLinks => "browse_links",
             Self::MoveTask => "move_task",
+            Self::MoveTaskUp => "move_task_up",
+            Self::MoveTaskDown => "move_task_down",
             Self::UnparentTask => "unparent_task",
             Self::ChooseParent => "choose_parent",
             Self::Help => "help",
@@ -250,6 +256,8 @@ impl Action {
             Self::CopyTask => "copy task as markdown",
             Self::BrowseLinks => "browse links in notes",
             Self::MoveTask => "move to another list",
+            Self::MoveTaskUp => "move task up",
+            Self::MoveTaskDown => "move task down",
             Self::UnparentTask => "unparent subtask",
             Self::ChooseParent => "choose parent",
             Self::Help => "keyboard commands",
@@ -494,6 +502,8 @@ pub fn default_binding_specs() -> Vec<BindingSpec<Action>> {
         spec(Board, CopyTask, &["y"]),
         spec(Board, BrowseLinks, &["b"]),
         spec(Board, MoveTask, &["m"]),
+        spec(Board, MoveTaskUp, &["alt+k", "alt+up"]),
+        spec(Board, MoveTaskDown, &["alt+j", "alt+down"]),
         spec(Board, UnparentTask, &["shift+comma"]),
         spec(Board, ChooseParent, &["shift+period"]),
         spec(Board, Help, &["shift+slash"]),
@@ -972,7 +982,7 @@ mod tests {
 
     #[test]
     fn action_catalog_names_every_command_and_supplies_defaults() {
-        assert_eq!(Action::ALL.len(), 51);
+        assert_eq!(Action::ALL.len(), 53);
         let mut names = std::collections::HashSet::new();
         let specs = default_binding_specs();
 

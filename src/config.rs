@@ -51,6 +51,8 @@ wrap_titles = true
 # copy_task = \"y\"
 # browse_links = \"b\"
 # move_task = \"m\"
+# move_task_up = [\"alt+k\", \"alt+up\"]
+# move_task_down = [\"alt+j\", \"alt+down\"]
 # unparent_task = \"shift+comma\"
 # choose_parent = \"shift+period\"
 # help = \"shift+slash\"
@@ -175,6 +177,8 @@ key_fields! {
     copy_task => CopyTask,
     browse_links => BrowseLinks,
     move_task => MoveTask,
+    move_task_up => MoveTaskUp,
+    move_task_down => MoveTaskDown,
     unparent_task => UnparentTask,
     choose_parent => ChooseParent,
     help => Help,

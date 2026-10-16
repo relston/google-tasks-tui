@@ -19,7 +19,7 @@ use crate::platform::{self, Clipboard};
 use crate::presentation::{md_yank, normalize_title, urls_in};
 use crate::theme::{self, Theme};
 
-use super::board::{eligible_parents, move_ids, other_lists, subtask_parent};
+use super::board::{eligible_parents, move_ids, other_lists, shift_target, subtask_parent};
 use super::text::{byte_at_column, clean, cursor_rc, title_of, wrap};
 use super::worker::{Cmd, Msg};
 #[cfg(test)]
@@ -458,6 +458,15 @@ enum MutationContext {
         task_id: String,
         before: Box<Task>,
     },
+    /// A one-step reorder. Locally the task and its neighbor swap positions;
+    /// Google moves only the task, so the neighbor keeps `neighbor`'s
+    /// position once the response lands.
+    Shift {
+        list_id: String,
+        task_id: String,
+        before: Box<Task>,
+        neighbor: Box<Task>,
+    },
 }
 
 pub(super) struct PendingOperation {
@@ -752,6 +761,16 @@ impl App {
                 list_id, before, ..
             } => {
                 self.board.upsert_task(&list_id, *before);
+                self.rebuild_column(&list_id);
+            }
+            MutationContext::Shift {
+                list_id,
+                before,
+                neighbor,
+                ..
+            } => {
+                self.board.upsert_task(&list_id, *before);
+                self.board.upsert_task(&list_id, *neighbor);
                 self.rebuild_column(&list_id);
             }
             MutationContext::Delete {
@@ -1379,29 +1398,37 @@ impl App {
                 let Some(context) = self.mutation_finished(operation) else {
                     return;
                 };
-                if !matches!(
-                    &context,
+                let verb = match &context {
                     MutationContext::Reparent {
                         list_id: expected_list,
                         task_id: expected_task,
                         ..
-                    } if expected_list == &list_id && expected_task == &task_id
-                ) {
-                    self.recover("reparent response did not match the pending operation".into());
-                    return;
-                }
+                    } if expected_list == &list_id && expected_task == &task_id => "reparent",
+                    MutationContext::Shift {
+                        list_id: expected_list,
+                        task_id: expected_task,
+                        ..
+                    } if expected_list == &list_id && expected_task == &task_id => "reorder",
+                    _ => {
+                        self.recover("move response did not match the pending operation".into());
+                        return;
+                    }
+                };
                 match result {
                     Ok(task) if task.id == task_id && task.parent == parent => {
                         self.board.upsert_task(&list_id, task);
+                        if let MutationContext::Shift { neighbor, .. } = context {
+                            self.board.upsert_task(&list_id, *neighbor);
+                        }
                         self.rebuild_column(&list_id);
                     }
                     Ok(_) => {
                         self.rollback(context);
-                        self.recover("Google returned a mismatched reparented task".into());
+                        self.recover(format!("Google returned a mismatched task after {verb}"));
                     }
                     Err(error) => {
                         self.rollback(context);
-                        self.recover(format!("reparent failed: {error}"));
+                        self.recover(format!("{verb} failed: {error}"));
                     }
                 }
             }
@@ -1652,6 +1679,58 @@ impl App {
         );
     }
 
+    /// Move the selected task one place among its open siblings.
+    fn shift_task(&mut self, down: bool) {
+        if !self.writable() {
+            return;
+        }
+        let Some(column) = self.columns.get(self.focus) else {
+            return;
+        };
+        let Some(selected) = column.selected() else {
+            return;
+        };
+        let list_id = column.list.id.clone();
+        let task_id = selected.task.id.clone();
+        let shift = match shift_target(&self.board.rows(&list_id), &task_id, down) {
+            Ok(shift) => shift,
+            Err(error) => {
+                self.error = Some(error.into());
+                return;
+            }
+        };
+        let (Some(before), Some(neighbor)) = (
+            self.board.task(&list_id, &task_id).cloned(),
+            self.board.task(&list_id, &shift.neighbor).cloned(),
+        ) else {
+            self.error = Some("task disappeared before it could move".into());
+            return;
+        };
+        if let Some(task) = self.board.task_mut(&list_id, &task_id) {
+            task.position = neighbor.position.clone();
+        }
+        if let Some(task) = self.board.task_mut(&list_id, &shift.neighbor) {
+            task.position = before.position.clone();
+        }
+        self.rebuild_column(&list_id);
+        self.error = None;
+        self.send_mutation(
+            MutationContext::Shift {
+                list_id: list_id.clone(),
+                task_id: task_id.clone(),
+                before: Box::new(before),
+                neighbor: Box::new(neighbor),
+            },
+            |operation| Cmd::Reparent {
+                operation,
+                list_id,
+                task_id,
+                parent: shift.parent,
+                previous: shift.previous,
+            },
+        );
+    }
+
     fn start_move(&mut self) {
         if !self.writable() {
             return;
@@ -1840,6 +1919,8 @@ impl App {
             Action::CopyTask => self.yank(),
             Action::BrowseLinks => self.start_browse(),
             Action::MoveTask => self.start_move(),
+            Action::MoveTaskUp => self.shift_task(false),
+            Action::MoveTaskDown => self.shift_task(true),
             Action::UnparentTask => self.unparent_task(),
             Action::ChooseParent => self.start_parent_pick(),
             Action::Help => self.start_help(),
@@ -3193,6 +3274,208 @@ mod tests {
                 ..
             } if list_id == "a" && task_id == "child" && previous == "parent"
         ));
+    }
+
+    fn ids(app: &App, list_id: &str) -> Vec<String> {
+        app.columns
+            .iter()
+            .find(|column| column.list.id == list_id)
+            .unwrap()
+            .rows
+            .iter()
+            .map(|row| row.task.id.clone())
+            .collect()
+    }
+
+    #[test]
+    fn shift_targets_open_siblings_under_the_same_parent() {
+        let rows = order(vec![
+            task("a", None, "1", false),
+            task("a1", Some("a"), "1", false),
+            task("a2", Some("a"), "2", false),
+            task("a3", Some("a"), "3", false),
+            task("b", None, "2", false),
+            task("b1", Some("b"), "1", false),
+            task("c", None, "3", false),
+            task("done", None, "0", true),
+        ]);
+        let shift = |id: &str, down: bool| shift_target(&rows, id, down);
+        let ok = |parent: Option<&str>, neighbor: &str, previous: Option<&str>| {
+            Ok(crate::tui::board::Shift {
+                parent: parent.map(Into::into),
+                neighbor: neighbor.into(),
+                previous: previous.map(Into::into),
+            })
+        };
+
+        // Top-level tasks skip over subtasks and land after their neighbor.
+        assert_eq!(shift("a", true), ok(None, "b", Some("b")));
+        assert_eq!(shift("c", false), ok(None, "b", Some("a")));
+        assert_eq!(shift("b", false), ok(None, "a", None));
+        // Subtasks only trade places under their own parent.
+        assert_eq!(shift("a3", false), ok(Some("a"), "a2", Some("a1")));
+        assert_eq!(shift("a2", false), ok(Some("a"), "a1", None));
+        assert_eq!(shift("a1", true), ok(Some("a"), "a2", Some("a2")));
+        // Edges, lone subtasks, and completed tasks don't move.
+        assert_eq!(shift("a", false), Err("task is already first"));
+        assert_eq!(shift("c", true), Err("task is already last"));
+        assert_eq!(shift("a3", true), Err("task is already last"));
+        assert_eq!(shift("b1", false), Err("task is already first"));
+        assert_eq!(
+            shift("done", false),
+            Err("completed tasks stay in completion order")
+        );
+    }
+
+    #[test]
+    fn alt_j_swaps_with_the_next_sibling_and_keeps_the_selection() {
+        let (mut app, commands) = app_with_lists(&["a"]);
+        let _ = commands.recv().unwrap(); // startup refresh
+        app.sync = SyncState::Ready;
+        set_tasks(
+            &mut app,
+            "a",
+            vec![
+                task("first", None, "1", false),
+                task("child", Some("first"), "1", false),
+                task("second", None, "2", false),
+                task("third", None, "3", false),
+            ],
+            "first",
+        );
+
+        app.on_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::ALT));
+
+        assert_eq!(ids(&app, "a"), ["second", "first", "child", "third"]);
+        assert_eq!(app.columns[0].selected_id.as_deref(), Some("first"));
+        let Cmd::Reparent {
+            operation,
+            list_id,
+            task_id,
+            parent,
+            previous,
+        } = commands.recv().unwrap()
+        else {
+            panic!("expected a same-list move");
+        };
+        assert_eq!(
+            (
+                list_id.as_str(),
+                task_id.as_str(),
+                parent,
+                previous.as_deref()
+            ),
+            ("a", "first", None, Some("second"))
+        );
+
+        // A second press waits for the first move to land.
+        app.on_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::ALT));
+        assert!(commands.try_recv().is_err());
+
+        // Google repositions only the moved task; the neighbor keeps its own.
+        app.on_msg(Msg::Reparented {
+            operation,
+            list_id: "a".into(),
+            task_id: "first".into(),
+            parent: None,
+            result: Ok(task("first", None, "2.5", false)),
+        });
+        assert_eq!(app.board.task("a", "second").unwrap().position, "2");
+        assert_eq!(app.board.task("a", "first").unwrap().position, "2.5");
+        assert_eq!(ids(&app, "a"), ["second", "first", "child", "third"]);
+        assert_eq!(app.sync, SyncState::Ready);
+        assert!(app.pending_operation.is_none());
+    }
+
+    #[test]
+    fn alt_k_moves_a_subtask_up_among_its_siblings() {
+        let (mut app, commands) = app_with_lists(&["a"]);
+        let _ = commands.recv().unwrap(); // startup refresh
+        app.sync = SyncState::Ready;
+        set_tasks(
+            &mut app,
+            "a",
+            vec![
+                task("parent", None, "1", false),
+                task("one", Some("parent"), "1", false),
+                task("two", Some("parent"), "2", false),
+            ],
+            "two",
+        );
+
+        app.on_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::ALT));
+
+        assert_eq!(ids(&app, "a"), ["parent", "two", "one"]);
+        assert!(matches!(
+            commands.recv().unwrap(),
+            Cmd::Reparent {
+                task_id,
+                parent: Some(parent),
+                previous: None,
+                ..
+            } if task_id == "two" && parent == "parent"
+        ));
+    }
+
+    #[test]
+    fn failed_reorder_restores_both_tasks_and_enters_recovery() {
+        let (mut app, commands) = app_with_lists(&["a"]);
+        let _ = commands.recv().unwrap(); // startup refresh
+        app.sync = SyncState::Ready;
+        set_tasks(
+            &mut app,
+            "a",
+            vec![
+                task("first", None, "1", false),
+                task("second", None, "2", false),
+            ],
+            "second",
+        );
+
+        app.shift_task(false);
+        assert_eq!(ids(&app, "a"), ["second", "first"]);
+        let Cmd::Reparent { operation, .. } = commands.recv().unwrap() else {
+            panic!("expected a same-list move");
+        };
+        app.on_msg(Msg::Reparented {
+            operation,
+            list_id: "a".into(),
+            task_id: "second".into(),
+            parent: None,
+            result: Err("offline".into()),
+        });
+
+        assert_eq!(ids(&app, "a"), ["first", "second"]);
+        assert_eq!(app.board.task("a", "first").unwrap().position, "1");
+        assert_eq!(app.board.task("a", "second").unwrap().position, "2");
+        assert_eq!(app.columns[0].selected_id.as_deref(), Some("second"));
+        assert_eq!(app.sync, SyncState::Refreshing);
+        assert!(app
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("reorder failed")));
+    }
+
+    #[test]
+    fn reorder_at_an_edge_reports_and_sends_nothing() {
+        let (mut app, commands) = app_with_lists(&["a"]);
+        let _ = commands.recv().unwrap(); // startup refresh
+        app.sync = SyncState::Ready;
+        set_tasks(
+            &mut app,
+            "a",
+            vec![
+                task("first", None, "1", false),
+                task("second", None, "2", false),
+            ],
+            "first",
+        );
+
+        app.shift_task(false);
+
+        assert_eq!(app.error.as_deref(), Some("task is already first"));
+        assert!(commands.try_recv().is_err());
+        assert!(app.pending_operation.is_none());
     }
 
     #[test]
