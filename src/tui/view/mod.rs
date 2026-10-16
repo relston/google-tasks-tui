@@ -176,7 +176,9 @@ mod tests {
     fn status_hints_use_the_active_keymap() {
         let mut app = one_list_app();
         let mut config = Config::default();
-        config.keys.create_task = Some(BindingConfig::one("n"));
+        config
+            .keys
+            .insert("create_task".into(), BindingConfig::one("n"));
         let (keymap, diagnostics) = config.keymap();
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
         app.config = config;
@@ -316,8 +318,12 @@ mod tests {
     #[test]
     fn small_terminal_messages_name_the_configured_keys() {
         let mut config = Config::default();
-        config.keys.cancel_edit = Some(BindingConfig::one("ctrl+g"));
-        config.keys.close_shelf = Some(BindingConfig::one("ctrl+o"));
+        config
+            .keys
+            .insert("cancel_edit".into(), BindingConfig::one("ctrl+g"));
+        config
+            .keys
+            .insert("close_shelf".into(), BindingConfig::one("ctrl+o"));
         let (keymap, diagnostics) = config.keymap();
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
 

@@ -234,7 +234,9 @@ mod tests {
     #[test]
     fn configured_board_binding_replaces_its_default() {
         let mut config = Config::default();
-        config.keys.create_task = Some(BindingConfig::one("n"));
+        config
+            .keys
+            .insert("create_task".into(), BindingConfig::one("n"));
         let (mut app, _commands) = app_with_lists_and_config(&["a"], config);
         app.sync = SyncState::Ready;
 
@@ -248,7 +250,9 @@ mod tests {
     #[test]
     fn empty_configured_binding_disables_the_action() {
         let mut config = Config::default();
-        config.keys.delete_task = Some(BindingConfig::empty());
+        config
+            .keys
+            .insert("delete_task".into(), BindingConfig::empty());
         let (mut app, _commands) = app_with_lists_and_config(&["a"], config);
         app.sync = SyncState::Ready;
 
@@ -259,7 +263,9 @@ mod tests {
     #[test]
     fn configured_modified_chord_dispatches_directly() {
         let mut config = Config::default();
-        config.keys.create_task = Some(BindingConfig::one("ctrl+b"));
+        config
+            .keys
+            .insert("create_task".into(), BindingConfig::one("ctrl+b"));
         let (mut app, _commands) = app_with_lists_and_config(&["a"], config);
         app.sync = SyncState::Ready;
 
@@ -272,8 +278,12 @@ mod tests {
     #[test]
     fn picker_and_editor_actions_use_their_contextual_bindings() {
         let mut config = Config::default();
-        config.keys.close_picker = Some(BindingConfig::one("x"));
-        config.keys.save_edit = Some(BindingConfig::one("ctrl+s"));
+        config
+            .keys
+            .insert("close_picker".into(), BindingConfig::one("x"));
+        config
+            .keys
+            .insert("save_edit".into(), BindingConfig::one("ctrl+s"));
         let (mut app, _commands) = app_with_lists_and_config(&["a"], config);
 
         app.interaction = Interaction::Move(Picker::new(vec![PickerRow::new(
@@ -324,9 +334,13 @@ mod tests {
     #[test]
     fn keyboard_overlay_uses_active_bindings_and_omits_disabled_actions() {
         let mut config = Config::default();
-        config.keys.help = Some(BindingConfig::one("f1"));
-        config.keys.create_task = Some(BindingConfig::one("n"));
-        config.keys.delete_task = Some(BindingConfig::empty());
+        config.keys.insert("help".into(), BindingConfig::one("f1"));
+        config
+            .keys
+            .insert("create_task".into(), BindingConfig::one("n"));
+        config
+            .keys
+            .insert("delete_task".into(), BindingConfig::empty());
         let (mut app, _commands) = app_with_lists_and_config(&["a"], config);
 
         app.on_key(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE));

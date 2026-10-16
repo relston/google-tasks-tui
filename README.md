@@ -180,36 +180,21 @@ keys, arrows, `enter`, `esc`, `tab`, and named punctuation such as `comma`,
 `period`, `slash`, and `plus`. Uppercase letters imply Shift. Modifier chords
 such as `ctrl+b` are matched directly.
 
-The complete commented configuration, including every action and its default,
-is available without authentication:
+Every action name, grouped by where it works and listed with its default,
+is in the commented configuration. Print it without signing in:
 
 ```sh
 google-tasks-tui --default-config
 ```
 
-Action names are grouped as follows:
-
-- Board: `quit`, `close_shelf`, `previous_list`, `next_list`,
-  `previous_task`, `next_task`, `first_task`, `last_task`, `toggle_details`,
-  `next_field`, `previous_field`, `edit`, `toggle_done`, `toggle_completed`,
-  `delete_task`, `create_task`, `create_subtask`, `refresh`,
-  `toggle_transparent`, `copy_task`, `browse_links`, `move_task`,
-  `reorder_up`, `reorder_down`, `unparent_task`, `choose_parent`, and
-  `help`.
-- Picker: `close_picker`, `start_filter`, `picker_next`, `picker_previous`,
-  `picker_accept`, and `picker_accept_all`.
-- Filter input: `stop_filter`, `filter_next`, `filter_previous`,
-  `filter_accept`, `filter_accept_all`, and `filter_backspace`.
-- Editor: `cancel_edit`, `save_edit`, `insert_newline`, `delete_word`,
-  `clear_to_line_start`, `cursor_line_start`, `cursor_line_end`,
-  `cursor_left`, `cursor_right`, `cursor_up`, `cursor_down`,
-  `editor_backspace`, and `editor_delete`.
-- Confirmation: `confirm_delete`.
+In the app, `?` opens the Keyboard overlay, which lists every action with the
+keys it is bound to right now.
 
 The Keyboard overlay and status hints always show the active bindings.
 Conflicting user bindings report which action won. User overrides displace
 conflicting built-in defaults. Unmodified printable editor/filter bindings
-are rejected because they would prevent typing.
+are rejected because they would prevent typing. An unknown action name is
+reported in the status bar and ignored; the rest of the file still applies.
 
 ## Install and run
 

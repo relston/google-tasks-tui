@@ -163,12 +163,12 @@ Replace the per-mutation `Cmd`, `Msg`, worker arm, `MutationContext`,
 
 Define every action once and generate everything else from it.
 
-- [ ] a) Write tests: the generated template round-trips to the default keymap, and an unknown `[keys]` name warns while other settings still load.
-- [ ] b) Add the `actions!` table generating the enum, `ALL`, names, help text, contexts, defaults, and name lookup.
-- [ ] c) Make `Keymap` concrete over `Action`; delete the generic parameter, the test action type, and `BindingSpec.name`.
-- [ ] d) Read `[keys]` as a map validated against the table, with one diagnostic per bad entry.
-- [ ] e) Generate the `[keys]` section of `--default-config` from the table.
-- [ ] f) Replace the hand-maintained action list in [`README.md`](README.md) with pointers to `--default-config` and the `?` overlay.
+- [x] a) Write tests: the generated template round-trips to the default keymap, and an unknown `[keys]` name warns while other settings still load.
+- [x] b) Add the `actions!` table generating the enum, `ALL`, names, help text, contexts, defaults, and name lookup.
+- [x] c) Make `Keymap` concrete over `Action`; delete the generic parameter, the test action type, and `BindingSpec.name`. (`BindingSpec` and `BindingSource` are gone too; `Keymap::new(overrides)` builds from the table.)
+- [x] d) Read `[keys]` as a map validated against the table, with one diagnostic per bad entry.
+- [x] e) Generate the `[keys]` section of `--default-config` from the table. (Output is byte-for-byte what the hand-written template produced.)
+- [x] f) Replace the hand-maintained action list in [`README.md`](README.md) with pointers to `--default-config` and the `?` overlay.
 
 ## Phase 5: Read-only rendering
 

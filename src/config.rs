@@ -2,20 +2,19 @@
 //! board snapshot. The file is written with its defaults the first time the
 //! app runs, so it documents itself and can be edited in place.
 
-use std::{fs, io};
+use std::{collections::BTreeMap, fs, io};
 
 use serde::Deserialize;
 
 use crate::{
     atomic_file,
-    keys::{default_binding_specs, Action, BindingConfig, BindingSource, Keymap},
+    keys::{Action, BindingConfig, Keymap},
     paths::Paths,
     theme::ThemeConfig,
 };
 
-/// What ships in a fresh `config.toml`. Keep it in step with `Config`:
-/// `template_matches_the_defaults` fails if it drifts.
-const TEMPLATE: &str = "\
+/// The top of a fresh `config.toml`, through the `[keys]` header.
+const HEADER: &str = "\
 # google-tasks-tui settings. Delete a line to go back to its default.
 
 # Wrap long task titles onto as many lines as they need, in the board columns
@@ -27,70 +26,10 @@ wrap_titles = true
 # an action. Supported modifiers include ctrl, shift, alt, and cmd/super;
 # special keys include enter, esc, tab, arrows, home/end, and f1..f24.
 [keys]
+";
 
-# Board
-# quit = \"q\"
-# close_shelf = \"esc\"
-# previous_list = [\"h\", \"left\"]
-# next_list = [\"l\", \"right\"]
-# previous_task = [\"k\", \"up\"]
-# next_task = [\"j\", \"down\"]
-# first_task = [\"g\", \"home\"]
-# last_task = [\"shift+g\", \"end\"]
-# toggle_details = \"enter\"
-# next_field = \"tab\"
-# previous_field = \"shift+tab\"
-# edit = \"i\"
-# toggle_done = \"space\"
-# toggle_completed = \"v\"
-# delete_task = \"d\"
-# create_task = \"c\"
-# create_subtask = \"shift+c\"
-# refresh = \"r\"
-# toggle_transparent = \"t\"
-# copy_task = \"y\"
-# browse_links = \"b\"
-# move_task = \"m\"
-# reorder_up = [\"alt+k\", \"alt+up\"]
-# reorder_down = [\"alt+j\", \"alt+down\"]
-# unparent_task = \"shift+comma\"
-# choose_parent = \"shift+period\"
-# help = \"shift+slash\"
-
-# Picker overlays
-# close_picker = [\"esc\", \"q\"]
-# start_filter = \"slash\"
-# picker_next = [\"j\", \"down\"]
-# picker_previous = [\"k\", \"up\"]
-# picker_accept = \"enter\"
-# picker_accept_all = \"shift+enter\"
-
-# Picker filter input
-# stop_filter = \"esc\"
-# filter_next = \"down\"
-# filter_previous = \"up\"
-# filter_accept = \"enter\"
-# filter_accept_all = \"shift+enter\"
-# filter_backspace = \"backspace\"
-
-# Task editor
-# cancel_edit = \"esc\"
-# save_edit = \"enter\"
-# insert_newline = [\"shift+enter\", \"alt+enter\", \"ctrl+j\"]
-# delete_word = \"ctrl+w\"
-# clear_to_line_start = \"ctrl+u\"
-# cursor_line_start = [\"ctrl+a\", \"home\"]
-# cursor_line_end = [\"ctrl+e\", \"end\"]
-# cursor_left = \"left\"
-# cursor_right = \"right\"
-# cursor_up = \"up\"
-# cursor_down = \"down\"
-# editor_backspace = \"backspace\"
-# editor_delete = \"delete\"
-
-# Confirmation
-# confirm_delete = \"y\"
-
+/// The bottom of a fresh `config.toml`: the theme roles.
+const THEME: &str = "\
 # Colors. `source = \"auto\"` follows the active Omarchy theme when one is
 # installed and otherwise uses your terminal's own palette; \"ansi\" always
 # uses the terminal palette. Any role below overrides the source. A color is
@@ -112,8 +51,37 @@ wrap_titles = true
 # blue = \"blue\"
 ";
 
-pub fn default_toml() -> &'static str {
-    TEMPLATE
+/// What ships in a fresh `config.toml`: every setting commented out at its
+/// default. The `[keys]` section comes from the action table, so it cannot
+/// drift from the real defaults.
+pub fn default_toml() -> String {
+    let mut out = String::from(HEADER);
+    let mut section = None;
+    for action in Action::ALL {
+        let context = action.contexts()[0];
+        if section != Some(context) {
+            out.push_str(&format!("\n# {}\n", context.heading()));
+            section = Some(context);
+        }
+        out.push_str(&format!(
+            "# {} = {}\n",
+            action.name(),
+            toml_binding(action.defaults())
+        ));
+    }
+    out.push('\n');
+    out.push_str(THEME);
+    out
+}
+
+fn toml_binding(keys: &[&str]) -> String {
+    match keys {
+        [one] => format!("{one:?}"),
+        many => {
+            let quoted: Vec<String> = many.iter().map(|key| format!("{key:?}")).collect();
+            format!("[{}]", quoted.join(", "))
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
@@ -121,7 +89,9 @@ pub fn default_toml() -> &'static str {
 #[serde(deny_unknown_fields)]
 pub struct Config {
     pub wrap_titles: bool,
-    pub keys: KeysConfig,
+    /// Action name to binding. Names are checked when the keymap is built,
+    /// so a typo is a warning rather than a reason to reject the file.
+    pub keys: BTreeMap<String, BindingConfig>,
     pub theme: ThemeConfig,
 }
 
@@ -129,100 +99,27 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             wrap_titles: true,
-            keys: KeysConfig::default(),
+            keys: BTreeMap::new(),
             theme: ThemeConfig::default(),
         }
     }
 }
 
-macro_rules! key_fields {
-    ($($field:ident => $action:ident),+ $(,)?) => {
-        #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
-        #[serde(default)]
-        #[serde(deny_unknown_fields)]
-        pub struct KeysConfig {
-            $(pub $field: Option<BindingConfig>,)+
-        }
-
-        impl KeysConfig {
-            fn binding(&self, action: Action) -> Option<&BindingConfig> {
-                match action {
-                    $(Action::$action => self.$field.as_ref(),)+
+impl Config {
+    pub fn keymap(&self) -> (Keymap, Vec<String>) {
+        let mut diagnostics = Vec::new();
+        let mut overrides = Vec::new();
+        for (name, binding) in &self.keys {
+            match Action::from_name(name) {
+                Some(action) => overrides.push((action, binding.clone())),
+                None => {
+                    diagnostics.push(format!("unknown keybinding action {name:?}; ignoring it"))
                 }
             }
         }
-    };
-}
-
-key_fields! {
-    quit => Quit,
-    close_shelf => CloseShelf,
-    previous_list => PreviousList,
-    next_list => NextList,
-    previous_task => PreviousTask,
-    next_task => NextTask,
-    first_task => FirstTask,
-    last_task => LastTask,
-    toggle_details => ToggleDetails,
-    next_field => NextField,
-    previous_field => PreviousField,
-    edit => Edit,
-    toggle_done => ToggleDone,
-    toggle_completed => ToggleCompleted,
-    delete_task => DeleteTask,
-    create_task => CreateTask,
-    create_subtask => CreateSubtask,
-    refresh => Refresh,
-    toggle_transparent => ToggleTransparent,
-    copy_task => CopyTask,
-    browse_links => BrowseLinks,
-    move_task => MoveTask,
-    reorder_up => ReorderUp,
-    reorder_down => ReorderDown,
-    unparent_task => UnparentTask,
-    choose_parent => ChooseParent,
-    help => Help,
-    close_picker => ClosePicker,
-    start_filter => StartFilter,
-    picker_next => PickerNext,
-    picker_previous => PickerPrevious,
-    picker_accept => PickerAccept,
-    picker_accept_all => PickerAcceptAll,
-    stop_filter => StopFilter,
-    filter_next => FilterNext,
-    filter_previous => FilterPrevious,
-    filter_accept => FilterAccept,
-    filter_accept_all => FilterAcceptAll,
-    filter_backspace => FilterBackspace,
-    cancel_edit => CancelEdit,
-    save_edit => SaveEdit,
-    insert_newline => InsertNewline,
-    delete_word => DeleteWord,
-    clear_to_line_start => ClearToLineStart,
-    cursor_line_start => CursorLineStart,
-    cursor_line_end => CursorLineEnd,
-    cursor_left => CursorLeft,
-    cursor_right => CursorRight,
-    cursor_up => CursorUp,
-    cursor_down => CursorDown,
-    editor_backspace => EditorBackspace,
-    editor_delete => EditorDelete,
-    confirm_delete => ConfirmDelete,
-}
-
-impl Config {
-    pub fn keymap(&self) -> (Keymap<Action>, Vec<String>) {
-        let specs = default_binding_specs()
-            .into_iter()
-            .map(|mut spec| {
-                if let Some(binding) = self.keys.binding(spec.action) {
-                    spec.config = binding.clone();
-                    spec.source = BindingSource::User;
-                }
-                spec
-            })
-            .collect::<Vec<_>>();
-        Keymap::build(&specs)
+        let (keymap, binding_diagnostics) = Keymap::new(&overrides);
+        diagnostics.extend(binding_diagnostics);
+        (keymap, diagnostics)
     }
 }
 
@@ -238,7 +135,7 @@ pub fn load(paths: &Paths) -> (Config, Option<String>) {
             ),
         },
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            let warning = atomic_file::write_private(&path, TEMPLATE.as_bytes())
+            let warning = atomic_file::write_private(&path, default_toml().as_bytes())
                 .err()
                 .map(|error| format!("writing {}: {error}", path.display()));
             (Config::default(), warning)
@@ -261,7 +158,69 @@ mod tests {
 
     #[test]
     fn template_matches_the_defaults() {
-        assert_eq!(parse(TEMPLATE).unwrap(), Config::default());
+        assert_eq!(parse(&default_toml()).unwrap(), Config::default());
+    }
+
+    #[test]
+    fn the_generated_keys_template_round_trips_to_the_default_keymap() {
+        let template = default_toml();
+        let keys_start = template.find("[keys]").unwrap();
+        let keys_end = template.find("[theme]").unwrap();
+        let uncommented: String = template[keys_start..keys_end]
+            .lines()
+            .map(|line| match line.strip_prefix("# ") {
+                Some(rest)
+                    if rest
+                        .split_once(" = ")
+                        .is_some_and(|(name, _)| Action::from_name(name).is_some()) =>
+                {
+                    rest
+                }
+                _ => line,
+            })
+            .map(|line| format!("{line}\n"))
+            .collect();
+
+        let config = parse(&uncommented).unwrap();
+        assert_eq!(config.keys.len(), Action::ALL.len());
+        let (keymap, diagnostics) = config.keymap();
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let (defaults, _) = Keymap::new(&[]);
+        for action in Action::ALL {
+            assert_eq!(
+                keymap.labels_for(*action),
+                defaults.labels_for(*action),
+                "{}",
+                action.name()
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_key_names_warn_while_other_settings_still_load() {
+        let config = parse(
+            r#"
+wrap_titles = false
+
+[keys]
+nonsense = "x"
+quit = "ctrl+q"
+
+[theme]
+accent = "magenta"
+"#,
+        )
+        .unwrap();
+
+        assert!(!config.wrap_titles);
+        assert_eq!(
+            config.theme.accent,
+            Some(crate::theme::ColorSpec(ratatui::style::Color::Magenta))
+        );
+        let (keymap, diagnostics) = config.keymap();
+        assert_eq!(keymap.labels_for(Action::Quit), ["ctrl+q"]);
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+        assert!(diagnostics[0].contains("nonsense"), "{diagnostics:?}");
     }
 
     #[test]
@@ -272,13 +231,13 @@ mod tests {
     }
 
     #[test]
-    fn malformed_and_unknown_settings_are_rejected() {
+    fn malformed_and_unknown_top_level_settings_are_rejected() {
         assert_eq!(parse("").unwrap(), Config::default());
         for raw in [
             "not toml at all",
             "wrap_titles = \"yes\"",
             "nonsense = 1",
-            "[keys]\nnonsense = \"x\"",
+            "[keys]\nquit = 1",
             "[theme]\naccent = \"chartreuse\"",
         ] {
             assert!(parse(raw).is_err(), "{raw:?}");
@@ -296,17 +255,8 @@ delete_task = ""
         )
         .unwrap();
 
-        assert_eq!(
-            config.keys.create_task.as_ref().unwrap().values(),
-            ["n", "ctrl+b"]
-        );
-        assert!(config
-            .keys
-            .delete_task
-            .as_ref()
-            .unwrap()
-            .values()
-            .is_empty());
+        assert_eq!(config.keys["create_task"].values(), ["n", "ctrl+b"]);
+        assert!(config.keys["delete_task"].values().is_empty());
     }
 
     #[test]
@@ -351,8 +301,9 @@ create_task = "ctrl+b"
     }
 
     #[test]
-    fn prefix_configuration_is_rejected() {
-        assert!(parse("[keys]\nprefix = \"ctrl+b\"").is_err());
+    fn prefix_mode_is_not_an_action() {
+        let (_, diagnostics) = parse("[keys]\nprefix = \"ctrl+b\"").unwrap().keymap();
+        assert!(diagnostics.iter().any(|message| message.contains("prefix")));
     }
 
     #[test]
@@ -362,16 +313,20 @@ create_task = "ctrl+b"
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
         assert_eq!(keymap.labels_for(Action::ReorderUp), ["ctrl+k"]);
         assert_eq!(keymap.labels_for(Action::ReorderDown), ["ctrl+j"]);
-        assert!(parse("[keys]\nmove_task_up = \"ctrl+k\"").is_err());
-        assert!(parse("[keys]\nmove_task_down = \"ctrl+j\"").is_err());
+        let (_, diagnostics) =
+            parse("[keys]\nmove_task_up = \"ctrl+k\"\nmove_task_down = \"ctrl+j\"")
+                .unwrap()
+                .keymap();
+        assert_eq!(diagnostics.len(), 2, "{diagnostics:?}");
     }
 
     #[test]
     fn default_template_documents_every_configurable_action() {
-        assert!(TEMPLATE.contains("[keys]"));
+        let template = default_toml();
+        assert!(template.contains("[keys]"));
         for action in Action::ALL {
             assert!(
-                TEMPLATE.contains(&format!("{} =", action.name())),
+                template.contains(&format!("# {} =", action.name())),
                 "missing {}",
                 action.name()
             );
@@ -380,7 +335,8 @@ create_task = "ctrl+b"
 
     #[test]
     fn default_template_documents_every_theme_role() {
-        let theme = &TEMPLATE[TEMPLATE.find("[theme]").unwrap()..];
+        let template = default_toml();
+        let theme = &template[template.find("[theme]").unwrap()..];
         assert!(theme.contains("source ="));
         for role in ThemeConfig::ROLES {
             assert!(theme.contains(&format!("# {role} =")), "missing {role}");

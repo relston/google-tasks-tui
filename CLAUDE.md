@@ -20,11 +20,15 @@ disk, desktop), and the two front ends. Each file name says what it does.
   responses authoritative. [`google/auth.rs`](src/google/auth.rs) owns OAuth
   and token refresh; [`google/http.rs`](src/google/http.rs) owns the bounded
   HTTP agent.
-- [`src/keys/`](src/keys/mod.rs) owns action metadata, default bindings,
-  parsing, terminal-event normalization, contextual conflict detection, and
-  active labels. [`src/config.rs`](src/config.rs) provides optional `[keys]`
-  overrides; input dispatch, help, and status hints must all use the resolved
-  keymap rather than hard-coded keys.
+- [`src/keys/`](src/keys/mod.rs) owns key parsing, terminal-event
+  normalization, contextual conflict detection, and active labels. Each
+  action is one line in the `actions!` table in
+  [`keys/actions.rs`](src/keys/actions.rs) (name, contexts, defaults, help
+  text); the enum, lookups, and the `[keys]` part of `--default-config` are
+  generated from it. To add an action, add one table line and handle it in
+  [`tui/input.rs`](src/tui/input.rs). [`src/config.rs`](src/config.rs) reads
+  `[keys]` overrides by name; input dispatch, help, and status hints must all
+  use the resolved keymap rather than hard-coded keys.
 - The TUI keeps `App` state in [`src/tui/app.rs`](src/tui/app.rs) and splits
   behavior into `impl App` blocks by responsibility:
   [`input.rs`](src/tui/input.rs) dispatches keys,

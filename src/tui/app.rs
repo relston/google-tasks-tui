@@ -87,7 +87,7 @@ impl Interaction {
 
 pub(super) struct App {
     pub(super) config: Config,
-    pub(super) keymap: Keymap<Action>,
+    pub(super) keymap: Keymap,
     pub(super) theme: Theme,
     pub(super) fingerprint: theme::Fingerprint,
     pub(super) transparent: bool,
@@ -289,7 +289,9 @@ mod tests {
     #[test]
     fn the_waiting_quit_notice_names_the_configured_quit_key() {
         let mut config = Config::default();
-        config.keys.quit = Some(BindingConfig::one("ctrl+x"));
+        config
+            .keys
+            .insert("quit".into(), BindingConfig::one("ctrl+x"));
         let (mut app, _cmds) = app_with_lists_and_config(&["a"], config);
         pending(&mut app);
 
@@ -359,7 +361,9 @@ mod tests {
     #[test]
     fn invalid_keybinding_diagnostics_survive_startup_refresh() {
         let mut config = Config::default();
-        config.keys.help = Some(BindingConfig::one("not-a-key"));
+        config
+            .keys
+            .insert("help".into(), BindingConfig::one("not-a-key"));
         let (app, _commands) = app_with_lists_and_config(&["a"], config);
 
         assert!(app
