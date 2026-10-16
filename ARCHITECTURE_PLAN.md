@@ -136,15 +136,15 @@ small rule breaks found in review.
 Move code into the target layout with no behavior change. Keep each move
 mechanical so the diff is easy to review.
 
-- [ ] a) Create `model.rs` with `Task`, `TaskList`, `Status`, and the title rules.
-- [ ] b) Create `google/` (`client.rs`, `requests.rs`, `auth.rs`, `http.rs`, `mod.rs`); implement `TasksApi` directly on `Client` and delete the forwarding copies.
-- [ ] c) Merge [`src/tui/board.rs`](src/tui/board.rs) into [`src/board.rs`](src/board.rs).
-- [ ] d) Rename `storage.rs` to `atomic_file.rs`, `platform.rs` to `desktop.rs`, and `presentation.rs` to `markdown.rs`.
-- [ ] e) Split [`src/keybindings.rs`](src/keybindings.rs) into `keys/actions.rs`, `keys/combo.rs`, and `keys/keymap.rs`.
-- [ ] f) Split [`src/tui/app.rs`](src/tui/app.rs) into `editor.rs`, `picker.rs`, `columns.rs`, `sync.rs`, `mutation.rs`, `input.rs`, and `commands.rs`.
-- [ ] g) Split [`src/tui/render.rs`](src/tui/render.rs) into `view/` modules for layout, columns, shelf, overlay, status, and text.
-- [ ] h) Move each test next to the code it covers.
-- [ ] i) Update the architecture section of [`CLAUDE.md`](CLAUDE.md) and the links in [`README.md`](README.md).
+- [x] a) Create `model.rs` with `Task`, `TaskList`, `Status`, and the title rules.
+- [x] b) Create `google/` (`client.rs`, `requests.rs`, `auth.rs`, `http.rs`, `mod.rs`); implement `TasksApi` directly on `Client` and delete the forwarding copies.
+- [x] c) Merge `src/tui/board.rs` into [`src/board.rs`](src/board.rs). (`move_requests` went to the worker, its only user.)
+- [x] d) Rename `storage.rs` to `atomic_file.rs`, `platform.rs` to `desktop.rs`, and `presentation.rs` to `markdown.rs`.
+- [x] e) Split `src/keybindings.rs` into `keys/actions.rs`, `keys/combo.rs`, and `keys/keymap.rs`.
+- [x] f) Split [`src/tui/app.rs`](src/tui/app.rs) into `editor.rs`, `picker.rs`, `columns.rs`, `sync.rs`, `mutation.rs`, `input.rs`, and `commands.rs`.
+- [x] g) Split `src/tui/render.rs` into `view/` modules for layout, columns, shelf, overlay, status, and text.
+- [x] h) Move each test next to the code it covers.
+- [x] i) Update the architecture section of [`CLAUDE.md`](CLAUDE.md) and the links in [`README.md`](README.md).
 
 ## Phase 3: One mutation lifecycle
 

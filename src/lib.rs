@@ -1,14 +1,14 @@
-pub mod api;
-pub mod auth;
+pub mod atomic_file;
 pub mod board;
 pub mod cache;
 pub mod cli;
 pub mod config;
-pub mod keybindings;
+pub mod desktop;
+pub mod google;
+pub mod keys;
+pub mod markdown;
+pub mod model;
 pub mod paths;
-pub mod platform;
-pub mod presentation;
-pub mod storage;
 pub mod theme;
 pub mod tui;
 

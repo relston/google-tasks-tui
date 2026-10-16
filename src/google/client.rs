@@ -1,225 +1,16 @@
-//! Minimal Google Tasks v1 client.
+//! The Google Tasks v1 HTTP client.
 
-use std::{fmt, thread, time::Duration};
+use std::{thread, time::Duration};
 
-use chrono::{DateTime, NaiveDate, Utc};
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde::{de::DeserializeOwned, Deserialize};
 use serde_json::Value;
 
-use crate::auth::{pct, Auth};
+use super::auth::{self, Auth};
+use super::http::pct;
+use super::{CreateTask, Error, ListPatch, MoveTask, Result, TaskPatch, TasksApi};
+use crate::model::{Task, TaskList};
 
 const BASE: &str = "https://tasks.googleapis.com/tasks/v1";
-
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
-pub struct TaskList {
-    pub id: String,
-    pub title: String,
-    #[serde(default)]
-    pub etag: String,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub enum Status {
-    #[default]
-    NeedsAction,
-    Completed,
-}
-
-impl Status {
-    /// Google's spelling, shared by the CLI and Markdown output.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::NeedsAction => "needsAction",
-            Self::Completed => "completed",
-        }
-    }
-}
-
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase", default)]
-pub struct Task {
-    pub id: String,
-    pub etag: String,
-    pub title: String,
-    pub notes: Option<String>,
-    pub status: Status,
-    #[serde(with = "due_date")]
-    pub due: Option<NaiveDate>,
-    #[serde(with = "timestamp")]
-    pub completed: Option<DateTime<Utc>>,
-    #[serde(with = "timestamp")]
-    pub updated: Option<DateTime<Utc>>,
-    pub parent: Option<String>,
-    pub position: String,
-    pub hidden: bool,
-    pub deleted: bool,
-    pub web_view_link: Option<String>,
-    pub links: Vec<Link>,
-    pub assignment_info: Option<AssignmentInfo>,
-}
-
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
-#[serde(default)]
-pub struct Link {
-    pub description: String,
-    pub link: String,
-}
-
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase", default)]
-pub struct AssignmentInfo {
-    pub link_to_task: String,
-    pub surface_type: String,
-}
-
-#[derive(Clone, Debug, Default, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CreateTask {
-    pub title: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub notes: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none", with = "due_date")]
-    pub due: Option<NaiveDate>,
-}
-
-#[derive(Clone, Debug, Default, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TaskPatch {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub title: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub notes: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none", with = "due_date")]
-    pub due: Option<NaiveDate>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub status: Option<Status>,
-    /// Sends `"completed": null`, which Google needs to forget a completion.
-    #[serde(
-        rename = "completed",
-        skip_serializing_if = "std::ops::Not::not",
-        serialize_with = "null"
-    )]
-    pub clear_completed: bool,
-}
-
-impl TaskPatch {
-    /// Tick or untick a task. Unticking also clears the completion time.
-    pub fn status(status: Status) -> Self {
-        Self {
-            status: Some(status),
-            clear_completed: status == Status::NeedsAction,
-            ..Self::default()
-        }
-    }
-}
-
-fn null<S: serde::Serializer>(_: &bool, serializer: S) -> std::result::Result<S::Ok, S::Error> {
-    serializer.serialize_none()
-}
-
-/// Google sends due dates as midnight UTC timestamps; only the date matters.
-mod due_date {
-    use chrono::NaiveDate;
-    use serde::{Deserialize, Deserializer, Serializer};
-
-    pub fn serialize<S: Serializer>(
-        date: &Option<NaiveDate>,
-        serializer: S,
-    ) -> Result<S::Ok, S::Error> {
-        match date {
-            Some(date) => serializer.serialize_some(&format!("{date}T00:00:00.000Z")),
-            None => serializer.serialize_none(),
-        }
-    }
-
-    pub fn deserialize<'de, D: Deserializer<'de>>(
-        deserializer: D,
-    ) -> Result<Option<NaiveDate>, D::Error> {
-        let raw = Option::<String>::deserialize(deserializer)?;
-        Ok(raw.and_then(|raw| NaiveDate::parse_from_str(raw.get(..10)?, "%Y-%m-%d").ok()))
-    }
-}
-
-/// RFC 3339 timestamps in Google's millisecond form. An unreadable value is
-/// treated as missing rather than failing the whole list.
-mod timestamp {
-    use chrono::{DateTime, SecondsFormat, Utc};
-    use serde::{Deserialize, Deserializer, Serializer};
-
-    pub fn serialize<S: Serializer>(
-        time: &Option<DateTime<Utc>>,
-        serializer: S,
-    ) -> Result<S::Ok, S::Error> {
-        match time {
-            Some(time) => {
-                serializer.serialize_some(&time.to_rfc3339_opts(SecondsFormat::Millis, true))
-            }
-            None => serializer.serialize_none(),
-        }
-    }
-
-    pub fn deserialize<'de, D: Deserializer<'de>>(
-        deserializer: D,
-    ) -> Result<Option<DateTime<Utc>>, D::Error> {
-        let raw = Option::<String>::deserialize(deserializer)?;
-        Ok(raw
-            .and_then(|raw| DateTime::parse_from_rfc3339(&raw).ok())
-            .map(|time| time.with_timezone(&Utc)))
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct MoveTask {
-    /// `None` moves within the current list.
-    pub destination_list: Option<String>,
-    pub parent: Option<String>,
-    pub previous: Option<String>,
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub struct ListPatch {
-    pub title: String,
-}
-
-#[derive(Debug)]
-pub enum Error {
-    AuthExpired,
-    AssignedTask(String),
-    Conflict,
-    RateLimited { retry_after: Option<Duration> },
-    Timeout,
-    Http { status: u16, message: String },
-    Transport(String),
-    Decode(String),
-}
-
-impl fmt::Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::AuthExpired => f.write_str("sign-in expired"),
-            Self::AssignedTask(message) => f.write_str(message),
-            Self::Conflict => f.write_str("task changed in Google; refresh and try again"),
-            Self::RateLimited { retry_after } => match retry_after {
-                Some(delay) => write!(f, "Google rate limit; retry after {}s", delay.as_secs()),
-                None => f.write_str("Google rate limit"),
-            },
-            Self::Timeout => f.write_str("Google request timed out"),
-            Self::Http { status, message } => write!(f, "Google HTTP {status}: {message}"),
-            Self::Transport(message) | Self::Decode(message) => f.write_str(message),
-        }
-    }
-}
-
-impl std::error::Error for Error {}
-
-pub type Result<T> = std::result::Result<T, Error>;
-
-impl Task {
-    pub fn is_done(&self) -> bool {
-        self.status == Status::Completed
-    }
-}
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -308,177 +99,6 @@ impl Client {
         unreachable!("request retry loop always returns")
     }
 
-    pub fn tasklists(&mut self) -> Result<Vec<TaskList>> {
-        self.get_all(&format!("{}/users/@me/lists", self.base_url), &[])
-    }
-
-    /// Every task in a list, including completed and hidden ones.
-    pub fn tasks(&mut self, list_id: &str) -> Result<Vec<Task>> {
-        self.get_all(
-            &format!("{}/lists/{}/tasks", self.base_url, pct(list_id)),
-            &[
-                ("showCompleted", "true"),
-                ("showHidden", "true"),
-                ("showAssigned", "true"),
-            ],
-        )
-    }
-
-    /// Patch the given fields of a task; returns it as Google stored it.
-    pub fn patch(
-        &mut self,
-        list_id: &str,
-        task_id: &str,
-        patch: &TaskPatch,
-        etag: Option<&str>,
-    ) -> Result<Task> {
-        let url = format!(
-            "{}/lists/{}/tasks/{}",
-            self.base_url,
-            pct(list_id),
-            pct(task_id)
-        );
-        let etag = etag.filter(|etag| !etag.is_empty()).map(str::to_string);
-        let task = self
-            .request(false, |agent, token| {
-                let mut request = agent
-                    .patch(&url)
-                    .header("Authorization", format!("Bearer {token}"));
-                if let Some(etag) = &etag {
-                    request = request.header("If-Match", etag);
-                }
-                request.send_json(patch)
-            })?
-            .body_mut()
-            .read_json()
-            .map_err(map_ureq)?;
-        Ok(task)
-    }
-
-    /// Add a task to the top of a list, under `parent` when given.
-    pub fn create(
-        &mut self,
-        list_id: &str,
-        task: &CreateTask,
-        parent: Option<&str>,
-    ) -> Result<Task> {
-        let url = format!("{}/lists/{}/tasks", self.base_url, pct(list_id));
-        let parent = parent.map(str::to_string);
-        self.request(false, |agent, token| {
-            let mut request = agent
-                .post(&url)
-                .header("Authorization", format!("Bearer {token}"));
-            if let Some(parent) = &parent {
-                request = request.query("parent", parent);
-            }
-            request.send_json(task)
-        })?
-        .body_mut()
-        .read_json()
-        .map_err(map_ureq)
-    }
-
-    /// Delete a task. Google deletes its subtasks along with it.
-    pub fn delete(&mut self, list_id: &str, task_id: &str, etag: Option<&str>) -> Result<()> {
-        let url = format!(
-            "{}/lists/{}/tasks/{}",
-            self.base_url,
-            pct(list_id),
-            pct(task_id)
-        );
-        let etag = etag.filter(|etag| !etag.is_empty()).map(str::to_string);
-        self.request(false, |agent, token| {
-            let mut request = agent
-                .delete(&url)
-                .header("Authorization", format!("Bearer {token}"));
-            if let Some(etag) = &etag {
-                request = request.header("If-Match", etag);
-            }
-            request.call()
-        })?;
-        Ok(())
-    }
-
-    /// Move a task into another list. Omit `parent` to make it top-level.
-    pub fn move_task(&mut self, list_id: &str, task_id: &str, movement: &MoveTask) -> Result<Task> {
-        let url = format!(
-            "{}/lists/{}/tasks/{}/move",
-            self.base_url,
-            pct(list_id),
-            pct(task_id)
-        );
-        self.request(false, |agent, token| {
-            let mut request = agent
-                .post(&url)
-                .header("Authorization", format!("Bearer {token}"));
-            if let Some(destination) = &movement.destination_list {
-                request = request.query("destinationTasklist", destination);
-            }
-            if let Some(parent) = &movement.parent {
-                request = request.query("parent", parent);
-            }
-            if let Some(previous) = &movement.previous {
-                request = request.query("previous", previous);
-            }
-            request.send_empty()
-        })?
-        .body_mut()
-        .read_json()
-        .map_err(map_ureq)
-    }
-
-    /// Create a task list.
-    pub fn create_list(&mut self, title: &str) -> Result<TaskList> {
-        let patch = ListPatch {
-            title: title.to_string(),
-        };
-        let url = format!("{}/users/@me/lists", self.base_url);
-        self.request(false, |agent, token| {
-            agent
-                .post(&url)
-                .header("Authorization", format!("Bearer {token}"))
-                .send_json(&patch)
-        })?
-        .body_mut()
-        .read_json()
-        .map_err(map_ureq)
-    }
-
-    /// Patch the given fields of a task list; returns it as Google stored it.
-    pub fn patch_list(
-        &mut self,
-        list_id: &str,
-        patch: &ListPatch,
-        etag: Option<&str>,
-    ) -> Result<TaskList> {
-        let url = format!("{}/users/@me/lists/{}", self.base_url, pct(list_id));
-        let etag = etag.filter(|etag| !etag.is_empty()).map(str::to_string);
-        self.request(false, |agent, token| {
-            let mut request = agent
-                .patch(&url)
-                .header("Authorization", format!("Bearer {token}"));
-            if let Some(etag) = &etag {
-                request = request.header("If-Match", etag);
-            }
-            request.send_json(patch)
-        })?
-        .body_mut()
-        .read_json()
-        .map_err(map_ureq)
-    }
-
-    /// Delete a task list. Google deletes every task in it.
-    pub fn delete_list(&mut self, list_id: &str) -> Result<()> {
-        let url = format!("{}/users/@me/lists/{}", self.base_url, pct(list_id));
-        self.request(false, |agent, token| {
-            agent
-                .delete(&url)
-                .header("Authorization", format!("Bearer {token}"))
-                .call()
-        })?;
-        Ok(())
-    }
-
     /// Follow `nextPageToken` until the collection is exhausted.
     fn get_all<T: DeserializeOwned>(
         &mut self,
@@ -515,7 +135,7 @@ impl Client {
 
     fn token(&mut self) -> Result<String> {
         self.auth.token().map_err(|error| match error {
-            crate::auth::Error::SignInExpired { .. } => Error::AuthExpired,
+            auth::Error::SignInExpired { .. } => Error::AuthExpired,
             error => Error::Transport(error.to_string()),
         })
     }
@@ -535,43 +155,24 @@ fn should_retry(status: u16, safe_to_retry: bool, attempt: usize) -> bool {
     safe_to_retry && attempt < 2 && (status == 429 || (500..600).contains(&status))
 }
 
-/// The Google Tasks operations the CLI (and tests) need. `Client` is the
-/// real implementation; tests use a fake.
-pub trait TasksApi {
-    fn account_fingerprint(&self) -> String;
-    fn tasklists(&mut self) -> Result<Vec<TaskList>>;
-    fn tasks(&mut self, list_id: &str) -> Result<Vec<Task>>;
-    fn patch(
-        &mut self,
-        list_id: &str,
-        task_id: &str,
-        patch: &TaskPatch,
-        etag: Option<&str>,
-    ) -> Result<Task>;
-    fn create(&mut self, list_id: &str, task: &CreateTask, parent: Option<&str>) -> Result<Task>;
-    fn delete(&mut self, list_id: &str, task_id: &str, etag: Option<&str>) -> Result<()>;
-    fn move_task(&mut self, list_id: &str, task_id: &str, movement: &MoveTask) -> Result<Task>;
-    fn create_list(&mut self, title: &str) -> Result<TaskList>;
-    fn patch_list(
-        &mut self,
-        list_id: &str,
-        patch: &ListPatch,
-        etag: Option<&str>,
-    ) -> Result<TaskList>;
-    fn delete_list(&mut self, list_id: &str) -> Result<()>;
-}
-
 impl TasksApi for Client {
     fn account_fingerprint(&self) -> String {
         self.auth.fingerprint()
     }
 
     fn tasklists(&mut self) -> Result<Vec<TaskList>> {
-        Client::tasklists(self)
+        self.get_all(&format!("{}/users/@me/lists", self.base_url), &[])
     }
 
     fn tasks(&mut self, list_id: &str) -> Result<Vec<Task>> {
-        Client::tasks(self, list_id)
+        self.get_all(
+            &format!("{}/lists/{}/tasks", self.base_url, pct(list_id)),
+            &[
+                ("showCompleted", "true"),
+                ("showHidden", "true"),
+                ("showAssigned", "true"),
+            ],
+        )
     }
 
     fn patch(
@@ -581,23 +182,107 @@ impl TasksApi for Client {
         patch: &TaskPatch,
         etag: Option<&str>,
     ) -> Result<Task> {
-        Client::patch(self, list_id, task_id, patch, etag)
+        let url = format!(
+            "{}/lists/{}/tasks/{}",
+            self.base_url,
+            pct(list_id),
+            pct(task_id)
+        );
+        let etag = etag.filter(|etag| !etag.is_empty()).map(str::to_string);
+        let task = self
+            .request(false, |agent, token| {
+                let mut request = agent
+                    .patch(&url)
+                    .header("Authorization", format!("Bearer {token}"));
+                if let Some(etag) = &etag {
+                    request = request.header("If-Match", etag);
+                }
+                request.send_json(patch)
+            })?
+            .body_mut()
+            .read_json()
+            .map_err(map_ureq)?;
+        Ok(task)
     }
 
     fn create(&mut self, list_id: &str, task: &CreateTask, parent: Option<&str>) -> Result<Task> {
-        Client::create(self, list_id, task, parent)
+        let url = format!("{}/lists/{}/tasks", self.base_url, pct(list_id));
+        let parent = parent.map(str::to_string);
+        self.request(false, |agent, token| {
+            let mut request = agent
+                .post(&url)
+                .header("Authorization", format!("Bearer {token}"));
+            if let Some(parent) = &parent {
+                request = request.query("parent", parent);
+            }
+            request.send_json(task)
+        })?
+        .body_mut()
+        .read_json()
+        .map_err(map_ureq)
     }
 
     fn delete(&mut self, list_id: &str, task_id: &str, etag: Option<&str>) -> Result<()> {
-        Client::delete(self, list_id, task_id, etag)
+        let url = format!(
+            "{}/lists/{}/tasks/{}",
+            self.base_url,
+            pct(list_id),
+            pct(task_id)
+        );
+        let etag = etag.filter(|etag| !etag.is_empty()).map(str::to_string);
+        self.request(false, |agent, token| {
+            let mut request = agent
+                .delete(&url)
+                .header("Authorization", format!("Bearer {token}"));
+            if let Some(etag) = &etag {
+                request = request.header("If-Match", etag);
+            }
+            request.call()
+        })?;
+        Ok(())
     }
 
     fn move_task(&mut self, list_id: &str, task_id: &str, movement: &MoveTask) -> Result<Task> {
-        Client::move_task(self, list_id, task_id, movement)
+        let url = format!(
+            "{}/lists/{}/tasks/{}/move",
+            self.base_url,
+            pct(list_id),
+            pct(task_id)
+        );
+        self.request(false, |agent, token| {
+            let mut request = agent
+                .post(&url)
+                .header("Authorization", format!("Bearer {token}"));
+            if let Some(destination) = &movement.destination_list {
+                request = request.query("destinationTasklist", destination);
+            }
+            if let Some(parent) = &movement.parent {
+                request = request.query("parent", parent);
+            }
+            if let Some(previous) = &movement.previous {
+                request = request.query("previous", previous);
+            }
+            request.send_empty()
+        })?
+        .body_mut()
+        .read_json()
+        .map_err(map_ureq)
     }
 
     fn create_list(&mut self, title: &str) -> Result<TaskList> {
-        Client::create_list(self, title)
+        let patch = ListPatch {
+            title: title.to_string(),
+        };
+        let url = format!("{}/users/@me/lists", self.base_url);
+        self.request(false, |agent, token| {
+            agent
+                .post(&url)
+                .header("Authorization", format!("Bearer {token}"))
+                .send_json(&patch)
+        })?
+        .body_mut()
+        .read_json()
+        .map_err(map_ureq)
     }
 
     fn patch_list(
@@ -606,18 +291,37 @@ impl TasksApi for Client {
         patch: &ListPatch,
         etag: Option<&str>,
     ) -> Result<TaskList> {
-        Client::patch_list(self, list_id, patch, etag)
+        let url = format!("{}/users/@me/lists/{}", self.base_url, pct(list_id));
+        let etag = etag.filter(|etag| !etag.is_empty()).map(str::to_string);
+        self.request(false, |agent, token| {
+            let mut request = agent
+                .patch(&url)
+                .header("Authorization", format!("Bearer {token}"));
+            if let Some(etag) = &etag {
+                request = request.header("If-Match", etag);
+            }
+            request.send_json(patch)
+        })?
+        .body_mut()
+        .read_json()
+        .map_err(map_ureq)
     }
 
     fn delete_list(&mut self, list_id: &str) -> Result<()> {
-        Client::delete_list(self, list_id)
+        let url = format!("{}/users/@me/lists/{}", self.base_url, pct(list_id));
+        self.request(false, |agent, token| {
+            agent
+                .delete(&url)
+                .header("Authorization", format!("Bearer {token}"))
+                .call()
+        })?;
+        Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::TimeZone;
     use serde_json::json;
     use std::{
         collections::HashMap,
@@ -741,91 +445,6 @@ mod tests {
         let token_path = temp_path("token").join("token.json");
         let auth = Auth::for_test(agent, format!("{base}/token"), token_path, "old-access");
         Client::for_test(auth, base.into())
-    }
-
-    #[test]
-    fn typed_task_requests_serialize_only_requested_fields() {
-        assert_eq!(
-            serde_json::to_value(TaskPatch::status(Status::NeedsAction)).unwrap(),
-            json!({ "status": "needsAction", "completed": null })
-        );
-        assert_eq!(
-            serde_json::to_value(TaskPatch::status(Status::Completed)).unwrap(),
-            json!({ "status": "completed" })
-        );
-
-        let create = CreateTask {
-            title: "New".into(),
-            notes: Some("Notes".into()),
-            due: None,
-        };
-        assert_eq!(
-            serde_json::to_value(create).unwrap(),
-            json!({ "title": "New", "notes": "Notes" })
-        );
-        let dated = CreateTask {
-            title: "Dated".into(),
-            notes: None,
-            due: NaiveDate::from_ymd_opt(2026, 9, 21),
-        };
-        assert_eq!(
-            serde_json::to_value(dated).unwrap(),
-            json!({ "title": "Dated", "due": "2026-09-21T00:00:00.000Z" })
-        );
-    }
-
-    #[test]
-    fn task_status_and_dates_round_trip_google_formats() {
-        let raw = json!({
-            "id": "t",
-            "status": "completed",
-            "due": "2026-09-25T00:00:00.000Z",
-            "completed": "2026-09-20T15:04:05.000Z",
-            "updated": "2026-09-21T08:00:00.000Z"
-        });
-        let task: Task = serde_json::from_value(raw).unwrap();
-        assert_eq!(task.status, Status::Completed);
-        assert!(task.is_done());
-        assert_eq!(task.due, NaiveDate::from_ymd_opt(2026, 9, 25));
-        assert_eq!(
-            task.completed,
-            Some(Utc.with_ymd_and_hms(2026, 9, 20, 15, 4, 5).unwrap())
-        );
-
-        let written = serde_json::to_value(&task).unwrap();
-        assert_eq!(written["status"], "completed");
-        assert_eq!(written["due"], "2026-09-25T00:00:00.000Z");
-        assert_eq!(written["completed"], "2026-09-20T15:04:05.000Z");
-        assert_eq!(written["updated"], "2026-09-21T08:00:00.000Z");
-
-        let open: Task =
-            serde_json::from_value(json!({ "id": "o", "status": "needsAction", "due": "soon" }))
-                .unwrap();
-        assert_eq!(open.status, Status::NeedsAction);
-        assert!(!open.is_done());
-        assert_eq!(open.due, None);
-        assert_eq!(Status::default(), Status::NeedsAction);
-    }
-
-    #[test]
-    fn tasks_retain_etag_and_assignment_context() {
-        let task: Task = serde_json::from_value(json!({
-            "id": "task",
-            "etag": "\"v2\"",
-            "title": "Assigned",
-            "assignmentInfo": {
-                "linkToTask": "https://docs.google.com/document/d/1",
-                "surfaceType": "DOCUMENT"
-            }
-        }))
-        .unwrap();
-
-        assert_eq!(task.etag, "\"v2\"");
-        let assignment = task.assignment_info.unwrap();
-        assert_eq!(assignment.surface_type, "DOCUMENT");
-        assert!(assignment
-            .link_to_task
-            .starts_with("https://docs.google.com/"));
     }
 
     #[test]

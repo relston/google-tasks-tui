@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
 use crate::{
-    api::{Task, TaskList},
     cache,
+    model::{Task, TaskList},
 };
 
 #[derive(Clone)]
@@ -244,10 +244,142 @@ pub fn ordered(tasks: Vec<Task>) -> Vec<Row> {
     rows
 }
 
+pub fn eligible_parents(rows: &[Row], task_id: &str) -> Vec<Task> {
+    rows.iter()
+        .filter(|row| {
+            row.depth == 0
+                && row.task.id != task_id
+                && !row.task.is_done()
+                && !row.task.hidden
+                && row.task.assignment_info.is_none()
+        })
+        .map(|row| row.task.clone())
+        .collect()
+}
+
+/// A reorder: the task's parent, the open sibling Google should place it
+/// after (`None` means first), and the position changes that show it there.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ReorderPlan {
+    pub parent: Option<String>,
+    pub previous: Option<String>,
+    /// `(task id, position)` for every sibling whose position changes.
+    pub positions: Vec<(String, String)>,
+}
+
+/// The task's parent, its open siblings in board order (itself included), and
+/// its index among them. Completed tasks are ordered by completion, so they
+/// are never siblings.
+fn open_siblings<'a>(
+    rows: &'a [Row],
+    task_id: &str,
+) -> Result<(Option<String>, Vec<&'a Task>, usize), &'static str> {
+    let Some(selected) = rows.iter().find(|row| row.task.id == task_id) else {
+        return Err("task disappeared before it could move");
+    };
+    if selected.task.is_done() {
+        return Err("completed tasks stay in completion order");
+    }
+    // A depth-0 row whose parent isn't in the list is shown as top-level.
+    let parent = (selected.depth > 0)
+        .then(|| selected.task.parent.clone())
+        .flatten();
+    let siblings: Vec<&Task> = rows
+        .iter()
+        .filter(|row| {
+            row.depth == selected.depth
+                && !row.task.is_done()
+                && (selected.depth == 0 || row.task.parent == parent)
+        })
+        .map(|row| &row.task)
+        .collect();
+    let index = siblings
+        .iter()
+        .position(|task| task.id == task_id)
+        .ok_or("task disappeared before it could move")?;
+    Ok((parent, siblings, index))
+}
+
+/// The open sibling just before the task (`None` when it is first).
+pub fn previous_sibling(rows: &[Row], task_id: &str) -> Result<Option<String>, &'static str> {
+    let (_, siblings, index) = open_siblings(rows, task_id)?;
+    Ok(index.checked_sub(1).map(|i| siblings[i].id.clone()))
+}
+
+/// Move the task one place up or down among its open siblings.
+pub fn reorder_step(rows: &[Row], task_id: &str, down: bool) -> Result<ReorderPlan, &'static str> {
+    let (_, siblings, index) = open_siblings(rows, task_id)?;
+    let previous = if down {
+        let next = siblings.get(index + 1).ok_or("task is already last")?;
+        Some(next.id.as_str())
+    } else {
+        let above = index.checked_sub(1).ok_or("task is already first")?;
+        above.checked_sub(1).map(|i| siblings[i].id.as_str())
+    };
+    reorder_after(rows, task_id, previous)
+}
+
+/// Put the task right after `previous` among its open siblings. Locally the
+/// siblings' existing positions are handed out in the new order; Google's
+/// renumbered list replaces them once the move lands.
+pub fn reorder_after(
+    rows: &[Row],
+    task_id: &str,
+    previous: Option<&str>,
+) -> Result<ReorderPlan, &'static str> {
+    let (parent, siblings, index) = open_siblings(rows, task_id)?;
+    let mut order = siblings.clone();
+    let moved = order.remove(index);
+    let at = match previous {
+        None => 0,
+        Some(id) => {
+            order
+                .iter()
+                .position(|task| task.id == id)
+                .ok_or("its new neighbor is no longer beside it")?
+                + 1
+        }
+    };
+    order.insert(at, moved);
+    let positions = order
+        .iter()
+        .zip(&siblings)
+        .filter(|(task, slot)| task.position != slot.position)
+        .map(|(task, slot)| (task.id.clone(), slot.position.clone()))
+        .collect();
+    Ok(ReorderPlan {
+        parent,
+        previous: previous.map(str::to_string),
+        positions,
+    })
+}
+
+/// The selected task, then its direct subtasks.
+pub fn move_ids(rows: &[Row], task_id: &str) -> Vec<String> {
+    if !rows.iter().any(|row| row.task.id == task_id) {
+        return Vec::new();
+    }
+    let mut ids = vec![task_id.to_string()];
+    ids.extend(
+        rows.iter()
+            .filter(|row| row.task.parent.as_deref() == Some(task_id))
+            .map(|row| row.task.id.clone()),
+    );
+    ids
+}
+
+/// Google Tasks permits only one level of nesting.
+pub fn subtask_parent(row: &Row) -> Option<String> {
+    match row.depth {
+        0 => Some(row.task.id.clone()),
+        _ => row.task.parent.clone(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::Status;
+    use crate::model::Status;
 
     fn task(id: &str, parent: Option<&str>, position: &str, done: bool) -> Task {
         Task {
@@ -374,5 +506,122 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["first", "second", "third"]
         );
+    }
+
+    #[test]
+    fn orders_open_then_done_with_subtasks_under_parents() {
+        let rows = ordered(vec![
+            task("done", None, "0", true),
+            task("b", None, "2", false),
+            task("a1", Some("a"), "1", false),
+            task("a", None, "1", false),
+            task("orphan", Some("gone"), "3", false),
+        ]);
+        let got: Vec<(&str, u8)> = rows.iter().map(|r| (r.task.id.as_str(), r.depth)).collect();
+        assert_eq!(
+            got,
+            [("a", 0), ("a1", 1), ("b", 0), ("orphan", 0), ("done", 0)]
+        );
+    }
+
+    #[test]
+    fn move_ids_are_the_task_and_its_subtasks() {
+        let rows = ordered(vec![
+            task("a", None, "1", false),
+            task("a1", Some("a"), "1", false),
+            task("b", None, "2", false),
+        ]);
+        assert_eq!(move_ids(&rows, "a"), ["a", "a1"]);
+        assert_eq!(move_ids(&rows, "a1"), ["a1"]);
+        assert!(move_ids(&rows, "gone").is_empty());
+    }
+
+    #[test]
+    fn reorder_steps_target_open_siblings_under_the_same_parent() {
+        let rows = ordered(vec![
+            task("a", None, "1", false),
+            task("a1", Some("a"), "1", false),
+            task("a2", Some("a"), "2", false),
+            task("a3", Some("a"), "3", false),
+            task("b", None, "2", false),
+            task("b1", Some("b"), "1", false),
+            task("c", None, "3", false),
+            task("done", None, "0", true),
+        ]);
+        let shift = |id: &str, down: bool| {
+            reorder_step(&rows, id, down).map(|plan| (plan.parent, plan.previous))
+        };
+        let ok = |parent: Option<&str>, previous: Option<&str>| {
+            Ok((parent.map(Into::into), previous.map(Into::into)))
+        };
+
+        // Top-level tasks skip over subtasks and land after their neighbor.
+        assert_eq!(shift("a", true), ok(None, Some("b")));
+        assert_eq!(shift("c", false), ok(None, Some("a")));
+        assert_eq!(shift("b", false), ok(None, None));
+        // Subtasks only trade places under their own parent.
+        assert_eq!(shift("a3", false), ok(Some("a"), Some("a1")));
+        assert_eq!(shift("a2", false), ok(Some("a"), None));
+        assert_eq!(shift("a1", true), ok(Some("a"), Some("a2")));
+        // Edges, lone subtasks, and completed tasks don't move.
+        assert_eq!(shift("a", false), Err("task is already first"));
+        assert_eq!(shift("c", true), Err("task is already last"));
+        assert_eq!(shift("a3", true), Err("task is already last"));
+        assert_eq!(shift("b1", false), Err("task is already first"));
+        assert_eq!(
+            shift("done", false),
+            Err("completed tasks stay in completion order")
+        );
+    }
+
+    #[test]
+    fn reorder_after_hands_sibling_positions_out_in_the_new_order() {
+        let rows = ordered(vec![
+            task("a", None, "1", false),
+            task("b", None, "2", false),
+            task("c", None, "3", false),
+            task("d", None, "4", false),
+        ]);
+        let positions = |id: &str, previous: Option<&str>| {
+            reorder_after(&rows, id, previous).map(|plan| plan.positions)
+        };
+        let moved = |pairs: &[(&str, &str)]| {
+            Ok(pairs
+                .iter()
+                .map(|(id, position)| (id.to_string(), position.to_string()))
+                .collect::<Vec<_>>())
+        };
+
+        assert_eq!(
+            positions("a", Some("c")),
+            moved(&[("b", "1"), ("c", "2"), ("a", "3")])
+        );
+        assert_eq!(
+            positions("d", None),
+            moved(&[("d", "1"), ("a", "2"), ("b", "3"), ("c", "4")])
+        );
+        assert_eq!(positions("b", Some("a")), moved(&[]));
+        assert_eq!(
+            positions("a", Some("gone")),
+            Err("its new neighbor is no longer beside it")
+        );
+    }
+
+    #[test]
+    fn subtask_parent_is_the_row_or_its_own_parent() {
+        let rows = ordered(vec![
+            task("a", None, "1", false),
+            task("a1", Some("a"), "1", false),
+            task("b", None, "2", false),
+            task("orphan", Some("gone"), "3", false),
+        ]);
+        let row = |id: &str| rows.iter().find(|r| r.task.id == id).unwrap();
+        assert_eq!(subtask_parent(row("a")).as_deref(), Some("a"));
+        assert_eq!(subtask_parent(row("b")).as_deref(), Some("b"));
+        // A subtask hands over its own parent, so nesting stays one deep.
+        assert_eq!(subtask_parent(row("a1")).as_deref(), Some("a"));
+        // A task whose parent is missing from the list draws at depth 0, so it
+        // parents the new subtask itself instead of pointing at a stranger.
+        assert_eq!(subtask_parent(row("orphan")).as_deref(), Some("orphan"));
     }
 }

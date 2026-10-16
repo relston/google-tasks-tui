@@ -391,26 +391,40 @@ The theme name shown in the header comes from the symlink target
 
 ```
 src/
-├── main.rs    # dispatches to the TUI or the CLI
-├── lib.rs     # crate root: no args → TUI, subcommand → CLI
-├── tui.rs     # TUI startup, terminal guard, event loop, and orchestration
-├── tui/
-│   ├── app.rs    # application state, input handling, and transitions
-│   ├── board.rs  # TUI board rules for subtasks and cross-list moves
-│   ├── render.rs # ratatui layout and drawing
-│   ├── text.rs   # Unicode wrapping, cursor layout, and sanitization
-│   └── worker.rs # API worker protocol and command execution
-├── cli.rs     # clap subcommands; -f json|md (default md); resolve list by id or title
-├── board.rs   # canonical lists/tasks, shared ordering, snapshots, rollback helpers
-├── api.rs     # Google Tasks v1 client (task lists, tasks, pagination)
-├── cache.rs   # board snapshot on disk for instant startup
-├── config.rs  # config.toml: defaults, first-run bootstrap, parsing
-├── paths.rs   # injectable credential/config paths
-├── platform.rs # macOS/Linux browser and clipboard effects
-├── presentation.rs # shared Markdown, validation, sanitization, URL extraction
-├── storage.rs # locking and secure atomic writes
-├── auth.rs    # OAuth: client secret, token cache, refresh, loopback sign-in
-└── theme.rs   # theme layers, Omarchy colors.toml, [theme] overrides, color support
+├── main.rs         # dispatches to the TUI or the CLI
+├── lib.rs          # crate root: builds paths; no args → TUI, subcommand → CLI
+├── model.rs        # Task, TaskList, Status, due dates, title and URL rules
+├── board.rs        # canonical lists/tasks, ordering, tree queries and reorder plans
+├── google/
+│   ├── mod.rs      # TasksApi trait and typed errors
+│   ├── client.rs   # Google Tasks v1 client: retries, pagination, endpoints
+│   ├── requests.rs # typed request bodies
+│   ├── auth.rs     # OAuth: client secret, token cache, refresh, loopback sign-in
+│   └── http.rs     # bounded HTTP agent and URL encoding
+├── keys/
+│   ├── actions.rs  # action catalog and default bindings
+│   ├── combo.rs    # key parsing, matching, and labels
+│   └── keymap.rs   # per-context resolution, overrides, diagnostics
+├── cli.rs          # clap subcommands; -f json|md (default md); resolve list by id or title
+├── markdown.rs     # Markdown output for the CLI and the copy command
+├── cache.rs        # board snapshot on disk for instant startup
+├── config.rs       # config.toml: defaults, first-run bootstrap, parsing
+├── paths.rs        # injectable credential/config paths
+├── atomic_file.rs  # locking and secure atomic writes
+├── desktop.rs      # macOS/Linux browser and clipboard effects
+├── theme.rs        # theme layers, Omarchy colors.toml, [theme] overrides, color support
+├── tui.rs          # TUI startup, terminal guard, and event loop
+└── tui/
+    ├── app.rs      # App state, construction, quit, and message dispatch
+    ├── input.rs    # key → action per context → handler
+    ├── commands.rs # what each user command does
+    ├── mutation.rs # the in-flight mutation, its reply, and rollback
+    ├── sync.rs     # refresh generations, load state, recovery, cache save
+    ├── columns.rs  # visible rows and selection
+    ├── editor.rs   # title/notes edit buffer
+    ├── picker.rs   # filterable modal list
+    ├── worker.rs   # API worker protocol and command execution
+    └── view/       # drawing: layout, columns, shelf, overlay, status, text
 ```
 
 ## Development

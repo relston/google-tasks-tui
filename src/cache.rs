@@ -6,9 +6,9 @@ use std::{fmt, fs, io};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    api::{Task, TaskList},
+    atomic_file,
+    model::{Task, TaskList},
     paths::Paths,
-    storage,
 };
 
 const VERSION: u32 = 1;
@@ -102,7 +102,7 @@ pub fn load_for(paths: &Paths, account: &str) -> io::Result<(Cache, Meta)> {
 
 pub fn save_for(paths: &Paths, cache: &Cache, meta: &mut Meta) -> Result<(), SaveError> {
     let path = paths.cache();
-    storage::with_exclusive_lock(&path, || {
+    atomic_file::with_exclusive_lock(&path, || {
         if let Ok(raw) = fs::read_to_string(&path) {
             if let Ok(current) = serde_json::from_str::<CacheFile>(&raw) {
                 if current.version == VERSION
@@ -122,7 +122,7 @@ pub fn save_for(paths: &Paths, cache: &Cache, meta: &mut Meta) -> Result<(), Sav
         };
         let json = serde_json::to_vec(&file)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-        storage::atomic_private_write(&path, &json)?;
+        atomic_file::write_private(&path, &json)?;
         meta.generation = generation;
         Ok(())
     })

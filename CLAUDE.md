@@ -6,33 +6,49 @@ Work directly on `main`; do not create feature branches.
 
 ## Architecture
 
-- [`src/api.rs`](src/api.rs) is the Google Tasks boundary. Both interfaces use
-  `TasksApi`; keep request bodies typed and operation responses authoritative.
-- [`src/board.rs`](src/board.rs) owns canonical task data and shared ordering.
-  Rendered rows are projections, never persisted state.
-- [`src/keybindings.rs`](src/keybindings.rs) owns action metadata, default
-  bindings, parsing, terminal-event normalization, contextual conflict
-  detection, and active labels. [`src/config.rs`](src/config.rs)
-  provides optional `[keys]` overrides; input dispatch, help, and status hints
-  must all use the resolved keymap rather than hard-coded keys.
-- [`src/tui/app.rs`](src/tui/app.rs) owns pure UI transitions and optimistic
-  rollback context. [`src/tui/worker.rs`](src/tui/worker.rs) owns blocking API
-  execution. [`src/tui/render.rs`](src/tui/render.rs) only lays out and draws.
+Code is organized in three layers: task rules with no I/O, edges (Google,
+disk, desktop), and the two front ends. Each file name says what it does.
+
+- [`src/model.rs`](src/model.rs) owns the task types, their Google wire
+  formats, and the title and URL rules both interfaces share. Use enums such
+  as `Status`, not strings, for fixed states.
+- [`src/board.rs`](src/board.rs) owns canonical task data, shared ordering,
+  and tree logic (siblings, parent candidates, reorder plans). Rendered rows
+  are projections, never persisted state.
+- [`src/google/`](src/google/mod.rs) is the Google Tasks boundary. Both
+  interfaces use `TasksApi`; keep request bodies typed and operation
+  responses authoritative. [`google/auth.rs`](src/google/auth.rs) owns OAuth
+  and token refresh; [`google/http.rs`](src/google/http.rs) owns the bounded
+  HTTP agent.
+- [`src/keys/`](src/keys/mod.rs) owns action metadata, default bindings,
+  parsing, terminal-event normalization, contextual conflict detection, and
+  active labels. [`src/config.rs`](src/config.rs) provides optional `[keys]`
+  overrides; input dispatch, help, and status hints must all use the resolved
+  keymap rather than hard-coded keys.
+- The TUI keeps `App` state in [`src/tui/app.rs`](src/tui/app.rs) and splits
+  behavior into `impl App` blocks by responsibility:
+  [`input.rs`](src/tui/input.rs) dispatches keys,
+  [`commands.rs`](src/tui/commands.rs) runs user commands,
+  [`mutation.rs`](src/tui/mutation.rs) owns the in-flight mutation and
+  rollback, [`sync.rs`](src/tui/sync.rs) owns refresh and recovery, and
+  [`columns.rs`](src/tui/columns.rs) owns visible rows and selection.
+  [`worker.rs`](src/tui/worker.rs) owns blocking API execution.
+  [`view/`](src/tui/view/mod.rs) only lays out and draws.
 - `Picker` backs every modal list (Browse, Move, Select Parent, Keyboard). Rows carry display
   text plus an opaque `value`, so one `draw_picker` and one `picker_key` serve
   all three. `/` filters by case-insensitive substring over title and subtitle;
   selection resets to the top on every query change so it can never point at a
   hidden row. Keep presentation out of app state: rows hold `String`s, not
   `Line`s.
-- [`src/paths.rs`](src/paths.rs) owns path discovery. Inject `Paths` or explicit
-  roots in tests; never mutate process-wide environment variables.
-- [`src/storage.rs`](src/storage.rs) is the only private atomic-write
+- [`src/paths.rs`](src/paths.rs) owns path discovery. Build `Paths` once at
+  the entry point and inject it; tests use temporary roots and never mutate
+  process-wide environment variables.
+- [`src/atomic_file.rs`](src/atomic_file.rs) is the only private atomic-write
   implementation. Token and cache files must remain mode `0600`.
 - [`src/cache.rs`](src/cache.rs) is a disposable, versioned, account-scoped
   startup preview. Only confirmed state after a complete sync may be saved.
-- [`src/auth.rs`](src/auth.rs) owns OAuth, token refresh, and bounded HTTP
-  configuration. Browser and clipboard effects belong in
-  [`src/platform.rs`](src/platform.rs).
+- Browser and clipboard effects belong in [`src/desktop.rs`](src/desktop.rs);
+  Markdown output belongs in [`src/markdown.rs`](src/markdown.rs).
 - [`src/theme.rs`](src/theme.rs) resolves semantic roles in layers: terminal
   ANSI defaults, then Omarchy (`source = "auto"`) for roles with no ANSI
   equivalent, then `[theme]` overrides. It then fits colors to the terminal

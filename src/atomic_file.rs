@@ -8,7 +8,7 @@ use std::{
 
 static TEMP_ID: AtomicU64 = AtomicU64::new(0);
 
-pub fn atomic_private_write(path: &Path, contents: &[u8]) -> io::Result<()> {
+pub fn write_private(path: &Path, contents: &[u8]) -> io::Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path has no parent"))?;
@@ -85,8 +85,8 @@ mod tests {
         ));
         let path = root.join("private.json");
 
-        atomic_private_write(&path, b"one").unwrap();
-        atomic_private_write(&path, b"two").unwrap();
+        write_private(&path, b"one").unwrap();
+        write_private(&path, b"two").unwrap();
 
         assert_eq!(fs::read(&path).unwrap(), b"two");
         assert_eq!(

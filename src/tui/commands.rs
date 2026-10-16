@@ -1,0 +1,1476 @@
+//! What each user command does: validate it, update the board, and start
+//! the mutation that tells Google.
+
+use crate::board::{
+    eligible_parents, move_ids, reorder_after, reorder_step, subtask_parent, ReorderPlan,
+};
+use crate::desktop::{self, Clipboard};
+use crate::google::{CreateTask, TaskPatch};
+use crate::keys::Action;
+use crate::markdown::md_yank;
+use crate::model::{normalize_title, urls_in, Status, Task, TaskList};
+
+use super::app::{App, Interaction, QuitState, Shelf};
+use super::editor::{Edit, EditTarget, FieldId};
+use super::mutation::{MutationContext, PendingOperation};
+use super::picker::{Picker, PickerRow};
+use super::sync::{SyncState, READ_ONLY};
+use super::view::text::{clean, title_of};
+use super::worker::Cmd;
+
+/// A delete waiting on a y/n answer in the status bar.
+pub(super) struct Pending {
+    list_id: String,
+    task_id: String,
+    etag: String,
+    pub(super) prompt: String,
+}
+
+/// One row of the Browse overlay.
+pub(super) struct BrowseLink {
+    /// The source's title, for links Google attached to the task. URLs picked
+    /// out of the notes have nothing to call themselves.
+    pub(super) name: Option<String>,
+    pub(super) url: String,
+}
+
+/// Overlay listing possible parent tasks in the current list.
+/// Reparenting needs the task being moved as well as the candidates, so the
+/// picker carries the context the rows cannot.
+pub(super) struct ParentPick {
+    pub(super) list_id: String,
+    pub(super) task_id: String,
+    pub(super) picker: Picker,
+}
+
+/// Everything the task links to: the links Google attached to it (a Gmail
+/// thread, a Doc) keep the source's title, then any bare URLs typed into the
+/// notes. First-seen order, no duplicate URLs.
+pub(super) fn task_links(task: &Task) -> Vec<BrowseLink> {
+    let mut out: Vec<BrowseLink> = Vec::new();
+    for l in &task.links {
+        let name = l.description.trim();
+        if l.link.is_empty() || out.iter().any(|b| b.url == l.link) {
+            continue;
+        }
+        out.push(BrowseLink {
+            name: (!name.is_empty()).then(|| clean(name).into_owned()),
+            url: clean(&l.link).into_owned(),
+        });
+    }
+    for url in urls_in(task.notes.as_deref().unwrap_or("")) {
+        if !out.iter().any(|b| b.url == url) {
+            out.push(BrowseLink { name: None, url });
+        }
+    }
+    out
+}
+
+pub(super) fn other_lists<'a>(lists: &'a [TaskList], current_id: &str) -> Vec<&'a TaskList> {
+    lists.iter().filter(|list| list.id != current_id).collect()
+}
+
+impl App {
+    /// Start a new task in the focused list: an empty title input in the shelf.
+    /// `under` makes it a subtask of the selection (see `subtask_parent`).
+    pub(super) fn start_create(&mut self, under: bool) {
+        if !self.writable() {
+            return;
+        }
+        let Some(col) = self.columns.get(self.focus) else {
+            return;
+        };
+        let list_id = col.list.id.clone();
+        let selected = col.selected().map(|row| row.task.id.clone());
+        if under
+            && col
+                .selected()
+                .is_some_and(|row| row.task.assignment_info.is_some())
+        {
+            self.error = Some("assigned tasks cannot have subtasks".into());
+            return;
+        }
+        let parent = match (under, col.selected().map(subtask_parent)) {
+            (false, _) => None,
+            (true, Some(p)) => p,
+            (true, None) => {
+                self.error = Some("select a task to put the subtask under".into());
+                return;
+            }
+        };
+        self.interaction = Interaction::Editing(Edit {
+            target: EditTarget::New {
+                list_id,
+                parent,
+                selection: selected,
+            },
+            buf: String::new(),
+            cursor: 0,
+        });
+        self.shelf = Shelf::Open(FieldId::Title);
+    }
+
+    /// Edit the focused shelf field, opening the shelf on the title if it's shut.
+    pub(super) fn start_edit(&mut self) {
+        if !self.writable() {
+            return;
+        }
+        let Some(col) = self.columns.get(self.focus) else {
+            return;
+        };
+        let Some(row) = col.selected() else { return };
+        let field = match self.shelf {
+            Shelf::Open(field) => field,
+            Shelf::Closed => FieldId::Title,
+        };
+        if field == FieldId::Notes && row.task.assignment_info.is_some() {
+            self.error = Some("tasks assigned from Docs or Chat cannot have notes".into());
+            return;
+        }
+        let (list_id, task_id) = (col.list.id.clone(), row.task.id.clone());
+        let buf = match field {
+            FieldId::Title => row.task.title.clone(),
+            FieldId::Notes => row.task.notes.clone().unwrap_or_default(),
+        };
+        self.shelf = Shelf::Open(field);
+        self.interaction = Interaction::Editing(Edit {
+            target: EditTarget::Existing {
+                list_id,
+                task_id,
+                field,
+            },
+            cursor: buf.len(),
+            buf,
+        });
+    }
+
+    pub(super) fn toggle_completed(&mut self) {
+        let selected = self.selected_task().map(|row| row.task.id.clone());
+        self.show_completed = !self.show_completed;
+        let ids: Vec<String> = self
+            .columns
+            .iter()
+            .map(|column| column.list.id.clone())
+            .collect();
+        for id in ids {
+            self.rebuild_column(&id);
+        }
+        let still_selected = self
+            .selected_task()
+            .is_some_and(|row| Some(row.task.id.as_str()) == selected.as_deref());
+        if !still_selected {
+            self.shelf = Shelf::Closed;
+        }
+    }
+
+    pub(super) fn commit_edit(&mut self) {
+        if !self.writable() {
+            return;
+        }
+        let interaction = std::mem::replace(&mut self.interaction, Interaction::Idle);
+        let Interaction::Editing(e) = interaction else {
+            self.interaction = interaction;
+            return;
+        };
+        if let EditTarget::New {
+            list_id,
+            parent,
+            selection,
+        } = &e.target
+        {
+            let title = match normalize_title(&e.buf) {
+                Ok(title) => title,
+                Err(error) => {
+                    self.error = Some(error.into());
+                    self.interaction = Interaction::Editing(e);
+                    return;
+                }
+            };
+            self.error = None;
+            let (list_id, parent, selection) = (list_id.clone(), parent.clone(), selection.clone());
+            self.send_mutation(MutationContext::Create(e), |operation| Cmd::Create {
+                operation,
+                list_id,
+                task: CreateTask {
+                    title,
+                    ..Default::default()
+                },
+                parent,
+                selection,
+            });
+            return;
+        }
+        // Show the change straight away; Google confirms it a moment later.
+        let Some((list_id, task_id, field)) = e.existing() else {
+            return;
+        };
+        let (list_id, task_id) = (list_id.to_string(), task_id.to_string());
+        let Some(before) = self.board.task(&list_id, &task_id).cloned() else {
+            self.recover("edited task disappeared".into());
+            return;
+        };
+        let fields = match field {
+            FieldId::Title => {
+                let title = match normalize_title(&e.buf) {
+                    Ok(title) => title,
+                    Err(error) => {
+                        self.error = Some(error.into());
+                        self.interaction = Interaction::Editing(e);
+                        return;
+                    }
+                };
+                if let Some(task) = self.board.task_mut(&list_id, &task_id) {
+                    task.title = title.clone();
+                }
+                self.rebuild_column(&list_id);
+                TaskPatch {
+                    title: Some(title),
+                    ..Default::default()
+                }
+            }
+            FieldId::Notes => {
+                let notes = e.buf.trim_end().to_string();
+                if let Some(task) = self.board.task_mut(&list_id, &task_id) {
+                    task.notes = Some(notes.clone()).filter(|notes| !notes.is_empty());
+                }
+                self.rebuild_column(&list_id);
+                TaskPatch {
+                    notes: Some(notes),
+                    ..Default::default()
+                }
+            }
+        };
+        self.error = None;
+        self.send_patch(list_id, task_id, fields, before);
+    }
+
+    /// Tick or untick the selected task.
+    pub(super) fn toggle_done(&mut self) {
+        if !self.writable() {
+            return;
+        }
+        let Some(col) = self.columns.get(self.focus) else {
+            return;
+        };
+        let list_id = col.list.id.clone();
+        let Some(task_id) = col.selected_id.clone() else {
+            return;
+        };
+        let Some(task) = self.board.task_mut(&list_id, &task_id) else {
+            return;
+        };
+        let before = task.clone();
+        // Show the new state now; Google's copy replaces it when it answers.
+        task.status = if task.is_done() {
+            task.completed = None;
+            Status::NeedsAction
+        } else {
+            Status::Completed
+        };
+        let fields = TaskPatch::status(task.status);
+        self.rebuild_column(&list_id);
+        self.send_patch(list_id, task_id, fields, before);
+    }
+
+    /// Ask before deleting; `confirm_delete` does the work after the configured
+    /// confirmation key.
+    pub(super) fn ask_delete(&mut self) {
+        if !self.writable() {
+            return;
+        }
+        let confirm = self.keymap.labels_for(Action::ConfirmDelete).join("/");
+        let Some(col) = self.columns.get(self.focus) else {
+            return;
+        };
+        let Some(row) = col.selected() else { return };
+        let subtasks = self
+            .board
+            .rows(&col.list.id)
+            .iter()
+            .filter(|candidate| candidate.task.parent.as_deref() == Some(row.task.id.as_str()))
+            .count();
+        let also = match subtasks {
+            0 => String::new(),
+            1 => " and its subtask".into(),
+            n => format!(" and its {n} subtasks"),
+        };
+        let assigned = if row.task.assignment_info.is_some() {
+            " This also deletes the original Docs/Chat task."
+        } else {
+            ""
+        };
+        self.interaction = Interaction::ConfirmDelete(Pending {
+            list_id: col.list.id.clone(),
+            task_id: row.task.id.clone(),
+            etag: row.task.etag.clone(),
+            prompt: format!(
+                "Delete \"{}\"{also}?{assigned}  {confirm} confirms · any other key cancels",
+                title_of(&row.task)
+            ),
+        });
+    }
+
+    pub(super) fn confirm_delete(&mut self) {
+        let interaction = std::mem::replace(&mut self.interaction, Interaction::Idle);
+        let Interaction::ConfirmDelete(p) = interaction else {
+            self.interaction = interaction;
+            return;
+        };
+        // Drop the task and its subtasks locally; Google cascades the same way.
+        let removed = self.board.remove_tree(&p.list_id, &p.task_id);
+        self.rebuild_column(&p.list_id);
+        self.error = None;
+        let (list_id, task_id, etag) = (p.list_id, p.task_id, p.etag);
+        self.send_mutation(
+            MutationContext::Delete {
+                list_id: list_id.clone(),
+                task_id: task_id.clone(),
+                removed,
+            },
+            |operation| Cmd::Delete {
+                operation,
+                list_id,
+                task_id,
+                etag,
+            },
+        );
+    }
+
+    /// Copy the selected task as markdown, ready to paste into a note.
+    pub(super) fn yank(&mut self) {
+        let Some(row) = self.selected_task() else {
+            return;
+        };
+        // The same control characters that would wreck a row would paste badly.
+        let md = md_yank(&row.task);
+        let title = title_of(&row.task).into_owned();
+        match desktop::copy(&md) {
+            Ok(Clipboard::Confirmed) => {
+                self.error = None;
+                self.notice = Some(format!("copied \"{title}\" as markdown"));
+            }
+            Ok(Clipboard::SequenceSent) => {
+                self.error = None;
+                self.notice = Some(format!("sent \"{title}\" to the terminal clipboard"));
+            }
+            Err(error) => {
+                self.notice = None;
+                self.error = Some(format!("clipboard failed: {error}"));
+            }
+        }
+    }
+
+    pub(super) fn start_browse(&mut self) {
+        let Some(row) = self.selected_task() else {
+            return;
+        };
+        let links = task_links(&row.task);
+        if links.is_empty() {
+            self.error = Some("no links on this task".into());
+            return;
+        }
+        self.error = None;
+        // A named link shows its URL underneath; a bare one is its own label.
+        let rows = links
+            .into_iter()
+            .map(|link| match link.name {
+                Some(name) => PickerRow::new(name, Some(link.url.clone()), link.url),
+                None => PickerRow::new(link.url.clone(), None, link.url),
+            })
+            .collect();
+        self.interaction = Interaction::Browse(Picker::new(rows));
+    }
+
+    pub(super) fn open_browse(&mut self, all: bool) {
+        let urls: Vec<String> = {
+            let Interaction::Browse(picker) = &self.interaction else {
+                return;
+            };
+            match all {
+                true => picker.values(),
+                false => picker
+                    .selected()
+                    .map(|row| vec![row.value.clone()])
+                    .unwrap_or_default(),
+            }
+        };
+        if urls.is_empty() {
+            return;
+        }
+        for url in &urls {
+            if let Err(error) = desktop::open_url(url) {
+                self.error = Some(format!("could not open {url}: {error}"));
+                return;
+            }
+        }
+        self.interaction = Interaction::Idle;
+    }
+
+    pub(super) fn start_parent_pick(&mut self) {
+        if !self.writable() {
+            return;
+        }
+        let Some(column) = self.columns.get(self.focus) else {
+            return;
+        };
+        let Some(selected) = column.selected() else {
+            return;
+        };
+        if selected.task.parent.is_some() {
+            self.error = Some("unparent this task before choosing a new parent".into());
+            return;
+        }
+        if selected.task.assignment_info.is_some() {
+            self.error = Some("assigned tasks cannot become subtasks".into());
+            return;
+        }
+        let tree = self.board.rows(&column.list.id);
+        if tree
+            .iter()
+            .any(|row| row.task.parent.as_deref() == Some(selected.task.id.as_str()))
+        {
+            self.error = Some("a task with subtasks cannot become a subtask".into());
+            return;
+        }
+        if selected.task.hidden && selected.task.is_done() {
+            self.error = Some("a completed hidden task cannot become a subtask".into());
+            return;
+        }
+        let tasks = eligible_parents(&tree, &selected.task.id);
+        if tasks.is_empty() {
+            self.error = Some("no available parent tasks in this list".into());
+            return;
+        }
+        self.error = None;
+        let rows = tasks
+            .into_iter()
+            .map(|task| PickerRow::new(title_of(&task).into_owned(), None, task.id))
+            .collect();
+        self.interaction = Interaction::Parent(ParentPick {
+            list_id: column.list.id.clone(),
+            task_id: selected.task.id.clone(),
+            picker: Picker::new(rows),
+        });
+    }
+
+    pub(super) fn confirm_parent(&mut self) {
+        let selection = {
+            let Interaction::Parent(parent) = &self.interaction else {
+                return;
+            };
+            let Some(row) = parent.picker.selected() else {
+                return;
+            };
+            (
+                parent.list_id.clone(),
+                parent.task_id.clone(),
+                row.value.clone(),
+            )
+        };
+        self.interaction = Interaction::Idle;
+        self.reparent_task(&selection.0, &selection.1, Some(selection.2), None);
+    }
+
+    pub(super) fn unparent_task(&mut self) {
+        if !self.writable() {
+            return;
+        }
+        let Some(column) = self.columns.get(self.focus) else {
+            return;
+        };
+        let Some(selected) = column.selected() else {
+            return;
+        };
+        if selected.task.parent.is_none() {
+            self.error = Some("task is already top-level".into());
+            return;
+        }
+        let list_id = column.list.id.clone();
+        let task_id = selected.task.id.clone();
+        let previous = selected.task.parent.clone();
+        self.reparent_task(&list_id, &task_id, None, previous);
+    }
+
+    pub(super) fn reparent_task(
+        &mut self,
+        list_id: &str,
+        task_id: &str,
+        parent: Option<String>,
+        previous: Option<String>,
+    ) {
+        let Some(before) = self.board.task(list_id, task_id).cloned() else {
+            self.error = Some("task disappeared before it could move".into());
+            return;
+        };
+        if let Some(task) = self.board.task_mut(list_id, task_id) {
+            task.parent = parent.clone();
+        }
+        self.rebuild_column(list_id);
+        self.error = None;
+        let list_id = list_id.to_string();
+        let task_id = task_id.to_string();
+        self.send_mutation(
+            MutationContext::Reparent {
+                list_id: list_id.clone(),
+                task_id: task_id.clone(),
+                before: Box::new(before),
+            },
+            |operation| Cmd::Reparent {
+                operation,
+                list_id,
+                task_id,
+                parent,
+                previous,
+            },
+        );
+    }
+
+    /// Move the selected task one place among its open siblings. Presses made
+    /// while that task's reorder is saving move it locally and are sent as
+    /// one move when the save lands.
+    pub(super) fn reorder_task(&mut self, down: bool) {
+        let Some(column) = self.columns.get(self.focus) else {
+            return;
+        };
+        let Some(selected) = column.selected() else {
+            return;
+        };
+        let list_id = column.list.id.clone();
+        let task_id = selected.task.id.clone();
+        let queue = matches!(
+            &self.pending_operation,
+            Some(PendingOperation {
+                context: MutationContext::Reorder {
+                    list_id: pending_list,
+                    task_id: pending_task,
+                    ..
+                },
+                ..
+            }) if *pending_list == list_id && *pending_task == task_id
+        );
+        if queue && self.sync != SyncState::Ready {
+            self.error = Some(READ_ONLY.into());
+            return;
+        }
+        if !queue && !self.writable() {
+            return;
+        }
+        let plan = match reorder_step(&self.board.rows(&list_id), &task_id, down) {
+            Ok(plan) => plan,
+            Err(error) => {
+                self.error = Some(error.into());
+                return;
+            }
+        };
+        self.error = None;
+        if !queue {
+            self.send_reorder(list_id, task_id, plan);
+            return;
+        }
+        self.apply_positions(&list_id, &plan.positions);
+        if let Some(PendingOperation {
+            context: MutationContext::Reorder { queued, .. },
+            ..
+        }) = &mut self.pending_operation
+        {
+            *queued = true;
+        }
+    }
+
+    /// Send the presses made while a reorder was saving as one move to where
+    /// the board showed the task.
+    pub(super) fn send_queued_reorder(
+        &mut self,
+        list_id: String,
+        task_id: String,
+        previous: Option<String>,
+    ) {
+        if self.sync != SyncState::Ready || self.quit == QuitState::Now {
+            return;
+        }
+        let rows = self.board.rows(&list_id);
+        match reorder_after(&rows, &task_id, previous.as_deref()) {
+            Ok(plan) if plan.positions.is_empty() => {}
+            Ok(plan) => {
+                if self.send_reorder(list_id, task_id, plan) && self.quit == QuitState::Drained {
+                    // The queued move is a pending write, so a waiting quit keeps waiting.
+                    self.quit = QuitState::Waiting;
+                }
+            }
+            Err(error) => self.error = Some(format!("queued reorder dropped: {error}")),
+        }
+    }
+
+    pub(super) fn send_reorder(
+        &mut self,
+        list_id: String,
+        task_id: String,
+        plan: ReorderPlan,
+    ) -> bool {
+        let before = self.board.tasks(&list_id);
+        self.apply_positions(&list_id, &plan.positions);
+        self.send_mutation(
+            MutationContext::Reorder {
+                list_id: list_id.clone(),
+                task_id: task_id.clone(),
+                before,
+                queued: false,
+            },
+            |operation| Cmd::Reorder {
+                operation,
+                list_id,
+                task_id,
+                parent: plan.parent,
+                previous: plan.previous,
+            },
+        )
+    }
+
+    pub(super) fn apply_positions(&mut self, list_id: &str, positions: &[(String, String)]) {
+        for (task_id, position) in positions {
+            if let Some(task) = self.board.task_mut(list_id, task_id) {
+                task.position = position.clone();
+            }
+        }
+        self.rebuild_column(list_id);
+    }
+
+    pub(super) fn start_move(&mut self) {
+        if !self.writable() {
+            return;
+        }
+        let Some(col) = self.columns.get(self.focus) else {
+            return;
+        };
+        let Some(selected) = col.selected() else {
+            return;
+        };
+        if selected.task.assignment_info.is_some()
+            || self.board.rows(&col.list.id).iter().any(|row| {
+                row.task.parent.as_deref() == Some(selected.task.id.as_str())
+                    && row.task.assignment_info.is_some()
+            })
+        {
+            self.error = Some("assigned tasks cannot move between lists".into());
+            return;
+        }
+        let current = col.list.id.clone();
+        let all: Vec<TaskList> = self.columns.iter().map(|c| c.list.clone()).collect();
+        let lists: Vec<TaskList> = other_lists(&all, &current).into_iter().cloned().collect();
+        if lists.is_empty() {
+            self.error = Some("no other lists".into());
+            return;
+        }
+        self.error = None;
+        let rows = lists
+            .into_iter()
+            .map(|list| PickerRow::new(clean(&list.title).into_owned(), None, list.id))
+            .collect();
+        self.interaction = Interaction::Move(Picker::new(rows));
+    }
+
+    pub(super) fn confirm_move(&mut self) {
+        let dest_id = {
+            let Interaction::Move(picker) = &self.interaction else {
+                return;
+            };
+            let Some(row) = picker.selected() else { return };
+            row.value.clone()
+        };
+        self.interaction = Interaction::Idle;
+        let Some(src) = self.columns.get(self.focus) else {
+            return;
+        };
+        let from_id = src.list.id.clone();
+        let Some(row) = src.selected() else { return };
+        let task_id = row.task.id.clone();
+        let ids = move_ids(&self.board.rows(&from_id), &task_id);
+        if ids.is_empty() {
+            return;
+        }
+        let Some(dest_idx) = self.columns.iter().position(|c| c.list.id == dest_id) else {
+            return;
+        };
+        let source_before = self.board.tasks(&from_id);
+        let destination_before = self.board.tasks(&dest_id);
+        self.board.move_tree(&from_id, &dest_id, &task_id);
+        self.rebuild_column(&from_id);
+        self.rebuild_column(&dest_id);
+        self.columns[dest_idx].select_id(Some(task_id.clone()));
+        self.focus = dest_idx;
+        self.error = None;
+        self.send_mutation(
+            MutationContext::Move {
+                from: from_id.clone(),
+                to: dest_id.clone(),
+                ids: ids.clone(),
+                source_before,
+                destination_before,
+            },
+            |operation| Cmd::Move {
+                operation,
+                from: from_id,
+                to: dest_id,
+                ids,
+            },
+        );
+    }
+
+    pub(super) fn start_help(&mut self) {
+        let rows = Action::ALL
+            .iter()
+            .filter_map(|action| {
+                let labels = self.keymap.labels_for(*action);
+                (!labels.is_empty()).then(|| {
+                    let key = labels.join(" / ");
+                    let description = action.description();
+                    PickerRow::new(key, Some(description.to_string()), String::new())
+                })
+            })
+            .collect();
+        self.interaction = Interaction::Help(Picker::reference(rows));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::test_support::*;
+
+    #[test]
+    fn hidden_completed_subtasks_stay_part_of_their_parent() {
+        let (mut app, commands) = app_with_lists(&["a", "b"]);
+        let _ = commands.recv().unwrap();
+        app.sync = SyncState::Ready;
+        set_tasks(
+            &mut app,
+            "a",
+            vec![
+                task("open", None, "1", false),
+                task("done-child", Some("open"), "2", true),
+                task("other", None, "3", false),
+            ],
+            "open",
+        );
+        set_tasks(
+            &mut app,
+            "b",
+            vec![task("there", None, "1", false)],
+            "there",
+        );
+        app.on_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE));
+
+        app.ask_delete();
+        let Interaction::ConfirmDelete(pending) = &app.interaction else {
+            panic!("expected delete confirmation");
+        };
+        assert!(
+            pending.prompt.contains("subtask"),
+            "hidden completed subtask should still be mentioned: {}",
+            pending.prompt
+        );
+        app.interaction = Interaction::Idle;
+
+        app.start_parent_pick();
+        assert!(app
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("subtasks")));
+
+        app.start_move();
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        match commands.recv().unwrap() {
+            Cmd::Move { ids, from, to, .. } => {
+                assert_eq!(from, "a");
+                assert_eq!(to, "b");
+                assert_eq!(ids, ["open", "done-child"]);
+            }
+            _ => panic!("expected move"),
+        }
+    }
+
+    #[test]
+    fn completing_a_task_while_completed_are_hidden_keeps_the_save() {
+        let (mut app, commands) = app_with_lists(&["a"]);
+        let _ = commands.recv().unwrap();
+        app.sync = SyncState::Ready;
+        set_tasks(
+            &mut app,
+            "a",
+            vec![
+                task("a-one", None, "1", false),
+                task("a-two", None, "2", false),
+            ],
+            "a-one",
+        );
+        app.on_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+
+        assert_eq!(
+            app.columns[0]
+                .rows
+                .iter()
+                .map(|row| row.task.id.as_str())
+                .collect::<Vec<_>>(),
+            ["a-two"]
+        );
+        assert_eq!(app.columns[0].selected_id.as_deref(), Some("a-two"));
+        assert!(app.board.task("a", "a-one").unwrap().is_done());
+
+        let Cmd::Patch { operation, .. } = commands.recv().unwrap() else {
+            panic!("expected patch");
+        };
+        let mut saved = task("a-one", None, "1", true);
+        saved.title = "A one".into();
+        app.on_msg(Msg::Updated {
+            operation,
+            list_id: "a".into(),
+            task_id: "a-one".into(),
+            result: Ok(saved),
+        });
+
+        assert!(app.error.is_none(), "{:?}", app.error);
+        assert_eq!(app.sync, SyncState::Ready);
+        assert_eq!(
+            app.board.task("a", "a-one").map(|task| task.title.as_str()),
+            Some("A one")
+        );
+        assert_eq!(
+            app.columns[0]
+                .rows
+                .iter()
+                .map(|row| row.task.id.as_str())
+                .collect::<Vec<_>>(),
+            ["a-two"]
+        );
+    }
+
+    #[test]
+    fn task_links_lists_attached_links_then_notes_urls() {
+        use crate::model::Link;
+        let link = |d: &str, u: &str| Link {
+            description: d.into(),
+            link: u.into(),
+        };
+        let task = Task {
+            notes: Some("see https://notes.test/a and https://mail.test/#all/1".into()),
+            links: vec![
+                link("Check In For Your Visit", "https://mail.test/#all/1"),
+                link("  ", "https://nameless.test"),
+                link("same url again", "https://mail.test/#all/1"),
+                link("no url at all", ""),
+            ],
+            ..Default::default()
+        };
+        let links = task_links(&task);
+        let got: Vec<(Option<&str>, &str)> = links
+            .iter()
+            .map(|l| (l.name.as_deref(), l.url.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                // Google's own link keeps the source's title and comes first.
+                (Some("Check In For Your Visit"), "https://mail.test/#all/1"),
+                (None, "https://nameless.test"),
+                // The same URL in the notes is not offered twice.
+                (None, "https://notes.test/a"),
+            ]
+        );
+        assert!(task_links(&Task::default()).is_empty());
+    }
+
+    #[test]
+    fn a_yank_carries_the_links_and_drops_the_bookkeeping() {
+        let task = Task {
+            id: "t1".into(),
+            title: "Check In For Yearly Checkup".into(),
+            notes: Some("Need my vax\r\n".into()),
+            status: Status::NeedsAction,
+            due: chrono::NaiveDate::from_ymd_opt(2026, 9, 25),
+            parent: Some("p9".into()),
+            links: vec![crate::model::Link {
+                description: "Check In For Your Upcoming Visit".into(),
+                link: "https://mail.google.com/mail/#all/1a0".into(),
+            }],
+            ..Default::default()
+        };
+        let md = md_yank(&task);
+        assert_eq!(
+            md,
+            "# Check In For Yearly Checkup\n\nDue: 2026-09-25\n\nNeed my vax\n\n\
+             - [Check In For Your Upcoming Visit](<https://mail.google.com/mail/#all/1a0>)\n"
+        );
+        // The things that identify a task to the API have no place in a note.
+        for noise in ["t1", "needsAction", "p9", "id:", "status:", "parent:"] {
+            assert!(!md.contains(noise), "{noise:?} is still in {md:?}");
+        }
+    }
+
+    #[test]
+    fn other_lists_skip_the_current_one() {
+        let lists = [
+            TaskList {
+                id: "a".into(),
+                title: "Inbox".into(),
+                ..Default::default()
+            },
+            TaskList {
+                id: "b".into(),
+                title: "Work".into(),
+                ..Default::default()
+            },
+            TaskList {
+                id: "c".into(),
+                title: "Home".into(),
+                ..Default::default()
+            },
+        ];
+        let got: Vec<&str> = other_lists(&lists, "b")
+            .iter()
+            .map(|l| l.id.as_str())
+            .collect();
+        assert_eq!(got, ["a", "c"]);
+        assert!(other_lists(&lists, "missing")
+            .iter()
+            .map(|l| l.id.as_str())
+            .eq(["a", "b", "c"]));
+    }
+
+    #[test]
+    fn assigned_tasks_cannot_move_or_edit_notes() {
+        let (mut app, _cmds) = app_with_lists(&["a", "b"]);
+        app.sync = SyncState::Ready;
+        let assigned = Task {
+            assignment_info: Some(crate::model::AssignmentInfo {
+                link_to_task: "https://docs.google.com/document/d/1".into(),
+                surface_type: "DOCUMENT".into(),
+            }),
+            ..task("assigned", None, "1", false)
+        };
+        set_tasks(&mut app, "a", vec![assigned], "assigned");
+
+        app.start_move();
+        assert!(matches!(app.interaction, Interaction::Idle));
+        assert!(app
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("cannot move")));
+
+        app.error = None;
+        app.shelf = Shelf::Open(FieldId::Notes);
+        app.start_edit();
+        assert!(matches!(app.interaction, Interaction::Idle));
+        assert!(app
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("cannot have notes")));
+    }
+
+    #[test]
+    fn editing_after_closing_the_shelf_on_notes_starts_at_the_title() {
+        let (mut app, _cmds) = app_with_lists(&["a"]);
+        app.sync = SyncState::Ready;
+        let assigned = Task {
+            assignment_info: Some(crate::model::AssignmentInfo {
+                link_to_task: "https://docs.google.com/document/d/1".into(),
+                surface_type: "DOCUMENT".into(),
+            }),
+            ..task("assigned", None, "1", false)
+        };
+        set_tasks(&mut app, "a", vec![assigned], "assigned");
+
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE));
+
+        assert!(app.error.is_none(), "{:?}", app.error);
+        assert_eq!(app.edit().map(Edit::field), Some(FieldId::Title));
+        assert_eq!(app.shelf, Shelf::Open(FieldId::Title));
+    }
+
+    #[test]
+    fn less_than_unparents_the_selected_task() {
+        let (mut app, commands) = app_with_lists(&["a"]);
+        let _ = commands.recv().unwrap(); // startup refresh
+        app.sync = SyncState::Ready;
+        set_tasks(
+            &mut app,
+            "a",
+            vec![
+                task("parent", None, "1", false),
+                task("child", Some("parent"), "2", false),
+            ],
+            "child",
+        );
+
+        // Some enhanced terminals report the shifted symbol with no modifier.
+        app.on_key(KeyEvent::new(KeyCode::Char('<'), KeyModifiers::NONE));
+
+        assert_eq!(app.board.task("a", "child").unwrap().parent, None);
+        assert_eq!(app.columns[0].selected_id.as_deref(), Some("child"));
+        assert!(matches!(
+            commands.recv().unwrap(),
+            Cmd::Reparent {
+                list_id,
+                task_id,
+                parent: None,
+                previous: Some(previous),
+                ..
+            } if list_id == "a" && task_id == "child" && previous == "parent"
+        ));
+    }
+
+    #[test]
+    fn alt_j_swaps_with_the_next_sibling_and_keeps_the_selection() {
+        let (mut app, commands) = app_with_lists(&["a"]);
+        let _ = commands.recv().unwrap(); // startup refresh
+        app.sync = SyncState::Ready;
+        set_tasks(
+            &mut app,
+            "a",
+            vec![
+                task("first", None, "1", false),
+                task("child", Some("first"), "1", false),
+                task("second", None, "2", false),
+                task("third", None, "3", false),
+            ],
+            "first",
+        );
+
+        app.on_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::ALT));
+
+        assert_eq!(ids(&app, "a"), ["second", "first", "child", "third"]);
+        assert_eq!(app.columns[0].selected_id.as_deref(), Some("first"));
+        let Cmd::Reorder {
+            operation,
+            list_id,
+            task_id,
+            parent,
+            previous,
+        } = commands.recv().unwrap()
+        else {
+            panic!("expected a same-list move");
+        };
+        assert_eq!(
+            (
+                list_id.as_str(),
+                task_id.as_str(),
+                parent,
+                previous.as_deref()
+            ),
+            ("a", "first", None, Some("second"))
+        );
+
+        // Google renumbers siblings as dense counters: the moved task takes
+        // the neighbor's old slot and the neighbor is bumped. The reloaded
+        // list replaces the local guess, so the row stays where it moved.
+        app.on_msg(Msg::Reordered {
+            operation,
+            list_id: "a".into(),
+            task_id: "first".into(),
+            parent: None,
+            result: Ok(task("first", None, "1", false)),
+            tasks: Some(Ok(vec![
+                task("second", None, "0", false),
+                task("first", None, "1", false),
+                task("child", Some("first"), "0", false),
+                task("third", None, "2", false),
+            ])),
+        });
+        assert_eq!(app.board.task("a", "second").unwrap().position, "0");
+        assert_eq!(app.board.task("a", "first").unwrap().position, "1");
+        assert_eq!(ids(&app, "a"), ["second", "first", "child", "third"]);
+        assert_eq!(app.columns[0].selected_id.as_deref(), Some("first"));
+        assert_eq!(app.sync, SyncState::Ready);
+        assert!(app.pending_operation.is_none());
+    }
+
+    #[test]
+    fn alt_k_moves_a_subtask_up_among_its_siblings() {
+        let (mut app, commands) = app_with_lists(&["a"]);
+        let _ = commands.recv().unwrap(); // startup refresh
+        app.sync = SyncState::Ready;
+        set_tasks(
+            &mut app,
+            "a",
+            vec![
+                task("parent", None, "1", false),
+                task("one", Some("parent"), "1", false),
+                task("two", Some("parent"), "2", false),
+            ],
+            "two",
+        );
+
+        app.on_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::ALT));
+
+        assert_eq!(ids(&app, "a"), ["parent", "two", "one"]);
+        assert!(matches!(
+            commands.recv().unwrap(),
+            Cmd::Reorder {
+                task_id,
+                parent: Some(parent),
+                previous: None,
+                ..
+            } if task_id == "two" && parent == "parent"
+        ));
+    }
+
+    #[test]
+    fn failed_reorder_restores_both_tasks_and_enters_recovery() {
+        let (mut app, commands) = app_with_lists(&["a"]);
+        let _ = commands.recv().unwrap(); // startup refresh
+        app.sync = SyncState::Ready;
+        set_tasks(
+            &mut app,
+            "a",
+            vec![
+                task("first", None, "1", false),
+                task("second", None, "2", false),
+            ],
+            "second",
+        );
+
+        app.reorder_task(false);
+        assert_eq!(ids(&app, "a"), ["second", "first"]);
+        let Cmd::Reorder { operation, .. } = commands.recv().unwrap() else {
+            panic!("expected a same-list move");
+        };
+        app.on_msg(Msg::Reordered {
+            operation,
+            list_id: "a".into(),
+            task_id: "second".into(),
+            parent: None,
+            result: Err("offline".into()),
+            tasks: None,
+        });
+
+        assert_eq!(ids(&app, "a"), ["first", "second"]);
+        assert_eq!(app.board.task("a", "first").unwrap().position, "1");
+        assert_eq!(app.board.task("a", "second").unwrap().position, "2");
+        assert_eq!(app.columns[0].selected_id.as_deref(), Some("second"));
+        assert_eq!(app.sync, SyncState::Refreshing);
+        assert!(app
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("reorder failed")));
+    }
+
+    #[test]
+    fn reorder_saved_but_not_reloaded_keeps_the_move_and_recovers() {
+        let (mut app, commands) = app_with_lists(&["a"]);
+        let _ = commands.recv().unwrap(); // startup refresh
+        app.sync = SyncState::Ready;
+        set_tasks(
+            &mut app,
+            "a",
+            vec![
+                task("first", None, "0", false),
+                task("second", None, "1", false),
+            ],
+            "second",
+        );
+
+        app.reorder_task(false);
+        let Cmd::Reorder { operation, .. } = commands.recv().unwrap() else {
+            panic!("expected a same-list move");
+        };
+        app.on_msg(Msg::Reordered {
+            operation,
+            list_id: "a".into(),
+            task_id: "second".into(),
+            parent: None,
+            result: Ok(task("second", None, "0", false)),
+            tasks: Some(Err("timeout".into())),
+        });
+
+        assert_eq!(ids(&app, "a"), ["second", "first"]);
+        assert_eq!(app.sync, SyncState::Refreshing);
+        assert!(app
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("reorder saved")));
+    }
+
+    #[test]
+    fn reorder_at_an_edge_reports_and_sends_nothing() {
+        let (mut app, commands) = app_with_lists(&["a"]);
+        let _ = commands.recv().unwrap(); // startup refresh
+        app.sync = SyncState::Ready;
+        set_tasks(
+            &mut app,
+            "a",
+            vec![
+                task("first", None, "1", false),
+                task("second", None, "2", false),
+            ],
+            "first",
+        );
+
+        app.reorder_task(false);
+
+        assert_eq!(app.error.as_deref(), Some("task is already first"));
+        assert!(commands.try_recv().is_err());
+        assert!(app.pending_operation.is_none());
+    }
+
+    #[test]
+    fn reorder_presses_while_saving_become_one_follow_up_move() {
+        let (mut app, commands) = app_with_lists(&["a"]);
+        let _ = commands.recv().unwrap(); // startup refresh
+        app.sync = SyncState::Ready;
+        reorder_list(&mut app, &["a", "b", "c", "d"]);
+        let down = KeyEvent::new(KeyCode::Char('j'), KeyModifiers::ALT);
+
+        app.on_key(down);
+        let Cmd::Reorder {
+            operation,
+            previous,
+            ..
+        } = commands.recv().unwrap()
+        else {
+            panic!("expected a same-list move");
+        };
+        assert_eq!(previous.as_deref(), Some("b"));
+
+        app.on_key(down);
+        app.on_key(down);
+        assert!(commands.try_recv().is_err(), "presses wait for the save");
+        assert!(app.error.is_none(), "{:?}", app.error);
+        assert_eq!(ids(&app, "a"), ["b", "c", "d", "a"]);
+
+        app.on_msg(reordered(operation, "a", &["b", "a", "c", "d"]));
+        assert_eq!(ids(&app, "a"), ["b", "c", "d", "a"]);
+        assert_eq!(app.columns[0].selected_id.as_deref(), Some("a"));
+        let Cmd::Reorder {
+            operation,
+            task_id,
+            previous,
+            ..
+        } = commands.recv().unwrap()
+        else {
+            panic!("expected the queued presses as one move");
+        };
+        assert_eq!((task_id.as_str(), previous.as_deref()), ("a", Some("d")));
+
+        app.on_msg(reordered(operation, "a", &["b", "c", "d", "a"]));
+        assert!(commands.try_recv().is_err());
+        assert_eq!(ids(&app, "a"), ["b", "c", "d", "a"]);
+        assert!(app.pending_operation.is_none());
+        assert_eq!(app.sync, SyncState::Ready);
+    }
+
+    #[test]
+    fn queued_reorder_presses_that_cancel_out_still_land_where_shown() {
+        let (mut app, commands) = app_with_lists(&["a"]);
+        let _ = commands.recv().unwrap(); // startup refresh
+        app.sync = SyncState::Ready;
+        reorder_list(&mut app, &["a", "b", "c"]);
+
+        app.on_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::ALT));
+        let Cmd::Reorder { operation, .. } = commands.recv().unwrap() else {
+            panic!("expected a same-list move");
+        };
+        app.on_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::ALT));
+        assert_eq!(ids(&app, "a"), ["a", "b", "c"]);
+
+        app.on_msg(reordered(operation, "a", &["b", "a", "c"]));
+        assert_eq!(ids(&app, "a"), ["a", "b", "c"]);
+        assert!(matches!(
+            commands.recv().unwrap(),
+            Cmd::Reorder { task_id, previous: None, .. } if task_id == "a"
+        ));
+    }
+
+    #[test]
+    fn a_failed_reorder_drops_queued_presses_and_restores_the_list() {
+        let (mut app, commands) = app_with_lists(&["a"]);
+        let _ = commands.recv().unwrap(); // startup refresh
+        app.sync = SyncState::Ready;
+        reorder_list(&mut app, &["a", "b", "c"]);
+
+        app.on_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::ALT));
+        let Cmd::Reorder { operation, .. } = commands.recv().unwrap() else {
+            panic!("expected a same-list move");
+        };
+        app.on_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::ALT));
+        assert_eq!(ids(&app, "a"), ["b", "c", "a"]);
+
+        app.on_msg(Msg::Reordered {
+            operation,
+            list_id: "a".into(),
+            task_id: "a".into(),
+            parent: None,
+            result: Err("offline".into()),
+            tasks: None,
+        });
+
+        assert_eq!(ids(&app, "a"), ["a", "b", "c"]);
+        assert!(matches!(commands.recv().unwrap(), Cmd::Refresh(_)));
+        assert!(commands.try_recv().is_err());
+        assert!(app.pending_operation.is_none());
+    }
+
+    #[test]
+    fn failed_reparent_rolls_back_and_enters_recovery() {
+        let (mut app, commands) = app_with_lists(&["a"]);
+        let _ = commands.recv().unwrap(); // startup refresh
+        app.sync = SyncState::Ready;
+        set_tasks(
+            &mut app,
+            "a",
+            vec![
+                task("parent", None, "1", false),
+                task("child", Some("parent"), "2", false),
+            ],
+            "child",
+        );
+
+        app.unparent_task();
+        let Cmd::Reparent { operation, .. } = commands.recv().unwrap() else {
+            panic!("expected reparent command");
+        };
+        app.on_msg(Msg::Reparented {
+            operation,
+            list_id: "a".into(),
+            task_id: "child".into(),
+            parent: None,
+            result: Err("offline".into()),
+        });
+
+        assert_eq!(
+            app.board
+                .task("a", "child")
+                .and_then(|task| task.parent.as_deref()),
+            Some("parent")
+        );
+        assert_eq!(app.columns[0].selected_id.as_deref(), Some("child"));
+        assert_eq!(app.sync, SyncState::Refreshing);
+        assert!(app
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("reparent failed")));
+    }
+
+    #[test]
+    fn greater_than_lists_only_available_parents_and_reparents() {
+        let (mut app, commands) = app_with_lists(&["a"]);
+        let _ = commands.recv().unwrap(); // startup refresh
+        app.sync = SyncState::Ready;
+        let assigned = Task {
+            assignment_info: Some(crate::model::AssignmentInfo {
+                link_to_task: "https://docs.google.com/document/d/1".into(),
+                surface_type: "DOCUMENT".into(),
+            }),
+            ..task("assigned", None, "5", false)
+        };
+        let hidden = Task {
+            hidden: true,
+            ..task("hidden", None, "6", false)
+        };
+        set_tasks(
+            &mut app,
+            "a",
+            vec![
+                task("selected", None, "1", false),
+                task("available", None, "2", false),
+                task("completed", None, "3", true),
+                task("subtask", Some("available"), "4", false),
+                assigned,
+                hidden,
+            ],
+            "selected",
+        );
+
+        // Other terminals retain the base key and report Shift separately.
+        app.on_key(KeyEvent::new(KeyCode::Char('.'), KeyModifiers::SHIFT));
+        let Interaction::Parent(picker) = &app.interaction else {
+            panic!("expected parent picker");
+        };
+        assert_eq!(
+            picker
+                .picker
+                .rows()
+                .map(|row| row.value.as_str())
+                .collect::<Vec<_>>(),
+            ["available"]
+        );
+
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(
+            app.board
+                .task("a", "selected")
+                .and_then(|task| task.parent.as_deref()),
+            Some("available")
+        );
+        assert!(matches!(
+            commands.recv().unwrap(),
+            Cmd::Reparent {
+                list_id,
+                task_id,
+                parent: Some(parent),
+                ..
+            } if list_id == "a" && task_id == "selected" && parent == "available"
+        ));
+    }
+
+    #[test]
+    fn tasks_with_children_or_completed_hidden_tasks_cannot_become_subtasks() {
+        for selected in ["has-children", "completed-hidden"] {
+            let (mut app, _commands) = app_with_lists(&["a"]);
+            app.sync = SyncState::Ready;
+            set_tasks(
+                &mut app,
+                "a",
+                vec![
+                    task("has-children", None, "1", false),
+                    task("child", Some("has-children"), "2", false),
+                    Task {
+                        hidden: true,
+                        ..task("completed-hidden", None, "3", true)
+                    },
+                    task("available", None, "4", false),
+                ],
+                selected,
+            );
+
+            app.start_parent_pick();
+
+            assert!(matches!(app.interaction, Interaction::Idle));
+            assert!(app
+                .error
+                .as_deref()
+                .is_some_and(|error| { error.contains("cannot become a subtask") }));
+        }
+    }
+
+    #[test]
+    fn help_keys_lists_the_board_commands() {
+        let (mut app, _commands) = app_with_lists(&["a"]);
+        app.start_help();
+        let picker = app.interaction.picker().unwrap();
+        for need in [
+            "previous list",
+            "next task",
+            "new task",
+            "new subtask",
+            "delete task",
+            "move to another list",
+            "choose parent",
+            "show / hide completed",
+            "keyboard commands",
+            "quit",
+        ] {
+            assert!(
+                picker
+                    .rows()
+                    .any(|row| row.subtitle.as_deref() == Some(need)),
+                "missing {need}"
+            );
+        }
+        assert!(picker
+            .rows()
+            .all(|row| !row.title.is_empty() && row.subtitle.is_some()));
+    }
+}

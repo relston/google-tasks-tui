@@ -5,14 +5,14 @@ use std::io::{self, Write};
 use chrono::NaiveDate;
 use clap::{builder::PossibleValue, Parser, Subcommand, ValueEnum};
 
-use crate::api::{
-    Client, CreateTask, Error as ApiError, ListPatch, Status, Task, TaskList, TaskPatch, TasksApi,
-};
-use crate::auth::Auth;
 use crate::board::{ordered, Board};
 use crate::cache;
+use crate::google::{
+    auth::Auth, Client, CreateTask, Error as ApiError, ListPatch, TaskPatch, TasksApi,
+};
+use crate::markdown::{md_lists, md_task, md_task_section};
+use crate::model::{normalize_title, Status, Task, TaskList};
 use crate::paths::Paths;
-use crate::presentation::{md_lists, md_task, md_task_section, normalize_title};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
 pub enum Format {
@@ -535,8 +535,6 @@ fn io_fail(e: io::Error) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::Link;
-    use crate::presentation::md_yank;
     use serde_json::{json, Value};
     use std::collections::HashMap;
     use std::fs;
@@ -599,14 +597,14 @@ mod tests {
             "test-account".into()
         }
 
-        fn tasklists(&mut self) -> crate::api::Result<Vec<TaskList>> {
+        fn tasklists(&mut self) -> crate::google::Result<Vec<TaskList>> {
             if let Some(e) = &self.fail {
                 return Err(ApiError::Transport(e.clone()));
             }
             Ok(self.lists.clone())
         }
 
-        fn tasks(&mut self, list_id: &str) -> crate::api::Result<Vec<Task>> {
+        fn tasks(&mut self, list_id: &str) -> crate::google::Result<Vec<Task>> {
             self.task_fetches += 1;
             if let Some(e) = &self.fail {
                 return Err(ApiError::Transport(e.clone()));
@@ -620,7 +618,7 @@ mod tests {
             task_id: &str,
             patch: &TaskPatch,
             _etag: Option<&str>,
-        ) -> crate::api::Result<Task> {
+        ) -> crate::google::Result<Task> {
             self.patches.push(serde_json::to_value(patch).unwrap());
             let tasks = self
                 .tasks
@@ -653,7 +651,7 @@ mod tests {
             list_id: &str,
             create: &CreateTask,
             parent: Option<&str>,
-        ) -> crate::api::Result<Task> {
+        ) -> crate::google::Result<Task> {
             self.creates += 1;
             let t = Task {
                 id: format!("n{}", self.next_id),
@@ -676,7 +674,7 @@ mod tests {
             list_id: &str,
             task_id: &str,
             _etag: Option<&str>,
-        ) -> crate::api::Result<()> {
+        ) -> crate::google::Result<()> {
             self.deletes.push((list_id.into(), task_id.into()));
             if let Some(tasks) = self.tasks.get_mut(list_id) {
                 tasks.retain(|t| t.id != task_id);
@@ -688,8 +686,8 @@ mod tests {
             &mut self,
             list_id: &str,
             task_id: &str,
-            movement: &crate::api::MoveTask,
-        ) -> crate::api::Result<Task> {
+            movement: &crate::google::MoveTask,
+        ) -> crate::google::Result<Task> {
             let mut task = {
                 let source = self
                     .tasks
@@ -710,7 +708,7 @@ mod tests {
             Ok(task)
         }
 
-        fn create_list(&mut self, title: &str) -> crate::api::Result<TaskList> {
+        fn create_list(&mut self, title: &str) -> crate::google::Result<TaskList> {
             let list = TaskList {
                 id: format!("n{}", self.next_id),
                 title: title.into(),
@@ -727,7 +725,7 @@ mod tests {
             list_id: &str,
             patch: &ListPatch,
             _etag: Option<&str>,
-        ) -> crate::api::Result<TaskList> {
+        ) -> crate::google::Result<TaskList> {
             let list = self
                 .lists
                 .iter_mut()
@@ -737,7 +735,7 @@ mod tests {
             Ok(list.clone())
         }
 
-        fn delete_list(&mut self, list_id: &str) -> crate::api::Result<()> {
+        fn delete_list(&mut self, list_id: &str) -> crate::google::Result<()> {
             self.lists.retain(|l| l.id != list_id);
             self.tasks.remove(list_id);
             Ok(())
@@ -987,7 +985,7 @@ mod tests {
     #[test]
     fn assigned_tasks_reject_notes_updates() {
         let mut api = Fake::new();
-        api.tasks.get_mut("lw").unwrap()[0].assignment_info = Some(crate::api::AssignmentInfo {
+        api.tasks.get_mut("lw").unwrap()[0].assignment_info = Some(crate::model::AssignmentInfo {
             link_to_task: "https://docs.google.com/document/d/1".into(),
             surface_type: "DOCUMENT".into(),
         });
@@ -1013,56 +1011,6 @@ mod tests {
         assert!(res.is_ok());
         assert!(out.is_empty());
         assert_eq!(api.deletes, vec![("lw".into(), "t2".into())]);
-    }
-
-    #[test]
-    fn md_yank_is_the_paste_shape() {
-        // Nothing but a title, even when Google sends a link to the task.
-        let bare = Task {
-            web_view_link: Some("https://tasks.google.com/t/9".into()),
-            ..task("t1", "Buy milk", Status::NeedsAction)
-        };
-        assert_eq!(md_yank(&bare), "# Buy milk\n");
-        assert_eq!(md_yank(&Task::default()), "# (untitled)\n");
-
-        // A description-less link labels itself with its URL, and a title with
-        // brackets cannot close the link early.
-        let t = Task {
-            links: vec![
-                Link {
-                    description: "  ".into(),
-                    link: "https://bare.test/x".into(),
-                },
-                Link {
-                    description: "a [b] c".into(),
-                    link: "https://named.test".into(),
-                },
-                Link {
-                    description: "dropped".into(),
-                    link: String::new(),
-                },
-            ],
-            // A link back to the task itself is not wanted.
-            web_view_link: Some("https://tasks.google.com/t/1".into()),
-            ..task("t2", "Linked", Status::NeedsAction)
-        };
-        assert_eq!(
-            md_yank(&t),
-            "# Linked\n\n\
-             - [https://bare.test/x](<https://bare.test/x>)\n\
-             - [a \\[b\\] c](<https://named.test>)\n"
-        );
-
-        // Due and notes, in that order, each its own block.
-        let t = Task {
-            due: NaiveDate::from_ymd_opt(2026, 9, 25),
-            notes: Some("  line one\nline two  ".into()),
-            ..task("t3", "Both", Status::NeedsAction)
-        };
-        assert_eq!(
-            md_yank(&t),
-            "# Both\n\nDue: 2026-09-25\n\nline one\nline two\n"
-        );
     }
 
     #[test]

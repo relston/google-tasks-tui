@@ -1,20 +1,10 @@
+//! Markdown for CLI output and the TUI's copy command. Terminal controls are
+//! stripped and Markdown structure is escaped by context.
+
 use crate::{
-    api::{Task, TaskList},
     board,
+    model::{display_title, single_line, Task, TaskList},
 };
-
-pub fn normalize_title(title: &str) -> Result<String, &'static str> {
-    let title = inline(title).trim().to_string();
-    if title.is_empty() {
-        Err("a task needs a title")
-    } else {
-        Ok(title)
-    }
-}
-
-pub fn display_title(task: &Task) -> String {
-    normalize_title(&task.title).unwrap_or_else(|_| "(untitled)".into())
-}
 
 pub fn md_lists(lists: &[TaskList]) -> String {
     lists
@@ -22,7 +12,7 @@ pub fn md_lists(lists: &[TaskList]) -> String {
         .map(|list| {
             format!(
                 "- {} ({})\n",
-                markdown_text(&inline(&list.title)),
+                markdown_text(&single_line(&list.title)),
                 code_span(&list.id)
             )
         })
@@ -32,7 +22,7 @@ pub fn md_lists(lists: &[TaskList]) -> String {
 pub fn md_task_section(list: &TaskList, tasks: &[Task]) -> String {
     let mut output = format!(
         "# {} ({})\n",
-        markdown_text(&inline(&list.title)),
+        markdown_text(&single_line(&list.title)),
         code_span(&list.id)
     );
     let rows = board::ordered(tasks.to_vec());
@@ -44,7 +34,7 @@ pub fn md_task_section(list: &TaskList, tasks: &[Task]) -> String {
             let indent = if row.depth > 0 { "  " } else { "" };
             output.push_str(&format!(
                 "{indent}- [{mark}] {} ({})\n",
-                markdown_text(&inline(&task.title)),
+                markdown_text(&single_line(&task.title)),
                 code_span(&task.id)
             ));
             if let Some(notes) = task
@@ -66,7 +56,7 @@ pub fn md_task_section(list: &TaskList, tasks: &[Task]) -> String {
 pub fn md_task(task: &Task) -> String {
     let mut output = format!(
         "# {}\n\n- id: {}\n- status: {}",
-        markdown_text(&inline(&task.title)),
+        markdown_text(&single_line(&task.title)),
         code_span(&task.id),
         task.status.as_str()
     );
@@ -117,67 +107,11 @@ pub fn md_yank(task: &Task) -> String {
         };
         output.push_str(&format!(
             "- [{}]({})\n",
-            markdown_text(&inline(label)),
+            markdown_text(&single_line(label)),
             link_destination(&link.link)
         ));
     }
     output
-}
-
-pub fn urls_in(notes: &str) -> Vec<String> {
-    let mut output = Vec::new();
-    let mut index = 0;
-    while index < notes.len() {
-        let rest = &notes[index..];
-        let scheme = if rest.starts_with("https://") {
-            "https://"
-        } else if rest.starts_with("http://") {
-            "http://"
-        } else {
-            index += rest.chars().next().map(char::len_utf8).unwrap_or(1);
-            continue;
-        };
-        let end = rest
-            .find(|character: char| {
-                character.is_whitespace() || matches!(character, '<' | '>' | '"' | '\'')
-            })
-            .unwrap_or(rest.len());
-        let candidate = trim_url_punctuation(&rest[..end]);
-        if candidate.len() > scheme.len()
-            && url::Url::parse(candidate).is_ok_and(|url| {
-                matches!(url.scheme(), "http" | "https") && url.host_str().is_some()
-            })
-            && !output.iter().any(|url| url == candidate)
-        {
-            output.push(candidate.to_string());
-        }
-        index += end.max(scheme.len());
-    }
-    output
-}
-
-fn trim_url_punctuation(mut value: &str) -> &str {
-    value = value.trim_end_matches(['.', ',', ';', ':', '!', '?']);
-    while value.ends_with(')') && value.matches(')').count() > value.matches('(').count() {
-        value = &value[..value.len() - 1];
-    }
-    while value.ends_with(']') && value.matches(']').count() > value.matches('[').count() {
-        value = &value[..value.len() - 1];
-    }
-    value
-}
-
-fn inline(value: &str) -> String {
-    value
-        .chars()
-        .map(|character| {
-            if character.is_control() || character == '\n' {
-                ' '
-            } else {
-                character
-            }
-        })
-        .collect()
 }
 
 fn multiline(value: &str) -> String {
@@ -208,7 +142,7 @@ fn markdown_text(value: &str) -> String {
 }
 
 fn code_span(value: &str) -> String {
-    let value = inline(value);
+    let value = single_line(value);
     let longest = value
         .split(|character| character != '`')
         .map(str::len)
@@ -223,7 +157,7 @@ fn code_span(value: &str) -> String {
 }
 
 fn link_destination(value: &str) -> String {
-    let value = inline(value)
+    let value = single_line(value)
         .replace(' ', "%20")
         .replace('<', "%3C")
         .replace('>', "%3E");
@@ -233,7 +167,8 @@ fn link_destination(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::Link;
+    use crate::model::Link;
+    use chrono::NaiveDate;
 
     #[test]
     fn markdown_escapes_structure_and_terminal_controls() {
@@ -255,12 +190,61 @@ mod tests {
         assert!(md_task(&task).contains("``id`tick``"));
     }
 
+    fn task(id: &str, title: &str) -> Task {
+        Task {
+            id: id.into(),
+            title: title.into(),
+            ..Default::default()
+        }
+    }
+
     #[test]
-    fn url_extraction_preserves_balanced_parentheses() {
+    fn md_yank_is_the_paste_shape() {
+        // Nothing but a title, even when Google sends a link to the task.
+        let bare = Task {
+            web_view_link: Some("https://tasks.google.com/t/9".into()),
+            ..task("t1", "Buy milk")
+        };
+        assert_eq!(md_yank(&bare), "# Buy milk\n");
+        assert_eq!(md_yank(&Task::default()), "# (untitled)\n");
+
+        // A description-less link labels itself with its URL, and a title with
+        // brackets cannot close the link early.
+        let t = Task {
+            links: vec![
+                Link {
+                    description: "  ".into(),
+                    link: "https://bare.test/x".into(),
+                },
+                Link {
+                    description: "a [b] c".into(),
+                    link: "https://named.test".into(),
+                },
+                Link {
+                    description: "dropped".into(),
+                    link: String::new(),
+                },
+            ],
+            // A link back to the task itself is not wanted.
+            web_view_link: Some("https://tasks.google.com/t/1".into()),
+            ..task("t2", "Linked")
+        };
         assert_eq!(
-            urls_in("see https://example.test/a_(b) and [x](https://other.test/x)."),
-            ["https://example.test/a_(b)", "https://other.test/x"]
+            md_yank(&t),
+            "# Linked\n\n\
+             - [https://bare.test/x](<https://bare.test/x>)\n\
+             - [a \\[b\\] c](<https://named.test>)\n"
         );
-        assert!(urls_in("https:// no-host.test ftp://example.test").is_empty());
+
+        // Due and notes, in that order, each its own block.
+        let t = Task {
+            due: NaiveDate::from_ymd_opt(2026, 9, 25),
+            notes: Some("  line one\nline two  ".into()),
+            ..task("t3", "Both")
+        };
+        assert_eq!(
+            md_yank(&t),
+            "# Both\n\nDue: 2026-09-25\n\nline one\nline two\n"
+        );
     }
 }

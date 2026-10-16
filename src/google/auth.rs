@@ -18,7 +18,8 @@ use std::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::{paths::Paths, platform, storage};
+use super::http::{self, decode, pct};
+use crate::{atomic_file, desktop, paths::Paths};
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -70,19 +71,6 @@ impl From<ureq::Error> for Error {
 }
 
 const SCOPE: &str = "https://www.googleapis.com/auth/tasks";
-
-fn http_agent() -> ureq::Agent {
-    let config = ureq::Agent::config_builder()
-        .http_status_as_error(false)
-        .timeout_connect(Some(Duration::from_secs(10)))
-        .timeout_send_request(Some(Duration::from_secs(15)))
-        .timeout_send_body(Some(Duration::from_secs(30)))
-        .timeout_recv_response(Some(Duration::from_secs(30)))
-        .timeout_recv_body(Some(Duration::from_secs(30)))
-        .timeout_global(Some(Duration::from_secs(60)))
-        .build();
-    ureq::Agent::new_with_config(config)
-}
 
 #[derive(Deserialize)]
 struct ClientFile {
@@ -176,7 +164,7 @@ impl Auth {
         let client = serde_json::from_str::<ClientFile>(&raw)
             .map_err(|e| Error::Credentials(format!("{credentials}: {e}")))?
             .installed;
-        let agent = http_agent();
+        let agent = http::agent();
 
         let cached = fs::read_to_string(&token_path)
             .ok()
@@ -239,7 +227,7 @@ impl Auth {
         Some(Self {
             client,
             tok,
-            agent: http_agent(),
+            agent: http::agent(),
             token_path,
         })
     }
@@ -284,7 +272,7 @@ impl Auth {
 
     fn save(&self) -> Result<()> {
         let json = serde_json::to_vec_pretty(&self.tok).map_err(std::io::Error::other)?;
-        storage::atomic_private_write(&self.token_path, &json)?;
+        atomic_file::write_private(&self.token_path, &json)?;
         Ok(())
     }
 }
@@ -346,7 +334,7 @@ fn authorize(agent: &ureq::Agent, c: &ClientSecret) -> Result<Cached> {
     eprintln!(
         "Authorize Google Tasks access in your browser. If it doesn't open, visit:\n\n  {url}\n"
     );
-    if let Err(error) = platform::open_url(&url) {
+    if let Err(error) = desktop::open_url(&url) {
         eprintln!("Could not open the browser: {error}");
     }
 
@@ -458,44 +446,6 @@ fn base64_url(data: &[u8]) -> String {
     out
 }
 
-pub fn pct(s: &str) -> String {
-    s.bytes()
-        .map(|b| match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                (b as char).to_string()
-            }
-            _ => format!("%{b:02X}"),
-        })
-        .collect()
-}
-
-fn decode(s: &str) -> String {
-    let b = s.as_bytes();
-    let mut out = Vec::with_capacity(b.len());
-    let mut i = 0;
-    while i < b.len() {
-        let hex = (b[i] == b'%' && i + 2 < b.len())
-            .then(|| std::str::from_utf8(&b[i + 1..i + 3]).ok())
-            .flatten()
-            .and_then(|h| u8::from_str_radix(h, 16).ok());
-        match (b[i], hex) {
-            (_, Some(v)) => {
-                out.push(v);
-                i += 3;
-            }
-            (b'+', _) => {
-                out.push(b' ');
-                i += 1;
-            }
-            (c, _) => {
-                out.push(c);
-                i += 1;
-            }
-        }
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -508,13 +458,6 @@ mod tests {
             .unwrap()
             .as_nanos();
         env::temp_dir().join(format!("gtt-auth-{label}-{}-{nonce}", std::process::id()))
-    }
-
-    #[test]
-    fn percent_round_trip() {
-        let s = "4/0Ab_c+d e/f?g=h&é";
-        assert_eq!(decode(&pct(s)), s);
-        assert_eq!(decode("a+b%2Fc%"), "a b/c%");
     }
 
     #[test]
@@ -571,19 +514,6 @@ mod tests {
     }
 
     #[test]
-    fn the_http_agent_bounds_every_network_phase() {
-        let agent = http_agent();
-        let timeouts = agent.config().timeouts();
-
-        assert_eq!(timeouts.connect, Some(Duration::from_secs(10)));
-        assert_eq!(timeouts.send_request, Some(Duration::from_secs(15)));
-        assert_eq!(timeouts.send_body, Some(Duration::from_secs(30)));
-        assert_eq!(timeouts.recv_response, Some(Duration::from_secs(30)));
-        assert_eq!(timeouts.recv_body, Some(Duration::from_secs(30)));
-        assert_eq!(timeouts.global, Some(Duration::from_secs(60)));
-    }
-
-    #[test]
     fn cached_token_must_match_the_configured_client() {
         let root = test_root("client-id");
         fs::create_dir_all(&root).unwrap();
@@ -632,7 +562,7 @@ mod tests {
         let root = test_root("save");
         let token_path = root.join("config/token.json");
         let auth = Auth::for_test(
-            http_agent(),
+            http::agent(),
             "https://token.invalid".into(),
             token_path.clone(),
             "access",
@@ -659,7 +589,7 @@ mod tests {
         let blocked = root.join("blocked");
         fs::write(&blocked, "not a directory").unwrap();
         let auth = Auth::for_test(
-            http_agent(),
+            http::agent(),
             "https://token.invalid".into(),
             blocked.join("token.json"),
             "access",

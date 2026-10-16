@@ -16,16 +16,22 @@ use ratatui::{
     DefaultTerminal,
 };
 
-use crate::api::Client;
-use crate::auth;
 use crate::cache;
 use crate::config;
+use crate::google::{auth, Client};
 use crate::paths::Paths;
 
 mod app;
-mod board;
-mod render;
-mod text;
+mod columns;
+mod commands;
+mod editor;
+mod input;
+mod mutation;
+mod picker;
+mod sync;
+#[cfg(test)]
+mod test_support;
+mod view;
 mod worker;
 
 use app::{App, QuitState};

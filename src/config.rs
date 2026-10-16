@@ -7,9 +7,9 @@ use std::{fs, io};
 use serde::Deserialize;
 
 use crate::{
-    keybindings::{default_binding_specs, Action, BindingConfig, BindingSource, Keymap},
+    atomic_file,
+    keys::{default_binding_specs, Action, BindingConfig, BindingSource, Keymap},
     paths::Paths,
-    storage,
     theme::ThemeConfig,
 };
 
@@ -238,7 +238,7 @@ pub fn load(paths: &Paths) -> (Config, Option<String>) {
             ),
         },
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            let warning = storage::atomic_private_write(&path, TEMPLATE.as_bytes())
+            let warning = atomic_file::write_private(&path, TEMPLATE.as_bytes())
                 .err()
                 .map(|error| format!("writing {}: {error}", path.display()));
             (Config::default(), warning)
@@ -322,16 +322,11 @@ help = "not-a-key"
         .unwrap();
         let (keymap, diagnostics) = config.keymap();
 
-        assert_eq!(
-            keymap.labels_for(crate::keybindings::Action::CreateTask),
-            ["n"]
-        );
+        assert_eq!(keymap.labels_for(crate::keys::Action::CreateTask), ["n"]);
         assert!(keymap
-            .labels_for(crate::keybindings::Action::DeleteTask)
+            .labels_for(crate::keys::Action::DeleteTask)
             .is_empty());
-        assert!(keymap
-            .labels_for(crate::keybindings::Action::Help)
-            .is_empty());
+        assert!(keymap.labels_for(crate::keys::Action::Help).is_empty());
         assert_eq!(diagnostics.len(), 1);
         assert!(diagnostics
             .iter()
@@ -350,7 +345,7 @@ create_task = "ctrl+b"
         let (keymap, diagnostics) = config.keymap();
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
         assert_eq!(
-            keymap.labels_for(crate::keybindings::Action::CreateTask),
+            keymap.labels_for(crate::keys::Action::CreateTask),
             ["ctrl+b"]
         );
     }
