@@ -63,6 +63,19 @@ impl Board {
         self.tasks.get(list_id)?.get(task_id)
     }
 
+    /// A task's direct subtasks, in no particular order.
+    pub fn subtasks<'a>(
+        &'a self,
+        list_id: &str,
+        task_id: &'a str,
+    ) -> impl Iterator<Item = &'a Task> + 'a {
+        self.tasks
+            .get(list_id)
+            .into_iter()
+            .flat_map(|tasks| tasks.values())
+            .filter(move |task| task.parent.as_deref() == Some(task_id))
+    }
+
     pub fn task_mut(&mut self, list_id: &str, task_id: &str) -> Option<&mut Task> {
         self.tasks.get_mut(list_id)?.get_mut(task_id)
     }

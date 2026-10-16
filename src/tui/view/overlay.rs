@@ -4,7 +4,7 @@ use ratatui::{
     layout::Rect,
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Clear, HighlightSpacing, List, ListItem},
+    widgets::{Block, BorderType, Clear, HighlightSpacing, List, ListItem, ListState},
     Frame,
 };
 use unicode_width::UnicodeWidthStr;
@@ -14,15 +14,17 @@ use crate::theme::Theme;
 use super::super::app::App;
 use super::super::picker::PickerStyle;
 use super::text::{ellipsize, wrap};
+use super::ViewState;
 
 impl App {
     /// Every modal list draws through here: Browse, Move and Keyboard differ
     /// only in their rows, so layout, filtering and the empty state are shared.
-    pub(super) fn draw_picker(&mut self, f: &mut Frame, area: Rect, t: &Theme) {
+    pub(super) fn draw_picker(&self, f: &mut Frame, area: Rect, t: &Theme, view: &mut ViewState) {
         let bg = self.bg(t.bg);
         let wrap_titles = self.config.wrap_titles;
         let title = self.interaction.picker_title();
-        let Some(picker) = self.interaction.picker_mut() else {
+        let Some(picker) = self.interaction.picker() else {
+            view.picker = None;
             return;
         };
 
@@ -111,7 +113,15 @@ impl App {
             .highlight_symbol("▌")
             .highlight_spacing(HighlightSpacing::Always);
         f.render_widget(Clear, rect); // a Block restyles cells but leaves their text
-        f.render_stateful_widget(list, rect, &mut picker.state);
+        let offset = match view.picker {
+            Some((open, offset)) if open == title => offset,
+            _ => 0,
+        };
+        let mut state = ListState::default()
+            .with_offset(offset)
+            .with_selected(picker.selected_index());
+        f.render_stateful_widget(list, rect, &mut state);
+        view.picker = Some((title, state.offset()));
     }
 }
 

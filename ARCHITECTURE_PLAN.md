@@ -174,9 +174,9 @@ Define every action once and generate everything else from it.
 
 Make the compiler enforce that drawing does not change application state.
 
-- [ ] a) Write tests: drawing twice leaves `App` unchanged, and an edit whose task disappears closes after the update with a visible message.
-- [ ] b) Add `ViewState` for list scroll offsets and horizontal scroll; change rendering to take `&App` and `&mut ViewState`.
-- [ ] c) Move focus clamping, shelf closing, and orphaned-edit handling into a post-update step in `columns.rs`.
-- [ ] d) Replace the `edit_width` feedback with a pure layout function that uses the stored terminal size.
-- [ ] e) Stop rebuilding the full task tree on every frame while the details shelf is open.
-- [ ] f) Add the read-only rendering rule to [`CLAUDE.md`](CLAUDE.md).
+- [x] a) Write tests: drawing twice leaves `App` unchanged, and an edit whose task disappears closes after the update with a visible message.
+- [x] b) Add `ViewState` for list scroll offsets and horizontal scroll; change rendering to take `&App` and `&mut ViewState`. (Column and picker selection became plain indices, so `ListState` lives only in drawing.)
+- [x] c) Move focus clamping, shelf closing, and orphaned-edit handling into a post-update step in `columns.rs`. (`App::settle`, run after every key and worker message.)
+- [x] d) Replace the `edit_width` feedback with a pure layout function that uses the stored terminal size.
+- [x] e) Stop rebuilding the full task tree on every frame while the details shelf is open.
+- [x] f) Add the read-only rendering rule to [`CLAUDE.md`](CLAUDE.md).

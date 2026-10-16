@@ -6,25 +6,59 @@ use ratatui::{
     layout::Rect,
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, HighlightSpacing, List, ListItem, Paragraph},
+    widgets::{Block, BorderType, HighlightSpacing, List, ListItem, ListState, Padding, Paragraph},
     Frame,
 };
 
 use crate::board::Row;
 use crate::theme::Theme;
 
-use super::super::app::{App, Interaction, Shelf};
-use super::super::editor::{Edit, EditTarget};
+use super::super::app::App;
 use super::super::sync::LoadState;
 use super::shelf::{due_color, relative};
 use super::text::{clean, title_of, wrap};
+use super::ViewState;
 
-pub(super) const COL_MIN: u16 = 30;
+const COL_MIN: u16 = 30;
 const COL_MAX: u16 = 56;
 const SHELF_W: u16 = 52;
 
 impl App {
-    pub(super) fn draw_board(&mut self, f: &mut Frame, area: Rect, t: &Theme) {
+    /// The shelf is drawn while open with a task or a new-task draft to show.
+    fn shelf_shown(&self) -> bool {
+        self.shelf.is_open() && (self.selected_task().is_some() || self.is_creating())
+    }
+
+    /// Column and shelf widths: columns share the width evenly within
+    /// limits, and the shelf takes a fixed slot.
+    fn widths(&self, width: u16, shelf: bool) -> (u16, u16) {
+        let shelf_w = if shelf { SHELF_W.min(width / 2) } else { 0 };
+        let columns = self.columns.len().max(1) as u16;
+        let col_w = ((width - shelf_w) / columns).clamp(COL_MIN, COL_MAX);
+        (col_w, shelf_w)
+    }
+
+    /// The editor's text width in the current layout, or `None` when its
+    /// shelf is too small to show it. Input uses it to move the cursor.
+    pub(in crate::tui) fn editor_width(&self) -> Option<usize> {
+        if self.columns.is_empty() || !self.shelf_shown() {
+            return None;
+        }
+        let body = self.viewport.height.saturating_sub(2);
+        let width = if self.viewport.width < COL_MIN + 24 {
+            self.viewport.width
+        } else {
+            let (col_w, shelf_w) = self.widths(self.viewport.width, true);
+            shelf_w.min(self.viewport.width.saturating_sub(col_w))
+        };
+        let inner = Block::bordered()
+            .padding(Padding::horizontal(1))
+            .inner(Rect::new(0, 0, width, body));
+        let min_height = if self.is_creating() { 3 } else { 8 };
+        (inner.width >= 8 && inner.height >= min_height).then(|| inner.width as usize - 2)
+    }
+
+    pub(super) fn draw_board(&self, f: &mut Frame, area: Rect, t: &Theme, view: &mut ViewState) {
         if self.columns.is_empty() {
             let msg = if self.loading() {
                 " Loading task lists…"
@@ -37,50 +71,31 @@ impl App {
             );
             return;
         }
-        self.focus = self.focus.min(self.columns.len() - 1);
-        if self.selected_task().is_none() && !self.is_creating() {
-            self.shelf = Shelf::Closed;
-            if matches!(
-                self.interaction,
-                Interaction::Editing(Edit {
-                    target: EditTarget::Existing { .. },
-                    ..
-                })
-            ) {
-                self.interaction = Interaction::Idle;
-            }
-        }
-
-        if self.shelf.is_open() && area.width < COL_MIN + 24 {
+        let focus = self.focus.min(self.columns.len() - 1);
+        let shelf = self.shelf_shown();
+        if shelf && area.width < COL_MIN + 24 {
             self.draw_shelf(f, area, t);
             return;
         }
-
-        // Columns share the width evenly within limits; the shelf takes a fixed slot.
-        let shelf_w = if self.shelf.is_open() {
-            SHELF_W.min(area.width / 2)
-        } else {
-            0
-        };
-        let col_w = ((area.width - shelf_w) / self.columns.len() as u16).clamp(COL_MIN, COL_MAX);
+        let (col_w, shelf_w) = self.widths(area.width, shelf);
 
         // Scroll just enough to keep the focused column (and its shelf) in view.
-        self.scroll = self.scroll.min(self.focus);
-        let span = |from: usize| (self.focus - from + 1) as u16 * col_w + shelf_w;
-        while self.scroll < self.focus && span(self.scroll) > area.width {
-            self.scroll += 1;
+        view.scroll = view.scroll.min(focus);
+        let span = |from: usize| (focus - from + 1) as u16 * col_w + shelf_w;
+        while view.scroll < focus && span(view.scroll) > area.width {
+            view.scroll += 1;
         }
 
         let right = area.right();
         let mut x = area.x;
-        for i in self.scroll..self.columns.len() {
+        for i in view.scroll..self.columns.len() {
             if x >= right {
                 break;
             }
             let w = col_w.min(right - x);
-            self.draw_column(f, Rect::new(x, area.y, w, area.height), i, t);
+            self.draw_column(f, Rect::new(x, area.y, w, area.height), i, t, view);
             x += w;
-            if self.shelf.is_open() && i == self.focus && x < right {
+            if shelf && i == focus && x < right {
                 let w = shelf_w.min(right - x);
                 self.draw_shelf(f, Rect::new(x, area.y, w, area.height), t);
                 x += w;
@@ -88,7 +103,14 @@ impl App {
         }
     }
 
-    pub(super) fn draw_column(&mut self, f: &mut Frame, area: Rect, i: usize, t: &Theme) {
+    pub(super) fn draw_column(
+        &self,
+        f: &mut Frame,
+        area: Rect,
+        i: usize,
+        t: &Theme,
+        view: &mut ViewState,
+    ) {
         let focused = i == self.focus;
         let surface = self.bg(t.surface);
         let today = Local::now().date_naive();
@@ -98,7 +120,7 @@ impl App {
             .wrap_titles
             .then(|| (area.width as usize).saturating_sub(3));
         let hide_completed = !self.show_completed;
-        let col = &mut self.columns[i];
+        let col = &self.columns[i];
 
         let open = col.rows.iter().filter(|r| !r.task.is_done()).count();
         let title_fg = if focused { t.fg } else { t.muted };
@@ -144,7 +166,12 @@ impl App {
             .highlight_style(highlight)
             .highlight_symbol(if focused { "▌" } else { " " })
             .highlight_spacing(HighlightSpacing::Always);
-        f.render_stateful_widget(list, area, &mut col.state);
+        let offset = view.offsets.get(&col.list.id).copied().unwrap_or(0);
+        let mut state = ListState::default()
+            .with_offset(offset)
+            .with_selected(col.selected_index());
+        f.render_stateful_widget(list, area, &mut state);
+        view.offsets.insert(col.list.id.clone(), state.offset());
     }
 }
 

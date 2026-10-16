@@ -7,6 +7,8 @@ mod shelf;
 mod status;
 pub(super) mod text;
 
+use std::collections::HashMap;
+
 use ratatui::{
     layout::{Constraint, Layout},
     style::{Color, Style},
@@ -17,6 +19,19 @@ use ratatui::{
 
 use super::app::App;
 
+/// Scroll positions only drawing needs. Ratatui moves list offsets as it
+/// draws, so this is the one piece of state drawing may change; the app
+/// itself is read-only while it draws.
+#[derive(Default)]
+pub(in crate::tui) struct ViewState {
+    /// The first visible column.
+    scroll: usize,
+    /// Each column's list offset, by list id.
+    offsets: HashMap<String, usize>,
+    /// The open overlay and its list offset.
+    picker: Option<(&'static str, usize)>,
+}
+
 impl App {
     pub(super) fn bg(&self, color: Color) -> Color {
         if self.transparent {
@@ -26,9 +41,8 @@ impl App {
         }
     }
 
-    pub(in crate::tui) fn draw(&mut self, f: &mut Frame) {
-        self.edit_width = 0;
-        let t = self.theme.clone();
+    pub(in crate::tui) fn draw(&self, f: &mut Frame, view: &mut ViewState) {
+        let t = &self.theme;
         let base = Style::default().fg(t.fg).bg(self.bg(t.bg));
         f.render_widget(Block::default().style(base), f.area());
 
@@ -50,15 +64,16 @@ impl App {
         }
         f.render_widget(Line::from(head), header);
 
-        self.draw_board(f, body, &t);
-        self.draw_picker(f, body, &t);
+        self.draw_board(f, body, t, view);
+        self.draw_picker(f, body, t, view);
 
-        self.draw_status(f, status, &t);
+        self.draw_status(f, status, t);
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::ViewState;
     use crate::cache;
     use crate::config::Config;
     use crate::keys::BindingConfig;
@@ -71,13 +86,15 @@ mod tests {
     use ratatui::{
         backend::TestBackend,
         crossterm::event::{KeyCode, KeyEvent, KeyModifiers},
+        layout::Rect,
         Terminal,
     };
     use std::sync::mpsc;
 
-    fn render_app(app: &mut App, w: u16, h: u16) -> String {
+    fn render_app(app: &App, w: u16, h: u16) -> String {
         let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
-        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let mut view = ViewState::default();
+        terminal.draw(|frame| app.draw(frame, &mut view)).unwrap();
         let buffer = terminal.backend().buffer();
         (0..h)
             .flat_map(|y| {
@@ -138,7 +155,7 @@ mod tests {
                 })
                 .collect(),
         };
-        let mut app = App::new(
+        let app = App::new(
             tx,
             cached,
             Config {
@@ -147,7 +164,8 @@ mod tests {
             },
         );
         let mut term = Terminal::new(TestBackend::new(w, h)).unwrap();
-        term.draw(|f| app.draw(f)).unwrap();
+        term.draw(|f| app.draw(f, &mut ViewState::default()))
+            .unwrap();
         let buf = term.backend().buffer().clone();
         (0..h)
             .map(|y| (0..w).map(|x| buf[(x, y)].symbol()).collect())
@@ -185,7 +203,7 @@ mod tests {
         app.keymap = keymap;
         app.sync = SyncState::Ready;
 
-        let screen = render_app(&mut app, 160, 8);
+        let screen = render_app(&app, 160, 8);
         assert!(screen.contains("n new"), "{screen}");
         assert!(!screen.contains("c new"), "{screen}");
     }
@@ -268,7 +286,9 @@ mod tests {
         let mut app = App::new(tx, cached, Config::default());
         app.shelf = Shelf::Open(FieldId::Title);
         let mut terminal = Terminal::new(TestBackend::new(90, 18)).unwrap();
-        terminal.draw(|frame| app.draw(frame)).unwrap();
+        terminal
+            .draw(|frame| app.draw(frame, &mut ViewState::default()))
+            .unwrap();
         let buffer = terminal.backend().buffer();
         let screen: String = (0..18)
             .flat_map(|y| {
@@ -282,6 +302,81 @@ mod tests {
         assert!(screen.contains("Important notes"), "{screen}");
         assert!(screen.contains("Updated"), "{screen}");
         assert!(screen.contains("More"), "{screen}");
+    }
+
+    #[test]
+    fn long_lists_scroll_to_keep_the_selection_on_screen() {
+        let titles: Vec<String> = (0..30).map(|n| format!("task number {n:02}")).collect();
+        let titles: Vec<&str> = titles.iter().map(String::as_str).collect();
+        let (tx, _rx) = mpsc::channel();
+        let cached = cache::Cache {
+            lists: vec![cache::CachedList {
+                list: TaskList {
+                    id: "l".into(),
+                    title: "Long".into(),
+                    ..Default::default()
+                },
+                tasks: titles
+                    .iter()
+                    .enumerate()
+                    .map(|(j, title)| Task {
+                        id: format!("t{j}"),
+                        title: (*title).into(),
+                        position: format!("{j:09}"),
+                        status: Status::NeedsAction,
+                        ..Default::default()
+                    })
+                    .collect(),
+            }],
+        };
+        let mut app = App::new(tx, cached, Config::default());
+        app.columns[0].select(Some(29));
+        let mut view = ViewState::default();
+        let mut terminal = Terminal::new(TestBackend::new(40, 12)).unwrap();
+        terminal.draw(|frame| app.draw(frame, &mut view)).unwrap();
+        let screen: String = format!("{:?}", terminal.backend().buffer());
+        assert!(screen.contains("task number 29"), "{screen}");
+        assert!(!screen.contains("task number 00"), "{screen}");
+
+        app.interaction = Interaction::Browse(Picker::new(
+            (0..30)
+                .map(|n| PickerRow::new(format!("link {n:02}"), None, format!("v{n}")))
+                .collect(),
+        ));
+        for _ in 0..29 {
+            app.on_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
+        }
+        terminal.draw(|frame| app.draw(frame, &mut view)).unwrap();
+        let screen: String = format!("{:?}", terminal.backend().buffer());
+        assert!(screen.contains("link 29"), "{screen}");
+    }
+
+    #[test]
+    fn drawing_reads_the_app_and_repeats_exactly() {
+        let app = one_list_app();
+        let mut view = ViewState::default();
+        let mut terminal = Terminal::new(TestBackend::new(60, 12)).unwrap();
+        terminal.draw(|frame| app.draw(frame, &mut view)).unwrap();
+        let first = terminal.backend().buffer().clone();
+        terminal.draw(|frame| app.draw(frame, &mut view)).unwrap();
+        assert_eq!(&first, terminal.backend().buffer());
+    }
+
+    #[test]
+    fn the_editor_width_follows_the_shelf_layout() {
+        let mut app = one_list_app();
+        app.sync = SyncState::Ready;
+        app.start_create(false);
+
+        // Narrow: the shelf takes the whole width.
+        app.viewport = Rect::new(0, 0, 36, 10);
+        assert_eq!(app.editor_width(), Some(30));
+        // Wide: a 52-cell shelf beside a 56-cell column.
+        app.viewport = Rect::new(0, 0, 120, 20);
+        assert_eq!(app.editor_width(), Some(46));
+        // Too short to show an input.
+        app.viewport = Rect::new(0, 0, 36, 4);
+        assert_eq!(app.editor_width(), None);
     }
 
     #[test]
@@ -300,10 +395,13 @@ mod tests {
         let mut app = App::new(tx, cached, Config::default());
         app.sync = SyncState::Ready;
         app.start_create(false);
+        app.viewport = Rect::new(0, 0, 36, 10);
         let mut terminal = Terminal::new(TestBackend::new(36, 10)).unwrap();
-        terminal.draw(|frame| app.draw(frame)).unwrap();
+        terminal
+            .draw(|frame| app.draw(frame, &mut ViewState::default()))
+            .unwrap();
 
-        assert!(app.edit_width > 0);
+        assert_eq!(app.editor_width(), Some(30));
         let buffer = terminal.backend().buffer();
         let screen: String = (0..10)
             .flat_map(|y| {
@@ -331,7 +429,7 @@ mod tests {
         creating.keymap = keymap.clone();
         creating.sync = SyncState::Ready;
         creating.start_create(false);
-        let screen = render_app(&mut creating, 40, 6);
+        let screen = render_app(&creating, 40, 6);
         assert!(
             screen.contains("Terminal too small; ctrl+g cancels"),
             "{screen}"
@@ -340,7 +438,7 @@ mod tests {
         let mut details = one_list_app();
         details.keymap = keymap;
         details.shelf = Shelf::Open(FieldId::Title);
-        let screen = render_app(&mut details, 50, 8);
+        let screen = render_app(&details, 50, 8);
         assert!(
             screen.contains("Terminal too small; ctrl+o closes details"),
             "{screen}"
@@ -355,7 +453,7 @@ mod tests {
             Some("https://example.test".into()),
             "https://example.test".into(),
         )]));
-        let screen = render_app(&mut browse, 50, 14);
+        let screen = render_app(&browse, 50, 14);
         assert!(screen.contains("Browse Link"), "{screen}");
         assert!(screen.contains("Example"), "{screen}");
 
@@ -365,7 +463,7 @@ mod tests {
             None,
             "destination".into(),
         )]));
-        let screen = render_app(&mut movement, 50, 14);
+        let screen = render_app(&movement, 50, 14);
         assert!(screen.contains("Move"), "{screen}");
         assert!(screen.contains("Destination"), "{screen}");
 
@@ -379,13 +477,13 @@ mod tests {
                 "parent".into(),
             )]),
         });
-        let screen = render_app(&mut parent, 50, 14);
+        let screen = render_app(&parent, 50, 14);
         assert!(screen.contains("Select Parent"), "{screen}");
         assert!(screen.contains("Parent task"), "{screen}");
 
         let mut help = one_list_app();
         help.on_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
-        let screen = render_app(&mut help, 50, 20);
+        let screen = render_app(&help, 50, 20);
         assert!(screen.contains("Keyboard"), "{screen}");
         assert!(screen.contains("new task"), "{screen}");
     }
@@ -393,8 +491,8 @@ mod tests {
     #[test]
     fn extremely_narrow_terminals_render_without_panics_or_out_of_bounds_rows() {
         for (width, height) in [(1, 1), (2, 3), (8, 4), (12, 6)] {
-            let mut app = one_list_app();
-            let screen = render_app(&mut app, width, height);
+            let app = one_list_app();
+            let screen = render_app(&app, width, height);
             assert_eq!(
                 screen.lines().count(),
                 usize::from(height),
@@ -411,12 +509,12 @@ mod tests {
         let mut app = one_list_app();
         app.sync = SyncState::Ready;
         app.start_create(false);
-        render_app(&mut app, 60, 10);
+        app.viewport = Rect::new(0, 0, 60, 10);
         for character in "任务🙂e\u{301}\u{7}".chars() {
             app.on_key(KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE));
         }
 
-        let screen = render_app(&mut app, 60, 10);
+        let screen = render_app(&app, 60, 10);
 
         assert!(screen.contains('任') && screen.contains('务'), "{screen}");
         assert!(screen.contains('🙂'), "{screen}");

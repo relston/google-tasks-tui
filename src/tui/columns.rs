@@ -3,12 +3,11 @@
 
 use std::collections::HashSet;
 
-use ratatui::widgets::ListState;
-
 use crate::board::{Board, Row};
 use crate::model::TaskList;
 
-use super::app::App;
+use super::app::{App, Interaction, Shelf};
+use super::editor::{Edit, EditTarget};
 use super::sync::LoadState;
 
 pub(super) struct Column {
@@ -16,20 +15,34 @@ pub(super) struct Column {
     pub(super) rows: Vec<Row>,
     pub(super) load: LoadState,
     pub(super) selected_id: Option<String>,
-    pub(super) state: ListState,
 }
 
 impl Column {
+    pub(super) fn new(list: TaskList, rows: Vec<Row>, load: LoadState) -> Self {
+        let selected_id = rows.first().map(|row| row.task.id.clone());
+        Self {
+            list,
+            rows,
+            load,
+            selected_id,
+        }
+    }
+
     pub(super) fn selected(&self) -> Option<&Row> {
         let selected = self.selected_id.as_deref()?;
         self.rows.iter().find(|row| row.task.id == selected)
+    }
+
+    /// The selected task's row index, for drawing and stepping.
+    pub(super) fn selected_index(&self) -> Option<usize> {
+        let selected = self.selected_id.as_deref()?;
+        self.rows.iter().position(|row| row.task.id == selected)
     }
 
     pub(super) fn select(&mut self, index: Option<usize>) {
         self.selected_id = index
             .and_then(|index| self.rows.get(index))
             .map(|row| row.task.id.clone());
-        self.state.select(index);
     }
 
     pub(super) fn select_id(&mut self, task_id: Option<String>) {
@@ -69,7 +82,7 @@ impl App {
             return;
         };
         let selected = column.selected_id.clone();
-        let previous = column.state.selected().unwrap_or(0);
+        let previous = column.selected_index().unwrap_or(0);
         column.rows = rows;
         if selected
             .as_deref()
@@ -89,12 +102,32 @@ impl App {
         let Some(last) = col.rows.len().checked_sub(1) else {
             return;
         };
-        let cur = col.state.selected().unwrap_or(0) as isize;
+        let cur = col.selected_index().unwrap_or(0) as isize;
         col.select(Some((cur + delta).clamp(0, last as isize) as usize));
     }
 
     pub(super) fn selected_task(&self) -> Option<&Row> {
         self.columns.get(self.focus)?.selected()
+    }
+
+    /// Keep focus, the shelf, and an open edit consistent with the columns.
+    /// Runs after every key and worker message, so drawing never has to.
+    pub(super) fn settle(&mut self) {
+        self.focus = self.focus.min(self.columns.len().saturating_sub(1));
+        if self.selected_task().is_some() || self.is_creating() {
+            return;
+        }
+        self.shelf = Shelf::Closed;
+        if matches!(
+            self.interaction,
+            Interaction::Editing(Edit {
+                target: EditTarget::Existing { .. },
+                ..
+            })
+        ) {
+            self.interaction = Interaction::Idle;
+            self.error = Some("the task being edited disappeared; the edit was not saved".into());
+        }
     }
 }
 
@@ -128,7 +161,7 @@ mod tests {
             ["a-two", "a-one"]
         );
         assert_eq!(app.columns[0].selected_id.as_deref(), Some("a-one"));
-        assert_eq!(app.columns[0].state.selected(), Some(1));
+        assert_eq!(app.columns[0].selected_index(), Some(1));
     }
 
     #[test]
@@ -243,5 +276,36 @@ mod tests {
                 ..
             } if task_id == "two" && parent == "done-parent"
         ));
+    }
+
+    #[test]
+    fn an_edit_whose_task_disappears_closes_with_a_message() {
+        let (mut app, cmds) = app_with_lists(&["a"]);
+        let _ = cmds.recv().unwrap(); // startup refresh
+        let generation = app.refresh_generation;
+        app.shelf = Shelf::Open(FieldId::Title);
+        app.interaction = Interaction::Editing(Edit {
+            target: EditTarget::Existing {
+                list_id: "a".into(),
+                task_id: "a-cached".into(),
+                field: FieldId::Title,
+            },
+            buf: "half typed".into(),
+            cursor: 10,
+        });
+        let lists = app.columns.iter().map(|c| c.list.clone()).collect();
+
+        app.on_msg(Msg::Lists(generation, Ok(lists)));
+        app.on_msg(Msg::Tasks(generation, "a".into(), Ok(Vec::new())));
+
+        assert!(matches!(app.interaction, Interaction::Idle));
+        assert_eq!(app.shelf, Shelf::Closed);
+        assert!(
+            app.error
+                .as_deref()
+                .is_some_and(|error| error.contains("not saved")),
+            "{:?}",
+            app.error
+        );
     }
 }

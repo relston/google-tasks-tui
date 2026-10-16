@@ -20,7 +20,7 @@ use super::text::{clean, cursor_rc, pad_to_width, title_of, wrap};
 
 impl App {
     /// The shelf while a new task is being typed: just a title input.
-    pub(super) fn draw_new_shelf(&mut self, f: &mut Frame, area: Rect, t: &Theme) {
+    pub(super) fn draw_new_shelf(&self, f: &mut Frame, area: Rect, t: &Theme) {
         let col = &self.columns[self.focus];
         let parent_id = match self.edit().map(|edit| &edit.target) {
             Some(EditTarget::New { parent, .. }) => parent.clone(),
@@ -51,7 +51,6 @@ impl App {
             return;
         }
         let w = inner.width as usize - 2;
-        self.edit_width = w;
         let Some(e) = self.edit() else { return };
         let (text, offset) = e.view(w);
         let text = clean(text);
@@ -70,14 +69,13 @@ impl App {
         f.set_cursor_position((inner.x + 2 + offset as u16, inner.y));
     }
 
-    pub(super) fn draw_shelf(&mut self, f: &mut Frame, area: Rect, t: &Theme) {
+    pub(super) fn draw_shelf(&self, f: &mut Frame, area: Rect, t: &Theme) {
         if self.is_creating() {
             self.draw_new_shelf(f, area, t);
             return;
         }
         let col = &self.columns[self.focus];
         let Some(row) = col.selected() else { return };
-        let tree = self.board.rows(&col.list.id);
         let task = &row.task;
         let today = Local::now().date_naive();
         let muted = Style::default().fg(t.muted);
@@ -104,9 +102,6 @@ impl App {
         }
         // Two columns go to the focus marker.
         let w = inner.width as usize - 2;
-        if self.edit().is_some() {
-            self.edit_width = w;
-        }
         let editing = self.edit().filter(|e| {
             e.existing()
                 .is_some_and(|(list_id, task_id, _)| task_id == task.id && list_id == col.list.id)
@@ -142,18 +137,14 @@ impl App {
         if let Some(c) = &task.completed {
             meta.push(field("Completed", fmt_time(c).into(), t));
         }
-        if let Some(p) = task
+        if let Some(parent) = task
             .parent
             .as_deref()
-            .and_then(|p| tree.iter().find(|r| r.task.id == p))
+            .and_then(|parent| self.board.task(&col.list.id, parent))
         {
-            meta.push(field("Parent", title_of(&p.task).to_string().into(), t));
+            meta.push(field("Parent", title_of(parent).to_string().into(), t));
         }
-        let subtasks: Vec<&Task> = tree
-            .iter()
-            .map(|r| &r.task)
-            .filter(|c| c.parent.as_deref() == Some(task.id.as_str()))
-            .collect();
+        let subtasks: Vec<&Task> = self.board.subtasks(&col.list.id, &task.id).collect();
         if !subtasks.is_empty() {
             let done = subtasks.iter().filter(|s| s.is_done()).count();
             meta.push(field(

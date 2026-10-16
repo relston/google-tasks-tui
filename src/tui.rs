@@ -13,6 +13,7 @@ use ratatui::{
         },
         execute, terminal,
     },
+    layout::Rect,
     DefaultTerminal,
 };
 
@@ -35,6 +36,7 @@ mod view;
 mod worker;
 
 use app::{App, QuitState};
+use view::ViewState;
 use worker::{worker, Msg};
 
 const THEME_POLL: Duration = Duration::from_millis(500);
@@ -43,8 +45,11 @@ const TICK: Duration = Duration::from_millis(100);
 /// Returns whether shutdown should join the worker after draining writes.
 fn run(term: &mut DefaultTerminal, mut app: App, msgs: Receiver<Msg>) -> std::io::Result<bool> {
     let mut last_poll = Instant::now();
+    let mut view = ViewState::default();
     while !app.should_exit() {
-        term.draw(|f| app.draw(f))?;
+        let size = term.size()?;
+        app.viewport = Rect::new(0, 0, size.width, size.height);
+        term.draw(|f| app.draw(f, &mut view))?;
         // Block on input, but wake often enough to pick up API results.
         if event::poll(TICK)? {
             if let Event::Key(k) = event::read()? {

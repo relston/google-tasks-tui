@@ -1,10 +1,7 @@
 //! The filterable modal list behind Browse, Move, Select Parent, and the
 //! Keyboard overlay.
 
-use ratatui::{
-    crossterm::event::{KeyCode, KeyEvent},
-    widgets::ListState,
-};
+use ratatui::crossterm::event::{KeyCode, KeyEvent};
 
 use crate::keys::Action;
 
@@ -55,7 +52,8 @@ pub(super) struct Picker {
     /// `/` was pressed: keys go to the query instead of the list.
     typing: bool,
     style: PickerStyle,
-    pub(super) state: ListState,
+    /// Index into `shown`; `None` when nothing is selectable.
+    selected: Option<usize>,
 }
 
 impl Picker {
@@ -66,14 +64,14 @@ impl Picker {
             query: String::new(),
             typing: false,
             style: PickerStyle::Choose,
-            state: ListState::default().with_selected(Some(0)),
+            selected: Some(0),
         }
     }
 
     pub(super) fn reference(rows: Vec<PickerRow>) -> Self {
         Self {
             style: PickerStyle::Reference,
-            state: ListState::default(),
+            selected: None,
             ..Self::new(rows)
         }
     }
@@ -99,10 +97,14 @@ impl Picker {
     }
 
     pub(super) fn selected(&self) -> Option<&PickerRow> {
-        self.state
-            .selected()
+        self.selected
             .and_then(|index| self.shown.get(index))
             .map(|index| &self.rows[*index])
+    }
+
+    /// The selected row's position among the shown rows, for drawing.
+    pub(super) fn selected_index(&self) -> Option<usize> {
+        self.selected
     }
 
     /// Every value still passing the filter, so "open all" opens what you
@@ -115,9 +117,8 @@ impl Picker {
         let Some(last) = self.shown.len().checked_sub(1) else {
             return;
         };
-        let current = self.state.selected().unwrap_or(0) as isize;
-        self.state
-            .select(Some((current + delta).clamp(0, last as isize) as usize));
+        let current = self.selected.unwrap_or(0) as isize;
+        self.selected = Some((current + delta).clamp(0, last as isize) as usize);
     }
 
     /// Case-insensitive substring match over the title and subtitle. Selection
@@ -132,7 +133,7 @@ impl Picker {
             .map(|(index, _)| index)
             .collect();
         let has_selection = self.style == PickerStyle::Choose && !self.shown.is_empty();
-        self.state.select(has_selection.then_some(0));
+        self.selected = has_selection.then_some(0);
     }
 }
 

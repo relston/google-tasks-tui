@@ -1,8 +1,6 @@
 //! Refreshing from Google: generations, per-list load state, read-only
 //! recovery, and saving the startup cache.
 
-use ratatui::widgets::ListState;
-
 use crate::cache;
 use crate::google::Error;
 use crate::model::{Task, TaskList};
@@ -135,13 +133,7 @@ impl App {
                 let rows = visible_rows(&self.board, &list.id, self.show_completed);
                 let mut column = match old.iter().position(|column| column.list.id == list.id) {
                     Some(index) => old.swap_remove(index),
-                    None => Column {
-                        list: list.clone(),
-                        rows: Vec::new(),
-                        load: LoadState::Loading,
-                        selected_id: None,
-                        state: ListState::default(),
-                    },
+                    None => Column::new(list.clone(), Vec::new(), LoadState::Loading),
                 };
                 let selected = column.selected_id.clone();
                 column.list = list;
@@ -168,25 +160,19 @@ impl App {
         if generation != self.refresh_generation {
             return;
         }
-        let Some(col) = self.columns.iter_mut().find(|c| c.list.id == id) else {
+        let Some(index) = self.columns.iter().position(|c| c.list.id == id) else {
             return;
         };
         match res {
             Ok(tasks) => {
                 self.board.replace_tasks(&id, tasks);
-                col.load = LoadState::Loaded;
-                let keep = col.selected_id.clone();
-                let prev = col.state.selected();
-                col.rows = visible_rows(&self.board, &id, self.show_completed);
-                let last = col.rows.len().checked_sub(1);
-                let sel = keep
-                    .and_then(|id| col.rows.iter().position(|r| r.task.id == id))
-                    .or_else(|| last.map(|l| prev.unwrap_or(0).min(l)));
-                col.select(sel);
+                self.columns[index].load = LoadState::Loaded;
+                self.rebuild_column(&id);
             }
             Err(e) => {
-                col.load = LoadState::Failed;
-                self.error = Some(format!("{}: {e}", col.list.title));
+                let column = &mut self.columns[index];
+                column.load = LoadState::Failed;
+                self.error = Some(format!("{}: {e}", column.list.title));
             }
         }
         self.check_synced();

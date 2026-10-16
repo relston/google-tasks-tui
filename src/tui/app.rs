@@ -3,7 +3,7 @@
 
 use std::sync::mpsc::Sender;
 
-use ratatui::widgets::ListState;
+use ratatui::layout::Rect;
 
 use crate::board::Board;
 use crate::cache;
@@ -98,10 +98,10 @@ pub(super) struct App {
     pub(super) cache_meta: cache::Meta,
     pub(super) columns: Vec<Column>,
     pub(super) focus: usize,
-    /// Index of the leftmost visible column.
-    pub(super) scroll: usize,
+    /// The terminal area, recorded by the event loop so input can use the
+    /// same layout drawing does.
+    pub(super) viewport: Rect,
     pub(super) shelf: Shelf,
-    pub(super) edit_width: usize,
     pub(super) interaction: Interaction,
     /// Identifies the only refresh whose responses may update the board.
     pub(super) refresh_generation: u64,
@@ -162,14 +162,7 @@ impl App {
             .lists()
             .map(|list| {
                 let rows = visible_rows(&board, &list.id, true);
-                let selected_id = rows.first().map(|row| row.task.id.clone());
-                Column {
-                    list: list.clone(),
-                    state: ListState::default().with_selected((!rows.is_empty()).then_some(0)),
-                    rows,
-                    load: LoadState::Cached,
-                    selected_id,
-                }
+                Column::new(list.clone(), rows, LoadState::Cached)
             })
             .collect();
         let theme = theme::load(&config.theme);
@@ -185,9 +178,8 @@ impl App {
             cache_meta,
             columns,
             focus: 0,
-            scroll: 0,
+            viewport: Rect::default(),
             shelf: Shelf::Closed,
-            edit_width: 0,
             interaction: Interaction::Idle,
             refresh_generation: 0,
             sync: SyncState::Cached,
@@ -251,6 +243,7 @@ impl App {
             Msg::Tasks(generation, list_id, tasks) => self.tasks_loaded(generation, list_id, tasks),
             Msg::Finished { id, result } => self.finish(id, result),
         }
+        self.settle();
     }
 }
 

@@ -37,7 +37,12 @@ disk, desktop), and the two front ends. Each file name says what it does.
   rollback, [`sync.rs`](src/tui/sync.rs) owns refresh and recovery, and
   [`columns.rs`](src/tui/columns.rs) owns visible rows and selection.
   [`worker.rs`](src/tui/worker.rs) owns blocking API execution.
-  [`view/`](src/tui/view/mod.rs) only lays out and draws.
+  [`view/`](src/tui/view/mod.rs) only lays out and draws: `draw` takes
+  `&App` plus a `ViewState` holding the list scroll offsets ratatui moves.
+  State fix-ups (focus, the shelf, an edit whose task vanished) belong in
+  `App::settle`, which runs after every key and worker message. Layout that
+  input needs, such as the editor width, comes from the same view functions
+  drawing uses, applied to the terminal size the event loop records.
 - `Picker` backs every modal list (Browse, Move, Select Parent, Keyboard). Rows carry display
   text plus an opaque `value`, so one `draw_picker` and one `picker_key` serve
   all three. `/` filters by case-insensitive substring over title and subtitle;

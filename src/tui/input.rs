@@ -19,6 +19,11 @@ pub(super) fn typed(modifiers: KeyModifiers) -> bool {
 
 impl App {
     pub(super) fn on_key(&mut self, k: KeyEvent) {
+        self.handle_key(k);
+        self.settle();
+    }
+
+    fn handle_key(&mut self, k: KeyEvent) {
         // A notice is for the keypress that earned it, and no longer.
         self.notice = None;
         if self.quit != QuitState::Running {
@@ -120,7 +125,8 @@ impl App {
     /// starts a new line.
     pub(super) fn edit_key(&mut self, k: KeyEvent) {
         let action = self.keymap.resolve(BindingContext::Editor, &k);
-        if self.edit_width == 0 && action != Some(Action::CancelEdit) {
+        let width = self.editor_width();
+        if width.is_none() && action != Some(Action::CancelEdit) {
             let cancel = self.keymap.labels_for(Action::CancelEdit).join("/");
             self.error = Some(format!(
                 "terminal too small to show the editor; {cancel} cancels"
@@ -139,7 +145,7 @@ impl App {
             }
             _ => {}
         }
-        let width = self.edit_width.max(1);
+        let width = width.unwrap_or(1).max(1);
         let Some(e) = self.edit_mut() else { return };
         match action {
             Some(Action::InsertNewline) if notes => e.insert('\n'),
@@ -297,7 +303,8 @@ mod tests {
         assert!(matches!(app.interaction, Interaction::Idle));
 
         app.sync = SyncState::Ready;
-        app.edit_width = 20;
+        app.viewport = ratatui::layout::Rect::new(0, 0, 80, 24);
+        app.shelf = Shelf::Open(FieldId::Title);
         app.interaction = Interaction::Editing(new_edit("a", None, "draft"));
         app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(matches!(app.interaction, Interaction::Editing(_)));
