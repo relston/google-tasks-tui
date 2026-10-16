@@ -63,9 +63,10 @@ Work directly on `main`; do not create feature branches.
   not jump to the top of the list.
 - One-step reorders move a task among its open siblings under the same parent
   with `tasks.move` (`previous` = the sibling to land after, none for first).
-  Optimistically the task and its neighbor swap positions; Google repositions
-  only the moved task, so the neighbor gets its original position back on
-  success, and both are restored on failure.
+  Google stores positions as dense counters and renumbers siblings on every
+  move, so the worker reloads the list after the move and that reload replaces
+  the optimistic position swap. Never patch sibling positions by guessing.
+  Both tasks are restored on failure.
 - Bound all network operations. Retry only safe reads for 429/5xx, honor
   `Retry-After`, and retry at most once after an unexpected 401 refresh.
 - Keep terminal text grapheme-aware and terminal-cell-aware. Sanitize controls

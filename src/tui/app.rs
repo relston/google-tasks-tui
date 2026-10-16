@@ -458,9 +458,9 @@ enum MutationContext {
         task_id: String,
         before: Box<Task>,
     },
-    /// A one-step reorder. Locally the task and its neighbor swap positions;
-    /// Google moves only the task, so the neighbor keeps `neighbor`'s
-    /// position once the response lands.
+    /// A one-step reorder. Locally the task and its neighbor swap positions
+    /// until Google's reloaded list replaces both; `before` and `neighbor`
+    /// restore them on failure.
     Shift {
         list_id: String,
         task_id: String,
@@ -1398,37 +1398,72 @@ impl App {
                 let Some(context) = self.mutation_finished(operation) else {
                     return;
                 };
-                let verb = match &context {
+                if !matches!(
+                    &context,
                     MutationContext::Reparent {
                         list_id: expected_list,
                         task_id: expected_task,
                         ..
-                    } if expected_list == &list_id && expected_task == &task_id => "reparent",
-                    MutationContext::Shift {
-                        list_id: expected_list,
-                        task_id: expected_task,
-                        ..
-                    } if expected_list == &list_id && expected_task == &task_id => "reorder",
-                    _ => {
-                        self.recover("move response did not match the pending operation".into());
-                        return;
-                    }
-                };
+                    } if expected_list == &list_id && expected_task == &task_id
+                ) {
+                    self.recover("reparent response did not match the pending operation".into());
+                    return;
+                }
                 match result {
                     Ok(task) if task.id == task_id && task.parent == parent => {
                         self.board.upsert_task(&list_id, task);
-                        if let MutationContext::Shift { neighbor, .. } = context {
-                            self.board.upsert_task(&list_id, *neighbor);
-                        }
                         self.rebuild_column(&list_id);
                     }
                     Ok(_) => {
                         self.rollback(context);
-                        self.recover(format!("Google returned a mismatched task after {verb}"));
+                        self.recover("Google returned a mismatched reparented task".into());
                     }
                     Err(error) => {
                         self.rollback(context);
-                        self.recover(format!("{verb} failed: {error}"));
+                        self.recover(format!("reparent failed: {error}"));
+                    }
+                }
+            }
+            Msg::Reordered {
+                operation,
+                list_id,
+                task_id,
+                parent,
+                result,
+                tasks,
+            } => {
+                let Some(context) = self.mutation_finished(operation) else {
+                    return;
+                };
+                if !matches!(
+                    &context,
+                    MutationContext::Shift {
+                        list_id: expected_list,
+                        task_id: expected_task,
+                        ..
+                    } if expected_list == &list_id && expected_task == &task_id
+                ) {
+                    self.recover("reorder response did not match the pending operation".into());
+                    return;
+                }
+                match (result, tasks) {
+                    (Ok(task), Some(Ok(tasks))) if task.id == task_id && task.parent == parent => {
+                        self.board.replace_tasks(&list_id, tasks);
+                        self.rebuild_column(&list_id);
+                    }
+                    (Ok(task), Some(Err(error))) if task.id == task_id && task.parent == parent => {
+                        // Saved, but the siblings' new positions are unknown.
+                        self.board.upsert_task(&list_id, task);
+                        self.rebuild_column(&list_id);
+                        self.recover(format!("reorder saved; reloading the list failed: {error}"));
+                    }
+                    (Ok(_), _) => {
+                        self.rollback(context);
+                        self.recover("Google returned a mismatched reordered task".into());
+                    }
+                    (Err(error), _) => {
+                        self.rollback(context);
+                        self.recover(format!("reorder failed: {error}"));
                     }
                 }
             }
@@ -1721,7 +1756,7 @@ impl App {
                 before: Box::new(before),
                 neighbor: Box::new(neighbor),
             },
-            |operation| Cmd::Reparent {
+            |operation| Cmd::Reorder {
                 operation,
                 list_id,
                 task_id,
@@ -3348,7 +3383,7 @@ mod tests {
 
         assert_eq!(ids(&app, "a"), ["second", "first", "child", "third"]);
         assert_eq!(app.columns[0].selected_id.as_deref(), Some("first"));
-        let Cmd::Reparent {
+        let Cmd::Reorder {
             operation,
             list_id,
             task_id,
@@ -3372,17 +3407,26 @@ mod tests {
         app.on_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::ALT));
         assert!(commands.try_recv().is_err());
 
-        // Google repositions only the moved task; the neighbor keeps its own.
-        app.on_msg(Msg::Reparented {
+        // Google renumbers siblings as dense counters: the moved task takes
+        // the neighbor's old slot and the neighbor is bumped. The reloaded
+        // list replaces the local guess, so the row stays where it moved.
+        app.on_msg(Msg::Reordered {
             operation,
             list_id: "a".into(),
             task_id: "first".into(),
             parent: None,
-            result: Ok(task("first", None, "2.5", false)),
+            result: Ok(task("first", None, "1", false)),
+            tasks: Some(Ok(vec![
+                task("second", None, "0", false),
+                task("first", None, "1", false),
+                task("child", Some("first"), "0", false),
+                task("third", None, "2", false),
+            ])),
         });
-        assert_eq!(app.board.task("a", "second").unwrap().position, "2");
-        assert_eq!(app.board.task("a", "first").unwrap().position, "2.5");
+        assert_eq!(app.board.task("a", "second").unwrap().position, "0");
+        assert_eq!(app.board.task("a", "first").unwrap().position, "1");
         assert_eq!(ids(&app, "a"), ["second", "first", "child", "third"]);
+        assert_eq!(app.columns[0].selected_id.as_deref(), Some("first"));
         assert_eq!(app.sync, SyncState::Ready);
         assert!(app.pending_operation.is_none());
     }
@@ -3408,7 +3452,7 @@ mod tests {
         assert_eq!(ids(&app, "a"), ["parent", "two", "one"]);
         assert!(matches!(
             commands.recv().unwrap(),
-            Cmd::Reparent {
+            Cmd::Reorder {
                 task_id,
                 parent: Some(parent),
                 previous: None,
@@ -3434,15 +3478,16 @@ mod tests {
 
         app.shift_task(false);
         assert_eq!(ids(&app, "a"), ["second", "first"]);
-        let Cmd::Reparent { operation, .. } = commands.recv().unwrap() else {
+        let Cmd::Reorder { operation, .. } = commands.recv().unwrap() else {
             panic!("expected a same-list move");
         };
-        app.on_msg(Msg::Reparented {
+        app.on_msg(Msg::Reordered {
             operation,
             list_id: "a".into(),
             task_id: "second".into(),
             parent: None,
             result: Err("offline".into()),
+            tasks: None,
         });
 
         assert_eq!(ids(&app, "a"), ["first", "second"]);
@@ -3454,6 +3499,42 @@ mod tests {
             .error
             .as_deref()
             .is_some_and(|error| error.contains("reorder failed")));
+    }
+
+    #[test]
+    fn reorder_saved_but_not_reloaded_keeps_the_move_and_recovers() {
+        let (mut app, commands) = app_with_lists(&["a"]);
+        let _ = commands.recv().unwrap(); // startup refresh
+        app.sync = SyncState::Ready;
+        set_tasks(
+            &mut app,
+            "a",
+            vec![
+                task("first", None, "0", false),
+                task("second", None, "1", false),
+            ],
+            "second",
+        );
+
+        app.shift_task(false);
+        let Cmd::Reorder { operation, .. } = commands.recv().unwrap() else {
+            panic!("expected a same-list move");
+        };
+        app.on_msg(Msg::Reordered {
+            operation,
+            list_id: "a".into(),
+            task_id: "second".into(),
+            parent: None,
+            result: Ok(task("second", None, "0", false)),
+            tasks: Some(Err("timeout".into())),
+        });
+
+        assert_eq!(ids(&app, "a"), ["second", "first"]);
+        assert_eq!(app.sync, SyncState::Refreshing);
+        assert!(app
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("reorder saved")));
     }
 
     #[test]

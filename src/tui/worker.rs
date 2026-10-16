@@ -39,6 +39,15 @@ pub(super) enum Cmd {
         parent: Option<String>,
         previous: Option<String>,
     },
+    /// A one-step reorder. Google renumbers siblings when a task moves, so
+    /// the list is fetched again to learn every new position.
+    Reorder {
+        operation: u64,
+        list_id: String,
+        task_id: String,
+        parent: Option<String>,
+        previous: Option<String>,
+    },
 }
 
 pub(super) enum Msg {
@@ -75,6 +84,15 @@ pub(super) enum Msg {
         task_id: String,
         parent: Option<String>,
         result: Result<Task, String>,
+    },
+    Reordered {
+        operation: u64,
+        list_id: String,
+        task_id: String,
+        parent: Option<String>,
+        result: Result<Task, String>,
+        /// The list after the move, fetched only when the move succeeded.
+        tasks: Option<Result<Vec<Task>, String>>,
     },
 }
 
@@ -200,6 +218,36 @@ pub(super) fn worker<A: TasksApi>(mut client: A, commands: Receiver<Cmd>, output
                 task_id,
                 parent,
             }),
+            Cmd::Reorder {
+                operation,
+                list_id,
+                task_id,
+                parent,
+                previous,
+            } => {
+                let result = client
+                    .move_task(
+                        &list_id,
+                        &task_id,
+                        &MoveTask {
+                            destination_list: None,
+                            parent: parent.clone(),
+                            previous,
+                        },
+                    )
+                    .map_err(|error| error.to_string());
+                let tasks = result
+                    .is_ok()
+                    .then(|| client.tasks(&list_id).map_err(|error| error.to_string()));
+                output.send(Msg::Reordered {
+                    operation,
+                    list_id,
+                    task_id,
+                    parent,
+                    result,
+                    tasks,
+                })
+            }
             Cmd::Refresh(generation) => {
                 let lists = client.tasklists().map_err(|error| error.to_string());
                 let ids: Vec<String> = lists.iter().flatten().map(|list| list.id.clone()).collect();
@@ -499,6 +547,63 @@ mod tests {
         assert_eq!(task_id, "child");
         assert_eq!(parent, None);
         assert_eq!(result.unwrap().parent, None);
+    }
+
+    #[test]
+    fn reorder_moves_then_reloads_the_list() {
+        let fake = Fake::default();
+        let message = run_one(
+            fake.clone(),
+            Cmd::Reorder {
+                operation: 8,
+                list_id: "list".into(),
+                task_id: "two".into(),
+                parent: Some("parent".into()),
+                previous: None,
+            },
+        );
+
+        assert_eq!(fake.calls(), ["move:list:two::parent:", "tasks:list"]);
+        let Msg::Reordered {
+            operation,
+            task_id,
+            parent,
+            result,
+            tasks,
+            ..
+        } = message
+        else {
+            panic!("expected reorder result");
+        };
+        assert_eq!((operation, task_id.as_str()), (8, "two"));
+        assert_eq!(parent.as_deref(), Some("parent"));
+        assert!(result.is_ok());
+        assert!(tasks.is_some_and(|tasks| tasks.is_ok()));
+    }
+
+    #[test]
+    fn failed_reorder_skips_the_reload() {
+        let fake = Fake {
+            fail_move: Some("two".into()),
+            ..Fake::default()
+        };
+        let message = run_one(
+            fake.clone(),
+            Cmd::Reorder {
+                operation: 9,
+                list_id: "list".into(),
+                task_id: "two".into(),
+                parent: None,
+                previous: Some("one".into()),
+            },
+        );
+
+        assert_eq!(fake.calls(), ["move:list:two:::one"]);
+        let Msg::Reordered { result, tasks, .. } = message else {
+            panic!("expected reorder result");
+        };
+        assert!(result.is_err());
+        assert!(tasks.is_none());
     }
 
     #[test]
