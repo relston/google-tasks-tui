@@ -2,7 +2,7 @@
 
 use std::{fmt, thread, time::Duration};
 
-use chrono::NaiveDate;
+use chrono::{DateTime, NaiveDate, Utc};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
 
@@ -18,6 +18,24 @@ pub struct TaskList {
     pub etag: String,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Status {
+    #[default]
+    NeedsAction,
+    Completed,
+}
+
+impl Status {
+    /// Google's spelling, shared by the CLI and Markdown output.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NeedsAction => "needsAction",
+            Self::Completed => "completed",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Task {
@@ -25,11 +43,13 @@ pub struct Task {
     pub etag: String,
     pub title: String,
     pub notes: Option<String>,
-    pub status: String,
-    /// RFC 3339, but only the date part is meaningful.
-    pub due: Option<String>,
-    pub completed: Option<String>,
-    pub updated: String,
+    pub status: Status,
+    #[serde(with = "due_date")]
+    pub due: Option<NaiveDate>,
+    #[serde(with = "timestamp")]
+    pub completed: Option<DateTime<Utc>>,
+    #[serde(with = "timestamp")]
+    pub updated: Option<DateTime<Utc>>,
     pub parent: Option<String>,
     pub position: String,
     pub hidden: bool,
@@ -59,8 +79,8 @@ pub struct CreateTask {
     pub title: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub notes: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub due: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", with = "due_date")]
+    pub due: Option<NaiveDate>,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -70,12 +90,83 @@ pub struct TaskPatch {
     pub title: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub notes: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", with = "due_date")]
+    pub due: Option<NaiveDate>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub due: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub status: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub completed: Option<Option<String>>,
+    pub status: Option<Status>,
+    /// Sends `"completed": null`, which Google needs to forget a completion.
+    #[serde(
+        rename = "completed",
+        skip_serializing_if = "std::ops::Not::not",
+        serialize_with = "null"
+    )]
+    pub clear_completed: bool,
+}
+
+impl TaskPatch {
+    /// Tick or untick a task. Unticking also clears the completion time.
+    pub fn status(status: Status) -> Self {
+        Self {
+            status: Some(status),
+            clear_completed: status == Status::NeedsAction,
+            ..Self::default()
+        }
+    }
+}
+
+fn null<S: serde::Serializer>(_: &bool, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+    serializer.serialize_none()
+}
+
+/// Google sends due dates as midnight UTC timestamps; only the date matters.
+mod due_date {
+    use chrono::NaiveDate;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(
+        date: &Option<NaiveDate>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        match date {
+            Some(date) => serializer.serialize_some(&format!("{date}T00:00:00.000Z")),
+            None => serializer.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<NaiveDate>, D::Error> {
+        let raw = Option::<String>::deserialize(deserializer)?;
+        Ok(raw.and_then(|raw| NaiveDate::parse_from_str(raw.get(..10)?, "%Y-%m-%d").ok()))
+    }
+}
+
+/// RFC 3339 timestamps in Google's millisecond form. An unreadable value is
+/// treated as missing rather than failing the whole list.
+mod timestamp {
+    use chrono::{DateTime, SecondsFormat, Utc};
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(
+        time: &Option<DateTime<Utc>>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        match time {
+            Some(time) => {
+                serializer.serialize_some(&time.to_rfc3339_opts(SecondsFormat::Millis, true))
+            }
+            None => serializer.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<DateTime<Utc>>, D::Error> {
+        let raw = Option::<String>::deserialize(deserializer)?;
+        Ok(raw
+            .and_then(|raw| DateTime::parse_from_rfc3339(&raw).ok())
+            .map(|time| time.with_timezone(&Utc)))
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -126,12 +217,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 impl Task {
     pub fn is_done(&self) -> bool {
-        self.status == "completed"
-    }
-
-    pub fn due_date(&self) -> Option<NaiveDate> {
-        let s = self.due.as_deref()?.get(..10)?;
-        NaiveDate::parse_from_str(s, "%Y-%m-%d").ok()
+        self.status == Status::Completed
     }
 }
 
@@ -428,25 +514,17 @@ impl Client {
     }
 
     fn token(&mut self) -> Result<String> {
-        self.auth.token().map_err(|error| {
-            if error.downcast_ref::<crate::auth::SignInExpired>().is_some() {
-                Error::AuthExpired
-            } else {
-                Error::Transport(error.to_string())
-            }
+        self.auth.token().map_err(|error| match error {
+            crate::auth::Error::SignInExpired { .. } => Error::AuthExpired,
+            error => Error::Transport(error.to_string()),
         })
     }
 }
 
+/// Statuses never arrive here: the agent reports them as responses, and
+/// `Client::request` maps them.
 fn map_ureq(error: ureq::Error) -> Error {
     match error {
-        ureq::Error::StatusCode(401) => Error::AuthExpired,
-        ureq::Error::StatusCode(409 | 412) => Error::Conflict,
-        ureq::Error::StatusCode(429) => Error::RateLimited { retry_after: None },
-        ureq::Error::StatusCode(status) => Error::Http {
-            status,
-            message: "request failed".into(),
-        },
         ureq::Error::Timeout(_) => Error::Timeout,
         ureq::Error::Json(error) => Error::Decode(error.to_string()),
         error => Error::Transport(error.to_string()),
@@ -539,6 +617,7 @@ impl TasksApi for Client {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
     use serde_json::json;
     use std::{
         collections::HashMap,
@@ -666,14 +745,13 @@ mod tests {
 
     #[test]
     fn typed_task_requests_serialize_only_requested_fields() {
-        let patch = TaskPatch {
-            status: Some("needsAction".into()),
-            completed: Some(None),
-            ..Default::default()
-        };
         assert_eq!(
-            serde_json::to_value(patch).unwrap(),
+            serde_json::to_value(TaskPatch::status(Status::NeedsAction)).unwrap(),
             json!({ "status": "needsAction", "completed": null })
+        );
+        assert_eq!(
+            serde_json::to_value(TaskPatch::status(Status::Completed)).unwrap(),
+            json!({ "status": "completed" })
         );
 
         let create = CreateTask {
@@ -685,6 +763,48 @@ mod tests {
             serde_json::to_value(create).unwrap(),
             json!({ "title": "New", "notes": "Notes" })
         );
+        let dated = CreateTask {
+            title: "Dated".into(),
+            notes: None,
+            due: NaiveDate::from_ymd_opt(2026, 9, 21),
+        };
+        assert_eq!(
+            serde_json::to_value(dated).unwrap(),
+            json!({ "title": "Dated", "due": "2026-09-21T00:00:00.000Z" })
+        );
+    }
+
+    #[test]
+    fn task_status_and_dates_round_trip_google_formats() {
+        let raw = json!({
+            "id": "t",
+            "status": "completed",
+            "due": "2026-09-25T00:00:00.000Z",
+            "completed": "2026-09-20T15:04:05.000Z",
+            "updated": "2026-09-21T08:00:00.000Z"
+        });
+        let task: Task = serde_json::from_value(raw).unwrap();
+        assert_eq!(task.status, Status::Completed);
+        assert!(task.is_done());
+        assert_eq!(task.due, NaiveDate::from_ymd_opt(2026, 9, 25));
+        assert_eq!(
+            task.completed,
+            Some(Utc.with_ymd_and_hms(2026, 9, 20, 15, 4, 5).unwrap())
+        );
+
+        let written = serde_json::to_value(&task).unwrap();
+        assert_eq!(written["status"], "completed");
+        assert_eq!(written["due"], "2026-09-25T00:00:00.000Z");
+        assert_eq!(written["completed"], "2026-09-20T15:04:05.000Z");
+        assert_eq!(written["updated"], "2026-09-21T08:00:00.000Z");
+
+        let open: Task =
+            serde_json::from_value(json!({ "id": "o", "status": "needsAction", "due": "soon" }))
+                .unwrap();
+        assert_eq!(open.status, Status::NeedsAction);
+        assert!(!open.is_done());
+        assert_eq!(open.due, None);
+        assert_eq!(Status::default(), Status::NeedsAction);
     }
 
     #[test]
@@ -796,7 +916,7 @@ mod tests {
                 "task /é",
                 &TaskPatch {
                     title: Some("Changed".into()),
-                    completed: Some(None),
+                    clear_completed: true,
                     ..Default::default()
                 },
                 Some("\"etag value\""),

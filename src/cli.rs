@@ -2,10 +2,14 @@
 
 use std::io::{self, Write};
 
-use clap::{Parser, Subcommand, ValueEnum};
+use chrono::NaiveDate;
+use clap::{builder::PossibleValue, Parser, Subcommand, ValueEnum};
 
-use crate::api::{CreateTask, Error as ApiError, ListPatch, Task, TaskList, TaskPatch, TasksApi};
-use crate::board::Board;
+use crate::api::{
+    Client, CreateTask, Error as ApiError, ListPatch, Status, Task, TaskList, TaskPatch, TasksApi,
+};
+use crate::auth::Auth;
+use crate::board::{ordered, Board};
 use crate::cache;
 use crate::paths::Paths;
 use crate::presentation::{md_lists, md_task, md_task_section, normalize_title};
@@ -74,8 +78,8 @@ pub enum Command {
         notes: Option<String>,
         #[arg(long)]
         due: Option<String>,
-        #[arg(long, value_parser = ["needsAction", "completed"])]
-        status: Option<String>,
+        #[arg(long, value_enum)]
+        status: Option<Status>,
     },
     /// Mark a task completed.
     Done {
@@ -127,6 +131,16 @@ pub enum ListCmd {
     },
 }
 
+impl ValueEnum for Status {
+    fn value_variants<'a>() -> &'a [Self] {
+        &[Status::NeedsAction, Status::Completed]
+    }
+
+    fn to_possible_value(&self) -> Option<PossibleValue> {
+        Some(PossibleValue::new(self.as_str()))
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum Error {
     Usage(String),
@@ -134,7 +148,7 @@ pub enum Error {
 }
 
 impl Error {
-    pub fn exit_code(&self) -> i32 {
+    pub fn exit_code(&self) -> u8 {
         match self {
             Error::Usage(_) => 2,
             Error::Fail(_) => 1,
@@ -152,16 +166,18 @@ impl std::fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-pub fn execute_to(
-    api: &mut impl TasksApi,
+/// Sign in, then run one command against Google.
+pub fn run(
+    paths: &Paths,
     command: Command,
     format: Format,
     out: &mut impl Write,
 ) -> Result<(), Error> {
-    execute_to_with_paths(api, command, format, out, &Paths::from_env())
+    let auth = Auth::load(paths).map_err(|error| Error::Fail(error.to_string()))?;
+    execute(&mut Client::new(auth), command, format, out, paths)
 }
 
-fn execute_to_with_paths(
+fn execute(
     api: &mut impl TasksApi,
     command: Command,
     format: Format,
@@ -191,10 +207,12 @@ fn execute_to_with_paths(
                     Format::Json => {
                         let lists = board
                             .into_iter()
-                            .map(|(list, tasks)| cache::CachedList { list, tasks })
+                            .map(|(list, tasks)| cache::CachedList {
+                                list,
+                                tasks: ordered(tasks).into_iter().map(|row| row.task).collect(),
+                            })
                             .collect();
-                        let board = Board::from_cache(cache::Cache { lists });
-                        write_json(out, &board.snapshot())?;
+                        write_json(out, &cache::Cache { lists })?;
                     }
                     Format::Md => {
                         let md = board
@@ -233,7 +251,7 @@ fn execute_to_with_paths(
             let task = CreateTask {
                 title,
                 notes,
-                due: due.map(|due| due_rfc3339(&due)).transpose()?,
+                due: due.as_deref().map(parse_due).transpose()?,
             };
             let task = api
                 .create(&list.id, &task, parent.as_deref())
@@ -267,9 +285,9 @@ fn execute_to_with_paths(
             let patch = TaskPatch {
                 title,
                 notes,
-                due: due.map(|due| due_rfc3339(&due)).transpose()?,
+                due: due.as_deref().map(parse_due).transpose()?,
                 status,
-                completed: None,
+                clear_completed: false,
             };
             let task = api
                 .patch(&list_id, &task.id, &patch, Some(&task.etag))
@@ -285,7 +303,7 @@ fn execute_to_with_paths(
                 paths,
                 &task_id,
                 list.as_deref(),
-                "completed",
+                Status::Completed,
             )?;
         }
         Command::Undone { task_id, list } => {
@@ -296,7 +314,7 @@ fn execute_to_with_paths(
                 paths,
                 &task_id,
                 list.as_deref(),
-                "needsAction",
+                Status::NeedsAction,
             )?;
         }
         Command::Delete { task_id, list, yes } => {
@@ -354,16 +372,16 @@ fn patch_status(
     paths: &Paths,
     task_id: &str,
     list: Option<&str>,
-    status: &str,
+    status: Status,
 ) -> Result<(), Error> {
     let (list_id, task) = find_task(api, task_id, list)?;
-    let patch = TaskPatch {
-        status: Some(status.into()),
-        completed: (status == "needsAction").then_some(None),
-        ..Default::default()
-    };
     let task = api
-        .patch(&list_id, &task.id, &patch, Some(&task.etag))
+        .patch(
+            &list_id,
+            &task.id,
+            &TaskPatch::status(status),
+            Some(&task.etag),
+        )
         .map_err(api_fail)?;
     refresh_cache(api, paths, &list_id)?;
     write_task(out, format, &task)
@@ -429,9 +447,8 @@ pub fn resolve_list<'a>(lists: &'a [TaskList], spec: &str) -> Result<&'a TaskLis
     }
 }
 
-fn due_rfc3339(d: &str) -> Result<String, Error> {
-    chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d")
-        .map(|d| format!("{d}T00:00:00.000Z"))
+fn parse_due(d: &str) -> Result<NaiveDate, Error> {
+    NaiveDate::parse_from_str(d, "%Y-%m-%d")
         .map_err(|_| Error::Usage(format!("due date must be YYYY-MM-DD, not {d:?}")))
 }
 
@@ -554,16 +571,16 @@ mod tests {
                 title: "Work".into(),
                 ..Default::default()
             };
-            let t1 = task("t1", "Buy milk", "needsAction");
+            let t1 = task("t1", "Buy milk", Status::NeedsAction);
             let t2 = Task {
                 notes: Some("Phase 3\nsee PR".into()),
-                ..task("t2", "Ship CLI", "completed")
+                ..task("t2", "Ship CLI", Status::Completed)
             };
             Self {
                 lists: vec![inbox.clone(), other, work],
                 tasks: HashMap::from([
                     ("l1".into(), vec![t1]),
-                    ("l2".into(), vec![task("t1", "dup", "needsAction")]),
+                    ("l2".into(), vec![task("t1", "dup", Status::NeedsAction)]),
                     ("lw".into(), vec![t2]),
                 ]),
                 fail: None,
@@ -619,14 +636,14 @@ mod tests {
             if let Some(notes) = &patch.notes {
                 task.notes = Some(notes.clone());
             }
-            if let Some(due) = &patch.due {
-                task.due = Some(due.clone());
+            if patch.due.is_some() {
+                task.due = patch.due;
             }
-            if let Some(status) = &patch.status {
-                task.status = status.clone();
+            if let Some(status) = patch.status {
+                task.status = status;
             }
-            if let Some(completed) = &patch.completed {
-                task.completed = completed.clone();
+            if patch.clear_completed {
+                task.completed = None;
             }
             Ok(task.clone())
         }
@@ -642,9 +659,8 @@ mod tests {
                 id: format!("n{}", self.next_id),
                 title: create.title.clone(),
                 notes: create.notes.clone(),
-                due: create.due.clone(),
+                due: create.due,
                 parent: parent.map(str::to_string),
-                status: "needsAction".into(),
                 ..Default::default()
             };
             self.next_id += 1;
@@ -728,11 +744,11 @@ mod tests {
         }
     }
 
-    fn task(id: &str, title: &str, status: &str) -> Task {
+    fn task(id: &str, title: &str, status: Status) -> Task {
         Task {
             id: id.into(),
             title: title.into(),
-            status: status.into(),
+            status,
             ..Default::default()
         }
     }
@@ -758,7 +774,7 @@ mod tests {
         };
         let parsed = parse(args);
         let mut out = Vec::new();
-        let res = execute_to_with_paths(
+        let res = execute(
             api,
             parsed.command.expect("subcommand"),
             parsed.format,
@@ -857,6 +873,48 @@ mod tests {
     }
 
     #[test]
+    fn whole_board_json_uses_board_order_and_drops_deleted_tasks() {
+        let mut api = Fake::new();
+        api.tasks.insert(
+            "lw".into(),
+            vec![
+                Task {
+                    position: "0".into(),
+                    ..task("done", "Done", Status::Completed)
+                },
+                Task {
+                    parent: Some("parent".into()),
+                    position: "0".into(),
+                    ..task("child", "Child", Status::NeedsAction)
+                },
+                Task {
+                    position: "1".into(),
+                    ..task("parent", "Parent", Status::NeedsAction)
+                },
+                Task {
+                    deleted: true,
+                    ..task("gone", "Gone", Status::NeedsAction)
+                },
+            ],
+        );
+
+        let (_, json) = run(&mut api, &["-f", "json", "tasks"]);
+        let board: cache::Cache = serde_json::from_str(json.trim()).unwrap();
+        let work = board
+            .lists
+            .iter()
+            .find(|list| list.list.id == "lw")
+            .unwrap();
+        assert_eq!(
+            work.tasks
+                .iter()
+                .map(|task| task.id.as_str())
+                .collect::<Vec<_>>(),
+            ["parent", "child", "done"]
+        );
+    }
+
+    #[test]
     fn get_needs_list_when_id_is_duplicated() {
         let mut api = Fake::new();
         let (res, _) = run(&mut api, &["get", "t1"]);
@@ -894,7 +952,8 @@ mod tests {
         let t: Task = serde_json::from_str(json.trim()).unwrap();
         assert_eq!(t.title, "New");
         assert_eq!(t.notes.as_deref(), Some("hi"));
-        assert_eq!(t.due.as_deref(), Some("2026-09-21T00:00:00.000Z"));
+        assert_eq!(t.due, NaiveDate::from_ymd_opt(2026, 9, 21));
+        assert!(json.contains(r#""due":"2026-09-21T00:00:00.000Z""#));
         assert_eq!(t.parent.as_deref(), Some("t2"));
         assert_eq!(api.creates, 1);
         assert!(api.task_fetches > fetches);
@@ -961,7 +1020,7 @@ mod tests {
         // Nothing but a title, even when Google sends a link to the task.
         let bare = Task {
             web_view_link: Some("https://tasks.google.com/t/9".into()),
-            ..task("t1", "Buy milk", "needsAction")
+            ..task("t1", "Buy milk", Status::NeedsAction)
         };
         assert_eq!(md_yank(&bare), "# Buy milk\n");
         assert_eq!(md_yank(&Task::default()), "# (untitled)\n");
@@ -985,7 +1044,7 @@ mod tests {
             ],
             // A link back to the task itself is not wanted.
             web_view_link: Some("https://tasks.google.com/t/1".into()),
-            ..task("t2", "Linked", "needsAction")
+            ..task("t2", "Linked", Status::NeedsAction)
         };
         assert_eq!(
             md_yank(&t),
@@ -996,9 +1055,9 @@ mod tests {
 
         // Due and notes, in that order, each its own block.
         let t = Task {
-            due: Some("2026-09-25T00:00:00.000Z".into()),
+            due: NaiveDate::from_ymd_opt(2026, 9, 25),
             notes: Some("  line one\nline two  ".into()),
-            ..task("t3", "Both", "needsAction")
+            ..task("t3", "Both", Status::NeedsAction)
         };
         assert_eq!(
             md_yank(&t),
@@ -1008,11 +1067,39 @@ mod tests {
 
     #[test]
     fn due_must_be_a_date() {
-        assert!(due_rfc3339("nope").is_err());
+        assert!(matches!(parse_due("nope"), Err(Error::Usage(_))));
         assert_eq!(
-            due_rfc3339("2026-01-02").unwrap(),
-            "2026-01-02T00:00:00.000Z"
+            parse_due("2026-01-02").unwrap(),
+            NaiveDate::from_ymd_opt(2026, 1, 2).unwrap()
         );
+    }
+
+    #[test]
+    fn status_flag_accepts_google_spellings_only() {
+        let parsed = parse(&["update", "t1", "--status", "needsAction"]);
+        assert!(matches!(
+            parsed.command,
+            Some(Command::Update {
+                status: Some(Status::NeedsAction),
+                ..
+            })
+        ));
+        let parsed = parse(&["update", "t1", "--status", "completed"]);
+        assert!(matches!(
+            parsed.command,
+            Some(Command::Update {
+                status: Some(Status::Completed),
+                ..
+            })
+        ));
+        assert!(Args::try_parse_from([
+            "google-tasks-tui",
+            "update",
+            "t1",
+            "--status",
+            "needs-action"
+        ])
+        .is_err());
     }
 
     #[test]

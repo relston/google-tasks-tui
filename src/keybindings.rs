@@ -1,8 +1,5 @@
-//! Configurable keybinding parsing, validation, and event matching.
-//!
-//! This module deliberately has no knowledge of TUI behavior. The action
-//! catalog and dispatch layer are added separately so this boundary can be
-//! tested without constructing an application.
+//! The action catalog, default bindings, key parsing, and per-context key
+//! resolution. What each action does lives in the TUI's input handling.
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use serde::{Deserialize, Serialize};
@@ -425,10 +422,9 @@ impl<A: Clone + PartialEq> Keymap<A> {
         (Self { entries }, diagnostics)
     }
 
-    pub fn resolve(&self, context: BindingContext, key: &KeyEvent) -> KeyResolution<A> {
+    pub fn resolve(&self, context: BindingContext, key: &KeyEvent) -> Option<A> {
         self.matching(context, key)
-            .map(|entry| KeyResolution::Action(entry.action.clone()))
-            .unwrap_or(KeyResolution::None)
+            .map(|entry| entry.action.clone())
     }
 
     pub fn bindings_for(&self, action: A) -> Vec<&ResolvedBinding> {
@@ -454,12 +450,6 @@ impl<A: Clone + PartialEq> Keymap<A> {
             entry.context == context && key_event_matches_combo(key, entry.binding.combo)
         })
     }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum KeyResolution<A> {
-    None,
-    Action(A),
 }
 
 pub fn default_keymap() -> (Keymap<Action>, Vec<String>) {
@@ -928,11 +918,11 @@ mod tests {
         let c = event(KeyCode::Char('c'), KeyModifiers::NONE);
         assert_eq!(
             keymap.resolve(BindingContext::Board, &c),
-            KeyResolution::Action(TestAction::Help)
+            Some(TestAction::Help)
         );
         assert_eq!(
             keymap.resolve(BindingContext::Picker, &c),
-            KeyResolution::Action(TestAction::Pick)
+            Some(TestAction::Pick)
         );
         assert!(keymap.bindings_for(TestAction::New).is_empty());
     }
@@ -963,7 +953,7 @@ mod tests {
                 BindingContext::Board,
                 &event(KeyCode::Char('c'), KeyModifiers::NONE)
             ),
-            KeyResolution::Action(TestAction::New)
+            Some(TestAction::New)
         );
     }
 
@@ -1026,7 +1016,7 @@ mod tests {
             let combo = parse_key_combo(raw).unwrap();
             assert_eq!(
                 keymap.resolve(context, &event(combo.0, combo.1)),
-                KeyResolution::Action(expected),
+                Some(expected),
                 "{context:?} {raw}"
             );
         }
@@ -1043,7 +1033,7 @@ mod tests {
                 let binding = parse_binding(raw).unwrap();
                 assert_eq!(
                     keymap.resolve(spec.context, &event(binding.combo.0, binding.combo.1)),
-                    KeyResolution::Action(spec.action),
+                    Some(spec.action),
                     "{} = {raw}",
                     spec.name
                 );

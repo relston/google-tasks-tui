@@ -227,11 +227,7 @@ impl Config {
 }
 
 /// The saved settings, writing the default file first when there isn't one.
-pub fn load() -> Config {
-    load_with_paths(&Paths::from_env()).0
-}
-
-pub fn load_with_paths(paths: &Paths) -> (Config, Option<String>) {
+pub fn load(paths: &Paths) -> (Config, Option<String>) {
     let path = paths.config();
     match fs::read_to_string(&path) {
         Ok(raw) => match parse(&raw) {
@@ -420,12 +416,12 @@ create_task = "ctrl+b"
             config_dir: root.join("config"),
         };
 
-        let (_, warning) = load_with_paths(&paths);
+        let (_, warning) = load(&paths);
         assert!(warning.is_none());
         assert!(paths.config().exists());
 
         fs::write(paths.config(), "wrap_titles = \"maybe\"").unwrap();
-        let (_, warning) = load_with_paths(&paths);
+        let (_, warning) = load(&paths);
         assert!(warning.is_some_and(|warning| {
             warning.contains("config.toml") && warning.contains("invalid type")
         }));

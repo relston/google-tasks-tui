@@ -135,21 +135,6 @@ pub fn save_for(paths: &Paths, cache: &Cache, meta: &mut Meta) -> Result<(), Sav
     })
 }
 
-/// Compatibility helper for tests and callers without account context.
-pub fn load() -> Cache {
-    load_for(&Paths::from_env(), "")
-        .map(|(cache, _)| cache)
-        .unwrap_or_default()
-}
-
-pub fn save(cache: &Cache) {
-    let mut meta = Meta {
-        account: String::new(),
-        generation: 0,
-    };
-    let _ = save_for(&Paths::from_env(), cache, &mut meta);
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -20,7 +20,54 @@ use sha2::{Digest, Sha256};
 
 use crate::{paths::Paths, platform, storage};
 
-pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
+pub type Result<T> = std::result::Result<T, Error>;
+
+#[derive(Debug)]
+pub enum Error {
+    /// Google rejected the refresh token, so the user must sign in again.
+    SignInExpired {
+        invalidation_error: Option<String>,
+    },
+    /// The OAuth client file is missing or malformed.
+    Credentials(String),
+    /// The browser sign-in did not produce usable tokens.
+    Authorization(String),
+    /// The token endpoint could not be reached or gave an unusable answer.
+    Http(String),
+    Io(std::io::Error),
+}
+
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SignInExpired { invalidation_error } => {
+                f.write_str("sign-in expired — restart the app to sign in again")?;
+                match invalidation_error {
+                    Some(error) => write!(f, "; {error}"),
+                    None => Ok(()),
+                }
+            }
+            Self::Credentials(message) | Self::Authorization(message) | Self::Http(message) => {
+                f.write_str(message)
+            }
+            Self::Io(error) => write!(f, "{error}"),
+        }
+    }
+}
+
+impl std::error::Error for Error {}
+
+impl From<std::io::Error> for Error {
+    fn from(error: std::io::Error) -> Self {
+        Self::Io(error)
+    }
+}
+
+impl From<ureq::Error> for Error {
+    fn from(error: ureq::Error) -> Self {
+        Self::Http(error.to_string())
+    }
+}
 
 const SCOPE: &str = "https://www.googleapis.com/auth/tasks";
 
@@ -36,24 +83,6 @@ fn http_agent() -> ureq::Agent {
         .build();
     ureq::Agent::new_with_config(config)
 }
-
-#[derive(Debug)]
-pub struct SignInExpired {
-    invalidation_error: Option<String>,
-}
-
-impl std::fmt::Display for SignInExpired {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("sign-in expired — restart the app to sign in again")?;
-        if let Some(error) = &self.invalidation_error {
-            write!(f, "; {error}")
-        } else {
-            Ok(())
-        }
-    }
-}
-
-impl std::error::Error for SignInExpired {}
 
 #[derive(Deserialize)]
 struct ClientFile {
@@ -129,17 +158,24 @@ impl Auth {
         }
     }
 
-    /// Load credentials and make sure we hold a working token. May open a
-    /// browser, so call this before the TUI takes over the terminal.
-    pub fn new() -> Result<Self> {
-        Self::new_with_paths(&Paths::from_env())
+    /// The cached token when there is one, otherwise the browser sign-in.
+    pub fn load(paths: &Paths) -> Result<Self> {
+        match Self::cached(paths) {
+            Some(auth) => Ok(auth),
+            None => Self::sign_in(paths),
+        }
     }
 
-    pub fn new_with_paths(paths: &Paths) -> Result<Self> {
+    /// Load credentials and make sure we hold a working token. May open a
+    /// browser, so call this before the TUI takes over the terminal.
+    pub fn sign_in(paths: &Paths) -> Result<Self> {
         let token_path = paths.token();
+        let credentials = paths.credentials.display();
         let raw = fs::read_to_string(&paths.credentials)
-            .map_err(|e| format!("reading {}: {e}", paths.credentials.display()))?;
-        let client = serde_json::from_str::<ClientFile>(&raw)?.installed;
+            .map_err(|e| Error::Credentials(format!("reading {credentials}: {e}")))?;
+        let client = serde_json::from_str::<ClientFile>(&raw)
+            .map_err(|e| Error::Credentials(format!("{credentials}: {e}")))?
+            .installed;
         let agent = http_agent();
 
         let cached = fs::read_to_string(&token_path)
@@ -178,14 +214,12 @@ impl Auth {
             }
         };
         // A revoked or expired refresh token means signing in again.
-        if let Err(e) = auth.token() {
-            let Some(expired) = e.downcast_ref::<SignInExpired>() else {
-                return Err(e);
-            };
-            if expired.invalidation_error.is_some() {
-                return Err(e);
-            }
-            auth.tok = authorize(&auth.agent, &auth.client)?;
+        match auth.token() {
+            Ok(_) => {}
+            Err(Error::SignInExpired {
+                invalidation_error: None,
+            }) => auth.tok = authorize(&auth.agent, &auth.client)?,
+            Err(error) => return Err(error),
         }
         auth.save()?;
         Ok(auth)
@@ -194,11 +228,7 @@ impl Auth {
     /// Build from the cached refresh token without touching the network, so
     /// startup doesn't wait on Google. `None` when there's nothing to reuse
     /// and the browser flow is needed.
-    pub fn cached() -> Option<Self> {
-        Self::cached_with_paths(&Paths::from_env())
-    }
-
-    pub fn cached_with_paths(paths: &Paths) -> Option<Self> {
+    pub fn cached(paths: &Paths) -> Option<Self> {
         let raw = fs::read_to_string(&paths.credentials).ok()?;
         let client = serde_json::from_str::<ClientFile>(&raw).ok()?.installed;
         let token_path = paths.token();
@@ -253,7 +283,7 @@ impl Auth {
     }
 
     fn save(&self) -> Result<()> {
-        let json = serde_json::to_vec_pretty(&self.tok)?;
+        let json = serde_json::to_vec_pretty(&self.tok).map_err(std::io::Error::other)?;
         storage::atomic_private_write(&self.token_path, &json)?;
         Ok(())
     }
@@ -262,10 +292,12 @@ impl Auth {
 fn validate_token_status(status: u16, token_path: &std::path::Path) -> Result<()> {
     if matches!(status, 400 | 401) {
         let invalidation_error = invalidate_token(token_path);
-        return Err(SignInExpired { invalidation_error }.into());
+        return Err(Error::SignInExpired { invalidation_error });
     }
     if !(200..300).contains(&status) {
-        return Err(format!("token endpoint returned HTTP {status}").into());
+        return Err(Error::Http(format!(
+            "token endpoint returned HTTP {status}"
+        )));
     }
     Ok(())
 }
@@ -325,7 +357,9 @@ fn authorize(agent: &ureq::Agent, c: &ClientSecret) -> Result<Cached> {
             Ok(connection) => connection,
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                 if Instant::now() >= deadline {
-                    return Err("authorization timed out after 5 minutes".into());
+                    return Err(Error::Authorization(
+                        "authorization timed out after 5 minutes".into(),
+                    ));
                 }
                 thread::sleep(Duration::from_millis(50));
                 continue;
@@ -366,12 +400,12 @@ fn authorize(agent: &ureq::Agent, c: &ClientSecret) -> Result<Cached> {
     };
 
     let code = params.get("code").ok_or_else(|| {
-        format!(
+        Error::Authorization(format!(
             "authorization failed: {}",
             params
                 .get("error")
                 .map_or("no code returned", String::as_str)
-        )
+        ))
     })?;
     let r: TokenResponse = agent
         .post(&c.token_uri)
@@ -387,7 +421,9 @@ fn authorize(agent: &ureq::Agent, c: &ClientSecret) -> Result<Cached> {
         .read_json()?;
     Ok(Cached {
         client_id: c.client_id.clone(),
-        refresh_token: r.refresh_token.ok_or("Google returned no refresh token")?,
+        refresh_token: r
+            .refresh_token
+            .ok_or_else(|| Error::Authorization("Google returned no refresh token".into()))?,
         access_token: r.access_token,
         expires_at: now() + r.expires_in,
     })
@@ -395,7 +431,8 @@ fn authorize(agent: &ureq::Agent, c: &ClientSecret) -> Result<Cached> {
 
 fn random_urlsafe(bytes: usize) -> Result<String> {
     let mut data = vec![0; bytes];
-    getrandom::getrandom(&mut data).map_err(|error| format!("OS random source failed: {error}"))?;
+    getrandom::getrandom(&mut data)
+        .map_err(|error| Error::Authorization(format!("OS random source failed: {error}")))?;
     Ok(base64_url(&data))
 }
 
@@ -496,7 +533,13 @@ mod tests {
         let token_path = root.join("token.json");
         fs::write(&token_path, "{}").unwrap();
         let err = validate_token_status(400, &token_path).unwrap_err();
-        assert!(err.downcast_ref::<SignInExpired>().is_some());
+        assert!(matches!(
+            err,
+            Error::SignInExpired {
+                invalidation_error: None
+            }
+        ));
+        assert!(err.to_string().contains("restart the app to sign in again"));
         assert!(!token_path.exists());
 
         fs::remove_dir_all(root).ok();
@@ -509,7 +552,7 @@ mod tests {
         let token_path = root.join("token.json");
         fs::write(&token_path, "{}").unwrap();
         let err = validate_token_status(500, &token_path).unwrap_err();
-        assert!(err.downcast_ref::<SignInExpired>().is_none());
+        assert!(matches!(err, Error::Http(message) if message.contains("HTTP 500")));
         assert!(token_path.exists());
 
         fs::remove_dir_all(root).ok();
@@ -560,7 +603,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(Auth::cached_with_paths(&paths).is_none());
+        assert!(Auth::cached(&paths).is_none());
         fs::remove_dir_all(root).ok();
     }
 
@@ -580,7 +623,7 @@ mod tests {
         fs::create_dir_all(&paths.config_dir).unwrap();
         fs::write(paths.token(), "{not json").unwrap();
 
-        assert!(Auth::cached_with_paths(&paths).is_none());
+        assert!(Auth::cached(&paths).is_none());
         fs::remove_dir_all(root).ok();
     }
 

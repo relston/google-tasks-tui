@@ -13,39 +13,31 @@ pub mod theme;
 pub mod tui;
 
 use std::io;
-use std::process;
+use std::process::ExitCode;
 
 use clap::Parser;
 
-use api::Client;
 use cli::Args;
+use paths::Paths;
 
 /// No subcommand opens the TUI; any subcommand is a one-shot CLI.
-pub fn entry() -> auth::Result<()> {
+pub fn entry() -> ExitCode {
     let args = Args::parse();
     if args.default_config {
         print!("{}", config::default_toml());
-        return Ok(());
+        return ExitCode::SUCCESS;
     }
-    match args.command {
-        None => tui::start(),
-        Some(command) => {
-            let auth = match auth::Auth::cached() {
-                Some(a) => a,
-                None => auth::Auth::new()?,
-            };
-            match cli::execute_to(
-                &mut Client::new(auth),
-                command,
-                args.format,
-                &mut io::stdout(),
-            ) {
-                Ok(()) => Ok(()),
-                Err(e) => {
-                    eprintln!("{e}");
-                    process::exit(e.exit_code());
-                }
-            }
+    let paths = Paths::from_env();
+    let result = match args.command {
+        None => tui::start(&paths).map_err(|error| (error.to_string(), 1)),
+        Some(command) => cli::run(&paths, command, args.format, &mut io::stdout())
+            .map_err(|error| (error.to_string(), error.exit_code())),
+    };
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err((message, code)) => {
+            eprintln!("{message}");
+            ExitCode::from(code)
         }
     }
 }

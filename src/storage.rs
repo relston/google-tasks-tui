@@ -6,8 +6,6 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-use fs2::FileExt;
-
 static TEMP_ID: AtomicU64 = AtomicU64::new(0);
 
 pub fn atomic_private_write(path: &Path, contents: &[u8]) -> io::Result<()> {
@@ -55,7 +53,7 @@ pub fn with_exclusive_lock<T>(
         .truncate(false)
         .mode(0o600)
         .open(lock_path)?;
-    lock.lock_exclusive()?;
+    lock.lock()?;
     let result = operation();
     let unlock = lock.unlock();
     match result {

@@ -8,13 +8,13 @@ use ratatui::{
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-use crate::api::{CreateTask, Task, TaskList, TaskPatch};
+use crate::api::{CreateTask, Status, Task, TaskList, TaskPatch};
 #[cfg(test)]
 use crate::board::ordered as order;
 use crate::board::{Board, Row};
 use crate::cache;
 use crate::config::Config;
-use crate::keybindings::{Action, BindingContext, KeyResolution, Keymap};
+use crate::keybindings::{Action, BindingContext, Keymap};
 use crate::paths::Paths;
 use crate::platform::{self, Clipboard};
 use crate::presentation::{md_yank, normalize_title, urls_in};
@@ -73,6 +73,15 @@ impl PickerRow {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum PickerStyle {
+    /// Rows to choose from, each a title above its subtitle.
+    Choose,
+    /// A read-only card: `title` is a key column beside `subtitle`, and
+    /// nothing is selectable.
+    Reference,
+}
+
 /// A modal list with a `/` filter. One of these backs Browse, Move and the
 /// Keyboard overlay, so all three share layout, filtering and empty state.
 pub(super) struct Picker {
@@ -82,10 +91,7 @@ pub(super) struct Picker {
     query: String,
     /// `/` was pressed: keys go to the query instead of the list.
     typing: bool,
-    /// The Keyboard table is a reference card, so it has nothing to select.
-    selectable: bool,
-    /// Render `title` as a key column beside `subtitle` rather than above it.
-    columns: bool,
+    style: PickerStyle,
     pub(super) state: ListState,
 }
 
@@ -96,21 +102,17 @@ impl Picker {
             rows,
             query: String::new(),
             typing: false,
-            selectable: true,
-            columns: false,
+            style: PickerStyle::Choose,
             state: ListState::default().with_selected(Some(0)),
         }
     }
 
-    pub(super) fn columns(mut self) -> Self {
-        self.columns = true;
-        self
-    }
-
-    pub(super) fn read_only(mut self) -> Self {
-        self.selectable = false;
-        self.state.select(None);
-        self
+    pub(super) fn reference(rows: Vec<PickerRow>) -> Self {
+        Self {
+            style: PickerStyle::Reference,
+            state: ListState::default(),
+            ..Self::new(rows)
+        }
     }
 
     pub(super) fn rows(&self) -> impl Iterator<Item = &PickerRow> {
@@ -129,8 +131,8 @@ impl Picker {
         self.typing
     }
 
-    pub(super) fn is_columns(&self) -> bool {
-        self.columns
+    pub(super) fn style(&self) -> PickerStyle {
+        self.style
     }
 
     pub(super) fn selected(&self) -> Option<&PickerRow> {
@@ -166,7 +168,7 @@ impl Picker {
             .filter(|(_, row)| needle.is_empty() || row.filter.contains(&needle))
             .map(|(index, _)| index)
             .collect();
-        let has_selection = self.selectable && !self.shown.is_empty();
+        let has_selection = self.style == PickerStyle::Choose && !self.shown.is_empty();
         self.state.select(has_selection.then_some(0));
     }
 }
@@ -244,10 +246,46 @@ pub(super) struct ParentPick {
 }
 
 /// The editable fields of the shelf.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum FieldId {
     Title,
     Notes,
+}
+
+impl FieldId {
+    fn other(self) -> Self {
+        match self {
+            Self::Title => Self::Notes,
+            Self::Notes => Self::Title,
+        }
+    }
+}
+
+/// The details shelf beside the focused column, and the field the keyboard
+/// is on while it is open.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Shelf {
+    Closed,
+    Open(FieldId),
+}
+
+impl Shelf {
+    pub(super) fn is_open(self) -> bool {
+        matches!(self, Self::Open(_))
+    }
+}
+
+/// Shutdown progress. Only a quit that waited for a save joins the worker
+/// afterwards, so that save is never cut off.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum QuitState {
+    Running,
+    /// Quit was requested while a save was in flight.
+    Waiting,
+    /// The awaited save landed.
+    Drained,
+    /// Nothing was pending, or the user forced it.
+    Now,
 }
 
 pub(super) enum EditTarget {
@@ -557,9 +595,7 @@ pub(super) struct App {
     pub(super) focus: usize,
     /// Index of the leftmost visible column.
     pub(super) scroll: usize,
-    pub(super) shelf: bool,
-    /// Which shelf field the keyboard is on.
-    pub(super) field: FieldId,
+    pub(super) shelf: Shelf,
     pub(super) edit_width: usize,
     pub(super) interaction: Interaction,
     /// Identifies the only refresh whose responses may update the board.
@@ -571,20 +607,28 @@ pub(super) struct App {
     /// A one-off confirmation, cleared by the next keypress.
     pub(super) notice: Option<String>,
     pub(super) cmds: Sender<Cmd>,
-    /// The user asked to quit and writes are still outstanding.
-    pub(super) quitting: bool,
-    pub(super) force_quit: bool,
-    pub(super) quit: bool,
+    pub(super) quit: QuitState,
 }
 
 impl App {
+    /// A test app whose files live in a fresh temporary directory.
     #[cfg(test)]
     pub(super) fn new(cmds: Sender<Cmd>, cached: cache::Cache, config: Config) -> Self {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "gtt-app-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
         Self::new_with_storage(
             cmds,
             cached,
             config,
-            Paths::from_env(),
+            Paths {
+                credentials: root.join("credentials.json"),
+                config_dir: root,
+            },
             cache::Meta {
                 account: String::new(),
                 generation: 0,
@@ -637,8 +681,7 @@ impl App {
             columns,
             focus: 0,
             scroll: 0,
-            shelf: false,
-            field: FieldId::Title,
+            shelf: Shelf::Closed,
             edit_width: 0,
             interaction: Interaction::Idle,
             refresh_generation: 0,
@@ -648,9 +691,7 @@ impl App {
             error: None,
             notice: None,
             cmds,
-            quitting: false,
-            force_quit: false,
-            quit: false,
+            quit: QuitState::Running,
         };
         app.begin_refresh(warning);
         app
@@ -704,24 +745,28 @@ impl App {
     }
 
     fn recover(&mut self, error: String) {
-        if self.quitting {
+        if self.quit == QuitState::Running {
+            self.begin_refresh(Some(error));
+        } else {
             self.error = Some(error);
             self.sync = SyncState::Failed;
-        } else {
-            self.begin_refresh(Some(error));
         }
     }
 
+    pub(super) fn should_exit(&self) -> bool {
+        matches!(self.quit, QuitState::Drained | QuitState::Now)
+    }
+
     fn request_quit(&mut self) {
-        if self.quitting {
-            self.force_quit = true;
-            self.quit = true;
-        } else if self.pending_operation.is_some() {
-            self.quitting = true;
-            self.notice = Some("waiting for pending save · q again to force quit".into());
+        self.quit = if self.quit == QuitState::Running && self.pending_operation.is_some() {
+            let quit = self.keymap.labels_for(Action::Quit).join("/");
+            self.notice = Some(format!(
+                "waiting for pending save · {quit} again to force quit"
+            ));
+            QuitState::Waiting
         } else {
-            self.quit = true;
-        }
+            QuitState::Now
+        };
     }
 
     fn mutation_finished(&mut self, operation: u64) -> Option<MutationContext> {
@@ -729,8 +774,8 @@ impl App {
             return None;
         }
         let context = self.pending_operation.take().map(|pending| pending.context);
-        if self.quitting {
-            self.quit = true;
+        if self.quit == QuitState::Waiting {
+            self.quit = QuitState::Drained;
         }
         context
     }
@@ -805,8 +850,8 @@ impl App {
         self.sync = SyncState::Failed;
         self.pending_operation = None;
         self.error = Some("network worker stopped".into());
-        if self.quitting {
-            self.quit = true;
+        if self.quit == QuitState::Waiting {
+            self.quit = QuitState::Drained;
         }
     }
 
@@ -891,8 +936,7 @@ impl App {
             buf: String::new(),
             cursor: 0,
         });
-        self.shelf = true;
-        self.field = FieldId::Title;
+        self.shelf = Shelf::Open(FieldId::Title);
     }
 
     /// Edit the focused shelf field, opening the shelf on the title if it's shut.
@@ -904,28 +948,25 @@ impl App {
             return;
         };
         let Some(row) = col.selected() else { return };
-        if self.field == FieldId::Notes && row.task.assignment_info.is_some() {
+        let field = match self.shelf {
+            Shelf::Open(field) => field,
+            Shelf::Closed => FieldId::Title,
+        };
+        if field == FieldId::Notes && row.task.assignment_info.is_some() {
             self.error = Some("tasks assigned from Docs or Chat cannot have notes".into());
             return;
         }
         let (list_id, task_id) = (col.list.id.clone(), row.task.id.clone());
-        let (title, notes) = (
-            row.task.title.clone(),
-            row.task.notes.clone().unwrap_or_default(),
-        );
-        if !self.shelf {
-            self.shelf = true;
-            self.field = FieldId::Title;
-        }
-        let buf = match self.field {
-            FieldId::Title => title,
-            FieldId::Notes => notes,
+        let buf = match field {
+            FieldId::Title => row.task.title.clone(),
+            FieldId::Notes => row.task.notes.clone().unwrap_or_default(),
         };
+        self.shelf = Shelf::Open(field);
         self.interaction = Interaction::Editing(Edit {
             target: EditTarget::Existing {
                 list_id,
                 task_id,
-                field: self.field,
+                field,
             },
             cursor: buf.len(),
             buf,
@@ -947,7 +988,7 @@ impl App {
             .selected_task()
             .is_some_and(|row| Some(row.task.id.as_str()) == selected.as_deref());
         if !still_selected {
-            self.shelf = false;
+            self.shelf = Shelf::Closed;
         }
     }
 
@@ -1072,21 +1113,13 @@ impl App {
         };
         let before = task.clone();
         // Show the new state now; Google's copy replaces it when it answers.
-        let fields = if task.is_done() {
-            task.status = "needsAction".into();
+        task.status = if task.is_done() {
             task.completed = None;
-            TaskPatch {
-                status: Some("needsAction".into()),
-                completed: Some(None),
-                ..Default::default()
-            }
+            Status::NeedsAction
         } else {
-            task.status = "completed".into();
-            TaskPatch {
-                status: Some("completed".into()),
-                ..Default::default()
-            }
+            Status::Completed
         };
+        let fields = TaskPatch::status(task.status);
         self.rebuild_column(&list_id);
         self.send_patch(list_id, task_id, fields, before);
     }
@@ -1312,8 +1345,7 @@ impl App {
                         {
                             self.focus = index;
                         }
-                        self.shelf = true;
-                        self.field = FieldId::Title;
+                        self.shelf = Shelf::Open(FieldId::Title);
                         self.interaction = Interaction::Editing(draft);
                         self.recover(format!("create failed: {e}"));
                     }
@@ -1783,16 +1815,16 @@ impl App {
     /// Send the presses made while a reorder was saving as one move to where
     /// the board showed the task.
     fn send_queued_reorder(&mut self, list_id: String, task_id: String, previous: Option<String>) {
-        if self.sync != SyncState::Ready || self.force_quit {
+        if self.sync != SyncState::Ready || self.quit == QuitState::Now {
             return;
         }
         let rows = self.board.rows(&list_id);
         match reorder_after(&rows, &task_id, previous.as_deref()) {
             Ok(plan) if plan.positions.is_empty() => {}
             Ok(plan) => {
-                if self.send_reorder(list_id, task_id, plan) {
+                if self.send_reorder(list_id, task_id, plan) && self.quit == QuitState::Drained {
                     // The queued move is a pending write, so a waiting quit keeps waiting.
-                    self.quit = false;
+                    self.quit = QuitState::Waiting;
                 }
             }
             Err(error) => self.error = Some(format!("queued reorder dropped: {error}")),
@@ -1921,17 +1953,14 @@ impl App {
                 })
             })
             .collect();
-        self.interaction = Interaction::Help(Picker::new(rows).columns().read_only());
+        self.interaction = Interaction::Help(Picker::reference(rows));
     }
 
     pub(super) fn on_key(&mut self, k: KeyEvent) {
         // A notice is for the keypress that earned it, and no longer.
         self.notice = None;
-        if self.quitting {
-            if matches!(
-                self.keymap.resolve(BindingContext::Board, &k),
-                KeyResolution::Action(Action::Quit)
-            ) {
+        if self.quit != QuitState::Running {
+            if self.keymap.resolve(BindingContext::Board, &k) == Some(Action::Quit) {
                 self.request_quit();
             }
             return;
@@ -1943,7 +1972,7 @@ impl App {
         if matches!(self.interaction, Interaction::ConfirmDelete(_)) {
             // Only "y" deletes; every other key cancels.
             match self.keymap.resolve(BindingContext::Confirm, &k) {
-                KeyResolution::Action(Action::ConfirmDelete) => self.confirm_delete(),
+                Some(Action::ConfirmDelete) => self.confirm_delete(),
                 _ => self.interaction = Interaction::Idle,
             }
             return;
@@ -1954,10 +1983,7 @@ impl App {
             } else {
                 BindingContext::Picker
             };
-            let action = match self.keymap.resolve(context, &k) {
-                KeyResolution::Action(action) => Some(action),
-                KeyResolution::None => None,
-            };
+            let action = self.keymap.resolve(context, &k);
             let close_on_help =
                 matches!(self.interaction, Interaction::Help(_)) && action == Some(Action::Help);
             let outcome = match self.interaction.picker_mut() {
@@ -1981,12 +2007,12 @@ impl App {
             }
             return;
         }
-        let KeyResolution::Action(action) = self.keymap.resolve(BindingContext::Board, &k) else {
+        let Some(action) = self.keymap.resolve(BindingContext::Board, &k) else {
             return;
         };
         match action {
             Action::Quit => self.request_quit(),
-            Action::CloseShelf if self.shelf => self.shelf = false,
+            Action::CloseShelf => self.shelf = Shelf::Closed,
             Action::PreviousList => self.focus = self.focus.saturating_sub(1),
             Action::NextList => {
                 self.focus = (self.focus + 1).min(self.columns.len().saturating_sub(1))
@@ -1996,13 +2022,15 @@ impl App {
             Action::FirstTask => self.move_task(isize::MIN / 2),
             Action::LastTask => self.move_task(isize::MAX / 2),
             Action::ToggleDetails => {
-                self.shelf = !self.shelf && self.selected_task().is_some();
-                self.field = FieldId::Title;
+                self.shelf = if !self.shelf.is_open() && self.selected_task().is_some() {
+                    Shelf::Open(FieldId::Title)
+                } else {
+                    Shelf::Closed
+                };
             }
-            Action::NextField | Action::PreviousField if self.shelf => {
-                self.field = match self.field {
-                    FieldId::Title => FieldId::Notes,
-                    FieldId::Notes => FieldId::Title,
+            Action::NextField | Action::PreviousField => {
+                if let Shelf::Open(field) = self.shelf {
+                    self.shelf = Shelf::Open(field.other());
                 }
             }
             Action::Edit => self.start_edit(),
@@ -2029,10 +2057,7 @@ impl App {
     /// Shift+Enter (or Alt+Enter / Ctrl+J where the terminal can't report it)
     /// starts a new line.
     fn edit_key(&mut self, k: KeyEvent) {
-        let action = match self.keymap.resolve(BindingContext::Editor, &k) {
-            KeyResolution::Action(action) => Some(action),
-            KeyResolution::None => None,
-        };
+        let action = self.keymap.resolve(BindingContext::Editor, &k);
         if self.edit_width == 0 && action != Some(Action::CancelEdit) {
             let cancel = self.keymap.labels_for(Action::CancelEdit).join("/");
             self.error = Some(format!(
@@ -2161,7 +2186,11 @@ mod tests {
             id: id.into(),
             parent: parent.map(Into::into),
             position: pos.into(),
-            status: if done { "completed" } else { "needsAction" }.into(),
+            status: if done {
+                Status::Completed
+            } else {
+                Status::NeedsAction
+            },
             ..Default::default()
         }
     }
@@ -2193,6 +2222,15 @@ mod tests {
     fn pending(app: &mut App, context: MutationContext) -> u64 {
         app.pending_operation = Some(PendingOperation { id: 1, context });
         1
+    }
+
+    #[test]
+    fn test_apps_never_touch_the_real_config_directory() {
+        let (first, _) = app_with_lists(&["a"]);
+        let (second, _) = app_with_lists(&["a"]);
+        assert!(first.paths.config_dir.starts_with(std::env::temp_dir()));
+        assert_ne!(first.paths.config_dir, Paths::from_env().config_dir);
+        assert_ne!(first.paths.config_dir, second.paths.config_dir);
     }
 
     #[test]
@@ -2455,7 +2493,7 @@ mod tests {
             ],
             "open-b",
         );
-        app.shelf = true;
+        app.shelf = Shelf::Open(FieldId::Title);
 
         app.on_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE));
 
@@ -2469,7 +2507,7 @@ mod tests {
         );
         assert_eq!(shown(&app, "b"), [("open-b".into(), 0)]);
         assert_eq!(app.columns[0].selected_id.as_deref(), Some("done-parent"));
-        assert!(!app.shelf);
+        assert_eq!(app.shelf, Shelf::Closed);
         assert!(app.board.task("a", "done-parent").unwrap().is_done());
         assert!(app.board.task("a", "done-child").unwrap().is_done());
 
@@ -2971,7 +3009,7 @@ mod tests {
             result: Ok(Task {
                 id: "new".into(),
                 title: "new task".into(),
-                status: "needsAction".into(),
+                status: Status::NeedsAction,
                 position: "0".into(),
                 ..Default::default()
             }),
@@ -3002,10 +3040,39 @@ mod tests {
         );
 
         app.on_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
-        assert!(!app.quit, "the first quit must wait for the pending write");
+        assert!(
+            !app.should_exit(),
+            "the first quit must wait for the pending write"
+        );
 
         app.on_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
-        assert!(app.quit, "the second quit is the explicit force-quit path");
+        assert!(
+            app.should_exit(),
+            "the second quit is the explicit force-quit path"
+        );
+    }
+
+    #[test]
+    fn the_waiting_quit_notice_names_the_configured_quit_key() {
+        let mut config = Config::default();
+        config.keys.quit = Some(BindingConfig::one("ctrl+x"));
+        let (mut app, _cmds) = app_with_lists_and_config(&["a"], config);
+        pending(
+            &mut app,
+            MutationContext::Patch {
+                list_id: "a".into(),
+                task_id: "a-cached".into(),
+                before: Box::new(task("a-cached", None, "1", false)),
+            },
+        );
+
+        app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
+
+        assert!(!app.should_exit());
+        assert!(app
+            .notice
+            .as_deref()
+            .is_some_and(|notice| notice.contains("ctrl+x again to force quit")));
     }
 
     #[test]
@@ -3017,7 +3084,7 @@ mod tests {
         );
 
         app.on_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
-        assert!(!app.quit);
+        assert!(!app.should_exit());
         app.on_msg(Msg::Created {
             operation,
             list_id: "a".into(),
@@ -3026,7 +3093,7 @@ mod tests {
         });
 
         assert!(app.pending_operation.is_none());
-        assert!(app.quit);
+        assert!(app.should_exit());
     }
 
     #[test]
@@ -3040,12 +3107,12 @@ mod tests {
                 before: Box::new(task("a-cached", None, "1", false)),
             },
         );
-        app.quitting = true;
+        app.quit = QuitState::Waiting;
 
         app.worker_disconnected();
 
         assert!(app.pending_operation.is_none());
-        assert!(app.quit);
+        assert!(app.should_exit());
         assert_eq!(app.sync, SyncState::Failed);
         assert!(app
             .error
@@ -3193,8 +3260,8 @@ mod tests {
             id: "t1".into(),
             title: "Check In For Yearly Checkup".into(),
             notes: Some("Need my vax\r\n".into()),
-            status: "needsAction".into(),
-            due: Some("2026-09-25T00:00:00.000Z".into()),
+            status: Status::NeedsAction,
+            due: chrono::NaiveDate::from_ymd_opt(2026, 9, 25),
             parent: Some("p9".into()),
             links: vec![crate::api::Link {
                 description: "Check In For Your Upcoming Visit".into(),
@@ -3386,14 +3453,36 @@ mod tests {
             .is_some_and(|error| error.contains("cannot move")));
 
         app.error = None;
-        app.shelf = true;
-        app.field = FieldId::Notes;
+        app.shelf = Shelf::Open(FieldId::Notes);
         app.start_edit();
         assert!(matches!(app.interaction, Interaction::Idle));
         assert!(app
             .error
             .as_deref()
             .is_some_and(|error| error.contains("cannot have notes")));
+    }
+
+    #[test]
+    fn editing_after_closing_the_shelf_on_notes_starts_at_the_title() {
+        let (mut app, _cmds) = app_with_lists(&["a"]);
+        app.sync = SyncState::Ready;
+        let assigned = Task {
+            assignment_info: Some(crate::api::AssignmentInfo {
+                link_to_task: "https://docs.google.com/document/d/1".into(),
+                surface_type: "DOCUMENT".into(),
+            }),
+            ..task("assigned", None, "1", false)
+        };
+        set_tasks(&mut app, "a", vec![assigned], "assigned");
+
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE));
+
+        assert!(app.error.is_none(), "{:?}", app.error);
+        assert_eq!(app.edit().map(Edit::field), Some(FieldId::Title));
+        assert_eq!(app.shelf, Shelf::Open(FieldId::Title));
     }
 
     #[test]
@@ -3843,16 +3932,19 @@ mod tests {
         };
         app.on_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::ALT));
         app.on_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
-        assert!(!app.quit);
+        assert!(!app.should_exit());
 
         app.on_msg(reordered(operation, "a", &["b", "a", "c"]));
-        assert!(!app.quit, "the queued move is still a pending write");
+        assert!(
+            !app.should_exit(),
+            "the queued move is still a pending write"
+        );
         let Cmd::Reorder { operation, .. } = commands.recv().unwrap() else {
             panic!("expected the queued presses as one move");
         };
 
         app.on_msg(reordered(operation, "a", &["b", "c", "a"]));
-        assert!(app.quit);
+        assert!(app.should_exit());
     }
 
     #[test]
@@ -4026,7 +4118,7 @@ mod tests {
         assert!(matches!(app.interaction, Interaction::Idle));
 
         app.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
-        assert!(!app.quit);
+        assert!(!app.should_exit());
     }
 
     #[test]
@@ -4098,10 +4190,10 @@ mod tests {
         let (mut app, _commands) = app_with_lists(&["a"]);
 
         app.on_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-        assert!(!app.quit);
+        assert!(!app.should_exit());
 
         app.on_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
-        assert!(app.quit);
+        assert!(app.should_exit());
     }
 
     #[test]

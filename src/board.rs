@@ -247,13 +247,18 @@ pub fn ordered(tasks: Vec<Task>) -> Vec<Row> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::Status;
 
     fn task(id: &str, parent: Option<&str>, position: &str, done: bool) -> Task {
         Task {
             id: id.into(),
             parent: parent.map(Into::into),
             position: position.into(),
-            status: if done { "completed" } else { "needsAction" }.into(),
+            status: if done {
+                Status::Completed
+            } else {
+                Status::NeedsAction
+            },
             ..Default::default()
         }
     }

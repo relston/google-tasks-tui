@@ -28,7 +28,7 @@ mod render;
 mod text;
 mod worker;
 
-use app::App;
+use app::{App, QuitState};
 use worker::{worker, Msg};
 
 const THEME_POLL: Duration = Duration::from_millis(500);
@@ -37,7 +37,7 @@ const TICK: Duration = Duration::from_millis(100);
 /// Returns whether shutdown should join the worker after draining writes.
 fn run(term: &mut DefaultTerminal, mut app: App, msgs: Receiver<Msg>) -> std::io::Result<bool> {
     let mut last_poll = Instant::now();
-    while !app.quit {
+    while !app.should_exit() {
         term.draw(|f| app.draw(f))?;
         // Block on input, but wake often enough to pick up API results.
         if event::poll(TICK)? {
@@ -62,7 +62,7 @@ fn run(term: &mut DefaultTerminal, mut app: App, msgs: Receiver<Msg>) -> std::io
             last_poll = Instant::now();
         }
     }
-    Ok(app.quitting && !app.force_quit)
+    Ok(app.quit == QuitState::Drained)
 }
 
 struct TerminalGuard<T> {
@@ -125,16 +125,43 @@ fn enable_key_detail() -> bool {
     .is_ok()
 }
 
-pub fn start() -> auth::Result<()> {
-    let paths = Paths::from_env();
+#[derive(Debug)]
+pub enum Error {
+    Auth(auth::Error),
+    Terminal(io::Error),
+    WorkerPanicked,
+}
+
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Auth(error) => write!(f, "{error}"),
+            Self::Terminal(error) => write!(f, "{error}"),
+            Self::WorkerPanicked => f.write_str("network worker panicked"),
+        }
+    }
+}
+
+impl std::error::Error for Error {}
+
+impl From<auth::Error> for Error {
+    fn from(error: auth::Error) -> Self {
+        Self::Auth(error)
+    }
+}
+
+impl From<io::Error> for Error {
+    fn from(error: io::Error) -> Self {
+        Self::Terminal(error)
+    }
+}
+
+pub fn start(paths: &Paths) -> Result<(), Error> {
     // Reuse the stored token so nothing blocks the first frame; only a first
     // run (or a wiped token) needs the browser, which wants the terminal.
-    let auth = match auth::Auth::cached_with_paths(&paths) {
-        Some(a) => a,
-        None => auth::Auth::new_with_paths(&paths)?,
-    };
+    let auth = auth::Auth::load(paths)?;
     let account = auth.fingerprint();
-    let (cached, cache_meta, warning) = match cache::load_for(&paths, &account) {
+    let (cached, cache_meta, warning) = match cache::load_for(paths, &account) {
         Ok((cached, meta)) => (cached, meta, None),
         Err(error) => (
             cache::Cache::default(),
@@ -145,7 +172,7 @@ pub fn start() -> auth::Result<()> {
             Some(format!("cache ignored: {error}")),
         ),
     };
-    let (config, config_warning) = config::load_with_paths(&paths);
+    let (config, config_warning) = config::load(paths);
     let warning = match (warning, config_warning) {
         (Some(cache), Some(config)) => Some(format!("{cache}; {config}")),
         (warning, None) | (None, warning) => warning,
@@ -158,13 +185,13 @@ pub fn start() -> auth::Result<()> {
     let mut terminal = TerminalGuard::init();
     let res = run(
         terminal.terminal_mut(),
-        App::new_with_storage(cmd_tx, cached, config, paths, cache_meta, warning),
+        App::new_with_storage(cmd_tx, cached, config, paths.clone(), cache_meta, warning),
         msg_rx,
     );
     drop(terminal);
     let join_worker = res.as_ref().copied().unwrap_or(true);
     if join_worker && worker_handle.join().is_err() && res.is_ok() {
-        return Err("network worker panicked".into());
+        return Err(Error::WorkerPanicked);
     }
     res?;
     Ok(())

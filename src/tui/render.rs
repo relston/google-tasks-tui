@@ -1,4 +1,4 @@
-use chrono::{DateTime, Datelike, Local, NaiveDate};
+use chrono::{DateTime, Datelike, Local, NaiveDate, Utc};
 use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -13,7 +13,10 @@ use crate::board::Row;
 use crate::keybindings::Action;
 use crate::theme::Theme;
 
-use super::app::{App, Edit, EditTarget, FieldId, Interaction, LoadState, Picker, SyncState};
+use super::app::{
+    App, Edit, EditTarget, FieldId, Interaction, LoadState, Picker, PickerStyle, QuitState, Shelf,
+    SyncState,
+};
 use super::text::{clean, cursor_rc, ellipsize, pad_to_width, title_of, wrap};
 
 const COL_MIN: u16 = 30;
@@ -71,7 +74,7 @@ impl App {
         self.draw_board(f, body, &t);
         self.draw_picker(f, body, &t);
 
-        let hints = if self.quitting {
+        let hints = if self.quit == QuitState::Waiting {
             let quit = self.keymap.labels_for(Action::Quit).join("/");
             format!(" waiting for pending saves… {quit} again to force quit")
         } else if self.interaction.picker().is_some_and(Picker::typing) {
@@ -130,7 +133,7 @@ impl App {
             ])
         } else if self.sync != SyncState::Ready {
             " syncing with Google… board is read-only until it lands".into()
-        } else if self.shelf {
+        } else if self.shelf.is_open() {
             self.hints(&[
                 (Action::NextField, "field"),
                 (Action::Edit, "edit"),
@@ -198,7 +201,7 @@ impl App {
         }
         self.focus = self.focus.min(self.columns.len() - 1);
         if self.selected_task().is_none() && !self.is_creating() {
-            self.shelf = false;
+            self.shelf = Shelf::Closed;
             if matches!(
                 self.interaction,
                 Interaction::Editing(Edit {
@@ -210,13 +213,13 @@ impl App {
             }
         }
 
-        if self.shelf && area.width < COL_MIN + 24 {
+        if self.shelf.is_open() && area.width < COL_MIN + 24 {
             self.draw_shelf(f, area, t);
             return;
         }
 
         // Columns share the width evenly within limits; the shelf takes a fixed slot.
-        let shelf_w = if self.shelf {
+        let shelf_w = if self.shelf.is_open() {
             SHELF_W.min(area.width / 2)
         } else {
             0
@@ -239,7 +242,7 @@ impl App {
             let w = col_w.min(right - x);
             self.draw_column(f, Rect::new(x, area.y, w, area.height), i, t);
             x += w;
-            if self.shelf && i == self.focus && x < right {
+            if self.shelf.is_open() && i == self.focus && x < right {
                 let w = shelf_w.min(right - x);
                 self.draw_shelf(f, Rect::new(x, area.y, w, area.height), t);
                 x += w;
@@ -329,8 +332,9 @@ impl App {
         let inner = block.inner(area);
         f.render_widget(block, area);
         if inner.width < 8 || inner.height < 3 {
+            let cancel = self.keymap.labels_for(Action::CancelEdit).join("/");
             f.render_widget(
-                Paragraph::new("Terminal too small; Esc cancels")
+                Paragraph::new(format!("Terminal too small; {cancel} cancels"))
                     .style(Style::default().fg(t.yellow)),
                 inner,
             );
@@ -380,8 +384,9 @@ impl App {
         let inner = block.inner(area);
         f.render_widget(block, area);
         if inner.width < 8 || inner.height < 8 {
+            let close = self.keymap.labels_for(Action::CloseShelf).join("/");
             f.render_widget(
-                Paragraph::new("Terminal too small; Esc closes details")
+                Paragraph::new(format!("Terminal too small; {close} closes details"))
                     .style(Style::default().fg(t.yellow)),
                 inner,
             );
@@ -411,7 +416,7 @@ impl App {
             Span::styled(status, Style::default().fg(color)),
             t,
         ));
-        if let Some(d) = task.due_date() {
+        if let Some(d) = task.due {
             let label = format!("{} · {}", d.format("%a %b %-d, %Y"), relative(d, today));
             let color = if task.is_done() {
                 t.fg
@@ -504,7 +509,7 @@ impl App {
                 })
                 .collect(),
         };
-        let on_title = self.field == FieldId::Title;
+        let on_title = self.shelf == Shelf::Open(FieldId::Title);
         f.render_widget(Paragraph::new(marked(title_lines, on_title, t)), title_a);
         f.render_widget(Paragraph::new(marked(meta, false, t)), meta_a);
         f.render_widget(Line::styled("  Notes", muted.bold()), notes_label_a);
@@ -539,11 +544,19 @@ impl App {
                 .map(|(s, e)| Line::styled(pad_to_width(&notes_text[s..e], w), style))
                 .collect()
         };
-        let on_notes = self.field == FieldId::Notes;
+        let on_notes = self.shelf == Shelf::Open(FieldId::Notes);
         f.render_widget(Paragraph::new(marked(notes_lines, on_notes, t)), notes_a);
         f.render_widget(
             Paragraph::new(marked(
-                vec![field("Updated", fmt_time(&task.updated).into(), t)],
+                vec![field(
+                    "Updated",
+                    task.updated
+                        .as_ref()
+                        .map(fmt_time)
+                        .unwrap_or_default()
+                        .into(),
+                    t,
+                )],
                 false,
                 t,
             )),
@@ -564,7 +577,11 @@ impl App {
             return;
         };
 
-        let max_width = if picker.is_columns() { 56 } else { 80 };
+        let max_width = if picker.style() == PickerStyle::Reference {
+            56
+        } else {
+            80
+        };
         // Two borders and the selection marker eat into the usable width.
         let text_w = (area.width.min(max_width) as usize)
             .saturating_sub(4)
@@ -584,7 +601,7 @@ impl App {
             picker
                 .rows()
                 .map(|row| {
-                    if picker.is_columns() {
+                    if picker.style() == PickerStyle::Reference {
                         return ListItem::new(Line::from(vec![
                             Span::styled(
                                 format!(" {:<key_w$}  ", row.title),
@@ -734,7 +751,7 @@ pub(super) fn task_item<'a>(
             Line::from(spans)
         })
         .collect();
-    if let Some(d) = task.due_date().filter(|_| !done) {
+    if let Some(d) = task.due.filter(|_| !done) {
         lines.push(Line::from(vec![
             Span::raw(format!("{indent}  ")),
             Span::styled(
@@ -766,23 +783,21 @@ fn due_color(d: NaiveDate, today: NaiveDate, t: &Theme) -> Color {
     }
 }
 
-fn fmt_time(s: &str) -> String {
-    DateTime::parse_from_rfc3339(s)
-        .map(|d| {
-            d.with_timezone(&Local)
-                .format("%a %b %-d %Y, %-I:%M %p")
-                .to_string()
-        })
-        .unwrap_or_else(|_| s.to_string())
+fn fmt_time(time: &DateTime<Utc>) -> String {
+    time.with_timezone(&Local)
+        .format("%a %b %-d %Y, %-I:%M %p")
+        .to_string()
 }
 
 #[cfg(test)]
 mod render_tests {
-    use crate::api::{Task, TaskList};
+    use crate::api::{Status, Task, TaskList};
     use crate::cache;
     use crate::config::Config;
     use crate::keybindings::BindingConfig;
-    use crate::tui::app::{App, Interaction, ParentPick, Picker, PickerRow, SyncState};
+    use crate::tui::app::{
+        App, FieldId, Interaction, ParentPick, Picker, PickerRow, Shelf, SyncState,
+    };
     use ratatui::{
         backend::TestBackend,
         crossterm::event::{KeyCode, KeyEvent, KeyModifiers},
@@ -817,7 +832,7 @@ mod render_tests {
                     tasks: vec![Task {
                         id: "task".into(),
                         title: "Underlying task".into(),
-                        status: "needsAction".into(),
+                        status: Status::NeedsAction,
                         ..Default::default()
                     }],
                 }],
@@ -846,7 +861,7 @@ mod render_tests {
                             id: format!("l{i}t{j}"),
                             title: (*title).into(),
                             position: format!("{j:09}"),
-                            status: "needsAction".into(),
+                            status: Status::NeedsAction,
                             ..Default::default()
                         })
                         .collect(),
@@ -959,7 +974,7 @@ mod render_tests {
             id: "task".into(),
             title: "Task".into(),
             notes: Some("Important notes".into()),
-            status: "needsAction".into(),
+            status: Status::NeedsAction,
             links: (0..12)
                 .map(|index| crate::api::Link {
                     description: format!("Link {index}"),
@@ -979,7 +994,7 @@ mod render_tests {
             }],
         };
         let mut app = App::new(tx, cached, Config::default());
-        app.shelf = true;
+        app.shelf = Shelf::Open(FieldId::Title);
         let mut terminal = Terminal::new(TestBackend::new(90, 18)).unwrap();
         terminal.draw(|frame| app.draw(frame)).unwrap();
         let buffer = terminal.backend().buffer();
@@ -1026,6 +1041,34 @@ mod render_tests {
             })
             .collect();
         assert!(screen.contains("New task"), "{screen}");
+    }
+
+    #[test]
+    fn small_terminal_messages_name_the_configured_keys() {
+        let mut config = Config::default();
+        config.keys.cancel_edit = Some(BindingConfig::one("ctrl+g"));
+        config.keys.close_shelf = Some(BindingConfig::one("ctrl+o"));
+        let (keymap, diagnostics) = config.keymap();
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+
+        let mut creating = one_list_app();
+        creating.keymap = keymap.clone();
+        creating.sync = SyncState::Ready;
+        creating.start_create(false);
+        let screen = render_app(&mut creating, 40, 6);
+        assert!(
+            screen.contains("Terminal too small; ctrl+g cancels"),
+            "{screen}"
+        );
+
+        let mut details = one_list_app();
+        details.keymap = keymap;
+        details.shelf = Shelf::Open(FieldId::Title);
+        let screen = render_app(&mut details, 50, 8);
+        assert!(
+            screen.contains("Terminal too small; ctrl+o closes details"),
+            "{screen}"
+        );
     }
 
     #[test]

@@ -1,3 +1,3 @@
-fn main() -> google_tasks_tui::auth::Result<()> {
+fn main() -> std::process::ExitCode {
     google_tasks_tui::entry()
 }

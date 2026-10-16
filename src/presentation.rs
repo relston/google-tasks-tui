@@ -68,9 +68,9 @@ pub fn md_task(task: &Task) -> String {
         "# {}\n\n- id: {}\n- status: {}",
         markdown_text(&inline(&task.title)),
         code_span(&task.id),
-        markdown_text(&inline(&task.status))
+        task.status.as_str()
     );
-    if let Some(due) = task.due_date() {
+    if let Some(due) = task.due {
         output.push_str(&format!("\n- due: {due}"));
     }
     if let Some(parent) = &task.parent {
@@ -92,7 +92,7 @@ pub fn md_task(task: &Task) -> String {
 
 pub fn md_yank(task: &Task) -> String {
     let mut output = format!("# {}\n", markdown_text(&display_title(task)));
-    if let Some(due) = task.due_date() {
+    if let Some(due) = task.due {
         output.push_str(&format!("\nDue: {due}\n"));
     }
     if let Some(notes) = task
