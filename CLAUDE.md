@@ -61,12 +61,17 @@ Work directly on `main`; do not create feature branches.
   selection. Tasks with children and completed-hidden tasks cannot become
   subtasks. Unparenting sets `previous` to the former parent so promotion does
   not jump to the top of the list.
-- One-step reorders move a task among its open siblings under the same parent
-  with `tasks.move` (`previous` = the sibling to land after, none for first).
+- Reorders move a task among its open siblings under the same parent with
+  `tasks.move` (`previous` = the sibling to land after, none for first).
   Google stores positions as dense counters and renumbers siblings on every
   move, so the worker reloads the list after the move and that reload replaces
-  the optimistic position swap. Never patch sibling positions by guessing.
-  Both tasks are restored on failure.
+  the optimistic positions. Never patch sibling positions by guessing.
+  Presses made while the same task's reorder is saving move it locally and
+  are sent as one follow-up move once the save lands. A failure restores the
+  list from before the first press and drops the queued presses.
+- Hiding completed tasks keeps a completed parent visible while it has open
+  subtasks. Google scopes subtask positions to their parent, so a subtask is
+  never shown among top-level tasks.
 - Bound all network operations. Retry only safe reads for 429/5xx, honor
   `Retry-After`, and retry at most once after an unexpected 401 refresh.
 - Keep terminal text grapheme-aware and terminal-cell-aware. Sanitize controls

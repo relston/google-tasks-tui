@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::mpsc::Sender;
 
 use ratatui::{
@@ -19,7 +20,10 @@ use crate::platform::{self, Clipboard};
 use crate::presentation::{md_yank, normalize_title, urls_in};
 use crate::theme::{self, Theme};
 
-use super::board::{eligible_parents, move_ids, other_lists, shift_target, subtask_parent};
+use super::board::{
+    eligible_parents, move_ids, other_lists, previous_sibling, reorder_after, reorder_step,
+    subtask_parent, ReorderPlan,
+};
 use super::text::{byte_at_column, clean, cursor_rc, title_of, wrap};
 use super::worker::{Cmd, Msg};
 #[cfg(test)]
@@ -458,14 +462,15 @@ enum MutationContext {
         task_id: String,
         before: Box<Task>,
     },
-    /// A one-step reorder. Locally the task and its neighbor swap positions
-    /// until Google's reloaded list replaces both; `before` and `neighbor`
-    /// restore them on failure.
-    Shift {
+    /// A reorder. Local positions stand in until Google's reloaded list
+    /// replaces them; `before` is the list ahead of every local change, so
+    /// a failure also drops `queued` presses.
+    Reorder {
         list_id: String,
         task_id: String,
-        before: Box<Task>,
-        neighbor: Box<Task>,
+        before: Vec<Task>,
+        /// The task was moved again locally while this reorder was saving.
+        queued: bool,
     },
 }
 
@@ -519,16 +524,22 @@ impl Column {
     }
 }
 
-/// Column rows. Completed tasks are omitted when the board is hiding them,
-/// and an open child of a hidden parent is shown at the top level.
+/// Column rows. Hiding completed tasks keeps a completed parent while it has
+/// open subtasks: Google scopes subtask positions to their parent, so those
+/// subtasks have no meaningful place among the top-level tasks.
 fn visible_rows(board: &Board, list_id: &str, show_completed: bool) -> Vec<Row> {
-    let tasks = board.tasks(list_id);
-    let tasks = if show_completed {
-        tasks
-    } else {
-        tasks.into_iter().filter(|task| !task.is_done()).collect()
-    };
-    crate::board::ordered(tasks)
+    let rows = board.rows(list_id);
+    if show_completed {
+        return rows;
+    }
+    let open_parents: HashSet<String> = rows
+        .iter()
+        .filter(|row| row.depth > 0 && !row.task.is_done())
+        .filter_map(|row| row.task.parent.clone())
+        .collect();
+    rows.into_iter()
+        .filter(|row| !row.task.is_done() || open_parents.contains(&row.task.id))
+        .collect()
 }
 
 pub(super) struct App {
@@ -763,14 +774,10 @@ impl App {
                 self.board.upsert_task(&list_id, *before);
                 self.rebuild_column(&list_id);
             }
-            MutationContext::Shift {
-                list_id,
-                before,
-                neighbor,
-                ..
+            MutationContext::Reorder {
+                list_id, before, ..
             } => {
-                self.board.upsert_task(&list_id, *before);
-                self.board.upsert_task(&list_id, *neighbor);
+                self.board.replace_tasks(&list_id, before);
                 self.rebuild_column(&list_id);
             }
             MutationContext::Delete {
@@ -1435,21 +1442,28 @@ impl App {
                 let Some(context) = self.mutation_finished(operation) else {
                     return;
                 };
-                if !matches!(
-                    &context,
-                    MutationContext::Shift {
+                let queued = match &context {
+                    MutationContext::Reorder {
                         list_id: expected_list,
                         task_id: expected_task,
+                        queued,
                         ..
-                    } if expected_list == &list_id && expected_task == &task_id
-                ) {
-                    self.recover("reorder response did not match the pending operation".into());
-                    return;
-                }
+                    } if expected_list == &list_id && expected_task == &task_id => *queued,
+                    _ => {
+                        self.recover("reorder response did not match the pending operation".into());
+                        return;
+                    }
+                };
                 match (result, tasks) {
                     (Ok(task), Some(Ok(tasks))) if task.id == task_id && task.parent == parent => {
+                        let shown = queued
+                            .then(|| previous_sibling(&self.board.rows(&list_id), &task_id).ok())
+                            .flatten();
                         self.board.replace_tasks(&list_id, tasks);
                         self.rebuild_column(&list_id);
+                        if let Some(previous) = shown {
+                            self.send_queued_reorder(list_id, task_id, previous);
+                        }
                     }
                     (Ok(task), Some(Err(error))) if task.id == task_id && task.parent == parent => {
                         // Saved, but the siblings' new positions are unknown.
@@ -1714,11 +1728,10 @@ impl App {
         );
     }
 
-    /// Move the selected task one place among its open siblings.
-    fn shift_task(&mut self, down: bool) {
-        if !self.writable() {
-            return;
-        }
+    /// Move the selected task one place among its open siblings. Presses made
+    /// while that task's reorder is saving move it locally and are sent as
+    /// one move when the save lands.
+    fn reorder_task(&mut self, down: bool) {
         let Some(column) = self.columns.get(self.focus) else {
             return;
         };
@@ -1727,43 +1740,92 @@ impl App {
         };
         let list_id = column.list.id.clone();
         let task_id = selected.task.id.clone();
-        let shift = match shift_target(&self.board.rows(&list_id), &task_id, down) {
-            Ok(shift) => shift,
+        let queue = matches!(
+            &self.pending_operation,
+            Some(PendingOperation {
+                context: MutationContext::Reorder {
+                    list_id: pending_list,
+                    task_id: pending_task,
+                    ..
+                },
+                ..
+            }) if *pending_list == list_id && *pending_task == task_id
+        );
+        if queue && self.sync != SyncState::Ready {
+            self.error = Some(READ_ONLY.into());
+            return;
+        }
+        if !queue && !self.writable() {
+            return;
+        }
+        let plan = match reorder_step(&self.board.rows(&list_id), &task_id, down) {
+            Ok(plan) => plan,
             Err(error) => {
                 self.error = Some(error.into());
                 return;
             }
         };
-        let (Some(before), Some(neighbor)) = (
-            self.board.task(&list_id, &task_id).cloned(),
-            self.board.task(&list_id, &shift.neighbor).cloned(),
-        ) else {
-            self.error = Some("task disappeared before it could move".into());
-            return;
-        };
-        if let Some(task) = self.board.task_mut(&list_id, &task_id) {
-            task.position = neighbor.position.clone();
-        }
-        if let Some(task) = self.board.task_mut(&list_id, &shift.neighbor) {
-            task.position = before.position.clone();
-        }
-        self.rebuild_column(&list_id);
         self.error = None;
+        if !queue {
+            self.send_reorder(list_id, task_id, plan);
+            return;
+        }
+        self.apply_positions(&list_id, &plan.positions);
+        if let Some(PendingOperation {
+            context: MutationContext::Reorder { queued, .. },
+            ..
+        }) = &mut self.pending_operation
+        {
+            *queued = true;
+        }
+    }
+
+    /// Send the presses made while a reorder was saving as one move to where
+    /// the board showed the task.
+    fn send_queued_reorder(&mut self, list_id: String, task_id: String, previous: Option<String>) {
+        if self.sync != SyncState::Ready || self.force_quit {
+            return;
+        }
+        let rows = self.board.rows(&list_id);
+        match reorder_after(&rows, &task_id, previous.as_deref()) {
+            Ok(plan) if plan.positions.is_empty() => {}
+            Ok(plan) => {
+                if self.send_reorder(list_id, task_id, plan) {
+                    // The queued move is a pending write, so a waiting quit keeps waiting.
+                    self.quit = false;
+                }
+            }
+            Err(error) => self.error = Some(format!("queued reorder dropped: {error}")),
+        }
+    }
+
+    fn send_reorder(&mut self, list_id: String, task_id: String, plan: ReorderPlan) -> bool {
+        let before = self.board.tasks(&list_id);
+        self.apply_positions(&list_id, &plan.positions);
         self.send_mutation(
-            MutationContext::Shift {
+            MutationContext::Reorder {
                 list_id: list_id.clone(),
                 task_id: task_id.clone(),
-                before: Box::new(before),
-                neighbor: Box::new(neighbor),
+                before,
+                queued: false,
             },
             |operation| Cmd::Reorder {
                 operation,
                 list_id,
                 task_id,
-                parent: shift.parent,
-                previous: shift.previous,
+                parent: plan.parent,
+                previous: plan.previous,
             },
-        );
+        )
+    }
+
+    fn apply_positions(&mut self, list_id: &str, positions: &[(String, String)]) {
+        for (task_id, position) in positions {
+            if let Some(task) = self.board.task_mut(list_id, task_id) {
+                task.position = position.clone();
+            }
+        }
+        self.rebuild_column(list_id);
     }
 
     fn start_move(&mut self) {
@@ -1954,8 +2016,8 @@ impl App {
             Action::CopyTask => self.yank(),
             Action::BrowseLinks => self.start_browse(),
             Action::MoveTask => self.start_move(),
-            Action::MoveTaskUp => self.shift_task(false),
-            Action::MoveTaskDown => self.shift_task(true),
+            Action::ReorderUp => self.reorder_task(false),
+            Action::ReorderDown => self.reorder_task(true),
             Action::UnparentTask => self.unparent_task(),
             Action::ChooseParent => self.start_parent_pick(),
             Action::Help => self.start_help(),
@@ -2382,7 +2444,7 @@ mod tests {
                 task("done-parent", None, "3", true),
                 task("open-child", Some("done-parent"), "4", false),
             ],
-            "done-parent",
+            "done-child",
         );
         set_tasks(
             &mut app,
@@ -2397,22 +2459,16 @@ mod tests {
 
         app.on_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE));
 
-        let shown = |app: &App, list: &str| -> Vec<(String, u8)> {
-            app.columns
-                .iter()
-                .find(|column| column.list.id == list)
-                .unwrap()
-                .rows
-                .iter()
-                .map(|row| (row.task.id.clone(), row.depth))
-                .collect()
-        };
         assert_eq!(
             shown(&app, "a"),
-            [("open".into(), 0), ("open-child".into(), 0)]
+            [
+                ("open".into(), 0),
+                ("done-parent".into(), 0),
+                ("open-child".into(), 1),
+            ]
         );
         assert_eq!(shown(&app, "b"), [("open-b".into(), 0)]);
-        assert_eq!(app.columns[0].selected_id.as_deref(), Some("open-child"));
+        assert_eq!(app.columns[0].selected_id.as_deref(), Some("done-parent"));
         assert!(!app.shelf);
         assert!(app.board.task("a", "done-parent").unwrap().is_done());
         assert!(app.board.task("a", "done-child").unwrap().is_done());
@@ -2432,7 +2488,68 @@ mod tests {
             shown(&app, "b"),
             [("open-b".into(), 0), ("done-b".into(), 0)]
         );
-        assert_eq!(app.columns[0].selected_id.as_deref(), Some("open-child"));
+        assert_eq!(app.columns[0].selected_id.as_deref(), Some("done-parent"));
+    }
+
+    fn shown(app: &App, list_id: &str) -> Vec<(String, u8)> {
+        app.columns
+            .iter()
+            .find(|column| column.list.id == list_id)
+            .unwrap()
+            .rows
+            .iter()
+            .map(|row| (row.task.id.clone(), row.depth))
+            .collect()
+    }
+
+    #[test]
+    fn hidden_completed_parents_keep_their_open_subtasks_in_place() {
+        let (mut app, commands) = app_with_lists(&["a"]);
+        let _ = commands.recv().unwrap(); // startup refresh
+        app.sync = SyncState::Ready;
+        set_tasks(
+            &mut app,
+            "a",
+            vec![
+                task("top", None, "1", false),
+                task("done-parent", None, "0", true),
+                task("one", Some("done-parent"), "1", false),
+                task("two", Some("done-parent"), "2", false),
+                task("done", None, "2", true),
+            ],
+            "two",
+        );
+
+        app.on_key(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE));
+        assert_eq!(
+            shown(&app, "a"),
+            [
+                ("top".into(), 0),
+                ("done-parent".into(), 0),
+                ("one".into(), 1),
+                ("two".into(), 1),
+            ]
+        );
+
+        app.on_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::ALT));
+        assert_eq!(
+            shown(&app, "a"),
+            [
+                ("top".into(), 0),
+                ("done-parent".into(), 0),
+                ("two".into(), 1),
+                ("one".into(), 1),
+            ]
+        );
+        assert!(matches!(
+            commands.recv().unwrap(),
+            Cmd::Reorder {
+                task_id,
+                parent: Some(parent),
+                previous: None,
+                ..
+            } if task_id == "two" && parent == "done-parent"
+        ));
     }
 
     #[test]
@@ -3323,7 +3440,7 @@ mod tests {
     }
 
     #[test]
-    fn shift_targets_open_siblings_under_the_same_parent() {
+    fn reorder_steps_target_open_siblings_under_the_same_parent() {
         let rows = order(vec![
             task("a", None, "1", false),
             task("a1", Some("a"), "1", false),
@@ -3334,23 +3451,21 @@ mod tests {
             task("c", None, "3", false),
             task("done", None, "0", true),
         ]);
-        let shift = |id: &str, down: bool| shift_target(&rows, id, down);
-        let ok = |parent: Option<&str>, neighbor: &str, previous: Option<&str>| {
-            Ok(crate::tui::board::Shift {
-                parent: parent.map(Into::into),
-                neighbor: neighbor.into(),
-                previous: previous.map(Into::into),
-            })
+        let shift = |id: &str, down: bool| {
+            reorder_step(&rows, id, down).map(|plan| (plan.parent, plan.previous))
+        };
+        let ok = |parent: Option<&str>, previous: Option<&str>| {
+            Ok((parent.map(Into::into), previous.map(Into::into)))
         };
 
         // Top-level tasks skip over subtasks and land after their neighbor.
-        assert_eq!(shift("a", true), ok(None, "b", Some("b")));
-        assert_eq!(shift("c", false), ok(None, "b", Some("a")));
-        assert_eq!(shift("b", false), ok(None, "a", None));
+        assert_eq!(shift("a", true), ok(None, Some("b")));
+        assert_eq!(shift("c", false), ok(None, Some("a")));
+        assert_eq!(shift("b", false), ok(None, None));
         // Subtasks only trade places under their own parent.
-        assert_eq!(shift("a3", false), ok(Some("a"), "a2", Some("a1")));
-        assert_eq!(shift("a2", false), ok(Some("a"), "a1", None));
-        assert_eq!(shift("a1", true), ok(Some("a"), "a2", Some("a2")));
+        assert_eq!(shift("a3", false), ok(Some("a"), Some("a1")));
+        assert_eq!(shift("a2", false), ok(Some("a"), None));
+        assert_eq!(shift("a1", true), ok(Some("a"), Some("a2")));
         // Edges, lone subtasks, and completed tasks don't move.
         assert_eq!(shift("a", false), Err("task is already first"));
         assert_eq!(shift("c", true), Err("task is already last"));
@@ -3359,6 +3474,39 @@ mod tests {
         assert_eq!(
             shift("done", false),
             Err("completed tasks stay in completion order")
+        );
+    }
+
+    #[test]
+    fn reorder_after_hands_sibling_positions_out_in_the_new_order() {
+        let rows = order(vec![
+            task("a", None, "1", false),
+            task("b", None, "2", false),
+            task("c", None, "3", false),
+            task("d", None, "4", false),
+        ]);
+        let positions = |id: &str, previous: Option<&str>| {
+            reorder_after(&rows, id, previous).map(|plan| plan.positions)
+        };
+        let moved = |pairs: &[(&str, &str)]| {
+            Ok(pairs
+                .iter()
+                .map(|(id, position)| (id.to_string(), position.to_string()))
+                .collect::<Vec<_>>())
+        };
+
+        assert_eq!(
+            positions("a", Some("c")),
+            moved(&[("b", "1"), ("c", "2"), ("a", "3")])
+        );
+        assert_eq!(
+            positions("d", None),
+            moved(&[("d", "1"), ("a", "2"), ("b", "3"), ("c", "4")])
+        );
+        assert_eq!(positions("b", Some("a")), moved(&[]));
+        assert_eq!(
+            positions("a", Some("gone")),
+            Err("its new neighbor is no longer beside it")
         );
     }
 
@@ -3402,10 +3550,6 @@ mod tests {
             ),
             ("a", "first", None, Some("second"))
         );
-
-        // A second press waits for the first move to land.
-        app.on_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::ALT));
-        assert!(commands.try_recv().is_err());
 
         // Google renumbers siblings as dense counters: the moved task takes
         // the neighbor's old slot and the neighbor is bumped. The reloaded
@@ -3476,7 +3620,7 @@ mod tests {
             "second",
         );
 
-        app.shift_task(false);
+        app.reorder_task(false);
         assert_eq!(ids(&app, "a"), ["second", "first"]);
         let Cmd::Reorder { operation, .. } = commands.recv().unwrap() else {
             panic!("expected a same-list move");
@@ -3516,7 +3660,7 @@ mod tests {
             "second",
         );
 
-        app.shift_task(false);
+        app.reorder_task(false);
         let Cmd::Reorder { operation, .. } = commands.recv().unwrap() else {
             panic!("expected a same-list move");
         };
@@ -3552,11 +3696,163 @@ mod tests {
             "first",
         );
 
-        app.shift_task(false);
+        app.reorder_task(false);
 
         assert_eq!(app.error.as_deref(), Some("task is already first"));
         assert!(commands.try_recv().is_err());
         assert!(app.pending_operation.is_none());
+    }
+
+    fn reordered(operation: u64, task_id: &str, list: &[&str]) -> Msg {
+        let tasks: Vec<Task> = list
+            .iter()
+            .enumerate()
+            .map(|(index, id)| task(id, None, &index.to_string(), false))
+            .collect();
+        let moved = tasks
+            .iter()
+            .find(|task| task.id == task_id)
+            .unwrap()
+            .clone();
+        Msg::Reordered {
+            operation,
+            list_id: "a".into(),
+            task_id: task_id.into(),
+            parent: None,
+            result: Ok(moved),
+            tasks: Some(Ok(tasks)),
+        }
+    }
+
+    fn reorder_list(app: &mut App, ids: &[&str]) {
+        let tasks = ids
+            .iter()
+            .enumerate()
+            .map(|(index, id)| task(id, None, &index.to_string(), false))
+            .collect();
+        set_tasks(app, "a", tasks, ids[0]);
+    }
+
+    #[test]
+    fn reorder_presses_while_saving_become_one_follow_up_move() {
+        let (mut app, commands) = app_with_lists(&["a"]);
+        let _ = commands.recv().unwrap(); // startup refresh
+        app.sync = SyncState::Ready;
+        reorder_list(&mut app, &["a", "b", "c", "d"]);
+        let down = KeyEvent::new(KeyCode::Char('j'), KeyModifiers::ALT);
+
+        app.on_key(down);
+        let Cmd::Reorder {
+            operation,
+            previous,
+            ..
+        } = commands.recv().unwrap()
+        else {
+            panic!("expected a same-list move");
+        };
+        assert_eq!(previous.as_deref(), Some("b"));
+
+        app.on_key(down);
+        app.on_key(down);
+        assert!(commands.try_recv().is_err(), "presses wait for the save");
+        assert!(app.error.is_none(), "{:?}", app.error);
+        assert_eq!(ids(&app, "a"), ["b", "c", "d", "a"]);
+
+        app.on_msg(reordered(operation, "a", &["b", "a", "c", "d"]));
+        assert_eq!(ids(&app, "a"), ["b", "c", "d", "a"]);
+        assert_eq!(app.columns[0].selected_id.as_deref(), Some("a"));
+        let Cmd::Reorder {
+            operation,
+            task_id,
+            previous,
+            ..
+        } = commands.recv().unwrap()
+        else {
+            panic!("expected the queued presses as one move");
+        };
+        assert_eq!((task_id.as_str(), previous.as_deref()), ("a", Some("d")));
+
+        app.on_msg(reordered(operation, "a", &["b", "c", "d", "a"]));
+        assert!(commands.try_recv().is_err());
+        assert_eq!(ids(&app, "a"), ["b", "c", "d", "a"]);
+        assert!(app.pending_operation.is_none());
+        assert_eq!(app.sync, SyncState::Ready);
+    }
+
+    #[test]
+    fn queued_reorder_presses_that_cancel_out_still_land_where_shown() {
+        let (mut app, commands) = app_with_lists(&["a"]);
+        let _ = commands.recv().unwrap(); // startup refresh
+        app.sync = SyncState::Ready;
+        reorder_list(&mut app, &["a", "b", "c"]);
+
+        app.on_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::ALT));
+        let Cmd::Reorder { operation, .. } = commands.recv().unwrap() else {
+            panic!("expected a same-list move");
+        };
+        app.on_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::ALT));
+        assert_eq!(ids(&app, "a"), ["a", "b", "c"]);
+
+        app.on_msg(reordered(operation, "a", &["b", "a", "c"]));
+        assert_eq!(ids(&app, "a"), ["a", "b", "c"]);
+        assert!(matches!(
+            commands.recv().unwrap(),
+            Cmd::Reorder { task_id, previous: None, .. } if task_id == "a"
+        ));
+    }
+
+    #[test]
+    fn a_failed_reorder_drops_queued_presses_and_restores_the_list() {
+        let (mut app, commands) = app_with_lists(&["a"]);
+        let _ = commands.recv().unwrap(); // startup refresh
+        app.sync = SyncState::Ready;
+        reorder_list(&mut app, &["a", "b", "c"]);
+
+        app.on_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::ALT));
+        let Cmd::Reorder { operation, .. } = commands.recv().unwrap() else {
+            panic!("expected a same-list move");
+        };
+        app.on_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::ALT));
+        assert_eq!(ids(&app, "a"), ["b", "c", "a"]);
+
+        app.on_msg(Msg::Reordered {
+            operation,
+            list_id: "a".into(),
+            task_id: "a".into(),
+            parent: None,
+            result: Err("offline".into()),
+            tasks: None,
+        });
+
+        assert_eq!(ids(&app, "a"), ["a", "b", "c"]);
+        assert!(matches!(commands.recv().unwrap(), Cmd::Refresh(_)));
+        assert!(commands.try_recv().is_err());
+        assert!(app.pending_operation.is_none());
+    }
+
+    #[test]
+    fn a_waiting_quit_also_waits_for_queued_reorder_presses() {
+        let (mut app, commands) = app_with_lists(&["a"]);
+        let _ = commands.recv().unwrap(); // startup refresh
+        app.sync = SyncState::Ready;
+        reorder_list(&mut app, &["a", "b", "c"]);
+
+        app.on_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::ALT));
+        let Cmd::Reorder { operation, .. } = commands.recv().unwrap() else {
+            panic!("expected a same-list move");
+        };
+        app.on_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::ALT));
+        app.on_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
+        assert!(!app.quit);
+
+        app.on_msg(reordered(operation, "a", &["b", "a", "c"]));
+        assert!(!app.quit, "the queued move is still a pending write");
+        let Cmd::Reorder { operation, .. } = commands.recv().unwrap() else {
+            panic!("expected the queued presses as one move");
+        };
+
+        app.on_msg(reordered(operation, "a", &["b", "c", "a"]));
+        assert!(app.quit);
     }
 
     #[test]

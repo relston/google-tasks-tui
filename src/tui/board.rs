@@ -20,18 +20,23 @@ pub(super) fn eligible_parents(rows: &[Row], task_id: &str) -> Vec<Task> {
         .collect()
 }
 
-/// A one-step reorder: the sibling the task trades places with, and the
-/// `previous` sibling Google should place it after (`None` means first).
+/// A reorder: the task's parent, the open sibling Google should place it
+/// after (`None` means first), and the position changes that show it there.
 #[derive(Debug, PartialEq, Eq)]
-pub(super) struct Shift {
+pub(super) struct ReorderPlan {
     pub parent: Option<String>,
-    pub neighbor: String,
     pub previous: Option<String>,
+    /// `(task id, position)` for every sibling whose position changes.
+    pub positions: Vec<(String, String)>,
 }
 
-/// Siblings are the open tasks at the same depth under the same parent, in
-/// board order. Completed tasks are ordered by completion, so they don't move.
-pub(super) fn shift_target(rows: &[Row], task_id: &str, down: bool) -> Result<Shift, &'static str> {
+/// The task's parent, its open siblings in board order (itself included), and
+/// its index among them. Completed tasks are ordered by completion, so they
+/// are never siblings.
+fn open_siblings<'a>(
+    rows: &'a [Row],
+    task_id: &str,
+) -> Result<(Option<String>, Vec<&'a Task>, usize), &'static str> {
     let Some(selected) = rows.iter().find(|row| row.task.id == task_id) else {
         return Err("task disappeared before it could move");
     };
@@ -42,32 +47,80 @@ pub(super) fn shift_target(rows: &[Row], task_id: &str, down: bool) -> Result<Sh
     let parent = (selected.depth > 0)
         .then(|| selected.task.parent.clone())
         .flatten();
-    let siblings: Vec<&str> = rows
+    let siblings: Vec<&Task> = rows
         .iter()
         .filter(|row| {
             row.depth == selected.depth
                 && !row.task.is_done()
                 && (selected.depth == 0 || row.task.parent == parent)
         })
-        .map(|row| row.task.id.as_str())
+        .map(|row| &row.task)
         .collect();
-    let Some(index) = siblings.iter().position(|id| *id == task_id) else {
-        return Err("task disappeared before it could move");
-    };
-    let (neighbor, previous) = if down {
-        let neighbor = siblings.get(index + 1).ok_or("task is already last")?;
-        (*neighbor, Some(*neighbor))
+    let index = siblings
+        .iter()
+        .position(|task| task.id == task_id)
+        .ok_or("task disappeared before it could move")?;
+    Ok((parent, siblings, index))
+}
+
+/// The open sibling just before the task (`None` when it is first).
+pub(super) fn previous_sibling(
+    rows: &[Row],
+    task_id: &str,
+) -> Result<Option<String>, &'static str> {
+    let (_, siblings, index) = open_siblings(rows, task_id)?;
+    Ok(index.checked_sub(1).map(|i| siblings[i].id.clone()))
+}
+
+/// Move the task one place up or down among its open siblings.
+pub(super) fn reorder_step(
+    rows: &[Row],
+    task_id: &str,
+    down: bool,
+) -> Result<ReorderPlan, &'static str> {
+    let (_, siblings, index) = open_siblings(rows, task_id)?;
+    let previous = if down {
+        let next = siblings.get(index + 1).ok_or("task is already last")?;
+        Some(next.id.as_str())
     } else {
-        let neighbor = index
-            .checked_sub(1)
-            .map(|i| siblings[i])
-            .ok_or("task is already first")?;
-        (neighbor, index.checked_sub(2).map(|i| siblings[i]))
+        let above = index.checked_sub(1).ok_or("task is already first")?;
+        above.checked_sub(1).map(|i| siblings[i].id.as_str())
     };
-    Ok(Shift {
+    reorder_after(rows, task_id, previous)
+}
+
+/// Put the task right after `previous` among its open siblings. Locally the
+/// siblings' existing positions are handed out in the new order; Google's
+/// renumbered list replaces them once the move lands.
+pub(super) fn reorder_after(
+    rows: &[Row],
+    task_id: &str,
+    previous: Option<&str>,
+) -> Result<ReorderPlan, &'static str> {
+    let (parent, siblings, index) = open_siblings(rows, task_id)?;
+    let mut order = siblings.clone();
+    let moved = order.remove(index);
+    let at = match previous {
+        None => 0,
+        Some(id) => {
+            order
+                .iter()
+                .position(|task| task.id == id)
+                .ok_or("its new neighbor is no longer beside it")?
+                + 1
+        }
+    };
+    order.insert(at, moved);
+    let positions = order
+        .iter()
+        .zip(&siblings)
+        .filter(|(task, slot)| task.position != slot.position)
+        .map(|(task, slot)| (task.id.clone(), slot.position.clone()))
+        .collect();
+    Ok(ReorderPlan {
         parent,
-        neighbor: neighbor.to_string(),
         previous: previous.map(str::to_string),
+        positions,
     })
 }
 

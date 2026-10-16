@@ -22,7 +22,8 @@ available as subcommands for scripts and agents (`google-tasks-tui lists`,
 - Shows all your task lists side by side. Columns scroll horizontally when
   they don't fit.
 - Subtasks sit indented under their parent. Completed tasks appear struck
-  through at the bottom of their list. `v` hides them.
+  through at the bottom of their list. `v` hides them, except a completed
+  parent that still has open subtasks.
 - Includes tasks assigned from Google Docs and Chat. Google does not allow
   those tasks to have notes or move between lists; deleting one also deletes
   its source task, so the confirmation calls that out.
@@ -193,7 +194,7 @@ Action names are grouped as follows:
   `next_field`, `previous_field`, `edit`, `toggle_done`, `toggle_completed`,
   `delete_task`, `create_task`, `create_subtask`, `refresh`,
   `toggle_transparent`, `copy_task`, `browse_links`, `move_task`,
-  `move_task_up`, `move_task_down`, `unparent_task`, `choose_parent`, and
+  `reorder_up`, `reorder_down`, `unparent_task`, `choose_parent`, and
   `help`.
 - Picker: `close_picker`, `start_filter`, `picker_next`, `picker_previous`,
   `picker_accept`, and `picker_accept_all`.
@@ -284,7 +285,7 @@ requires `--yes` because Google removes every task in that list.
 | Create/edit/complete/delete tasks | Yes | Yes | Same validation and API contracts |
 | Create subtasks | `C` | `create --parent` | Same one-level Google constraint |
 | Reparent/unparent tasks | `<` / `>` | No | Interactive same-list parent picker |
-| Reorder tasks in a list | `Alt-j` / `Alt-k` | No | One place among open siblings |
+| Reorder tasks in a list | `Alt-j` / `Alt-k` | No | One place among open siblings; presses made during a save are sent as one move |
 | Edit notes | Yes | Yes | Assigned Docs/Chat tasks are rejected |
 | Edit due date/status directly | Status via `Space` | Yes | Due-date editor remains future TUI work |
 | Move tasks between lists | Yes | No | Interactive destination picker; CLI move remains deferred |

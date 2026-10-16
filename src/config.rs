@@ -51,8 +51,8 @@ wrap_titles = true
 # copy_task = \"y\"
 # browse_links = \"b\"
 # move_task = \"m\"
-# move_task_up = [\"alt+k\", \"alt+up\"]
-# move_task_down = [\"alt+j\", \"alt+down\"]
+# reorder_up = [\"alt+k\", \"alt+up\"]
+# reorder_down = [\"alt+j\", \"alt+down\"]
 # unparent_task = \"shift+comma\"
 # choose_parent = \"shift+period\"
 # help = \"shift+slash\"
@@ -177,8 +177,8 @@ key_fields! {
     copy_task => CopyTask,
     browse_links => BrowseLinks,
     move_task => MoveTask,
-    move_task_up => MoveTaskUp,
-    move_task_down => MoveTaskDown,
+    reorder_up => ReorderUp,
+    reorder_down => ReorderDown,
     unparent_task => UnparentTask,
     choose_parent => ChooseParent,
     help => Help,
@@ -362,6 +362,17 @@ create_task = "ctrl+b"
     #[test]
     fn prefix_configuration_is_rejected() {
         assert!(parse("[keys]\nprefix = \"ctrl+b\"").is_err());
+    }
+
+    #[test]
+    fn reorder_keys_are_named_reorder_up_and_down() {
+        let config = parse("[keys]\nreorder_up = \"ctrl+k\"\nreorder_down = \"ctrl+j\"").unwrap();
+        let (keymap, diagnostics) = config.keymap();
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert_eq!(keymap.labels_for(Action::ReorderUp), ["ctrl+k"]);
+        assert_eq!(keymap.labels_for(Action::ReorderDown), ["ctrl+j"]);
+        assert!(parse("[keys]\nmove_task_up = \"ctrl+k\"").is_err());
+        assert!(parse("[keys]\nmove_task_down = \"ctrl+j\"").is_err());
     }
 
     #[test]
