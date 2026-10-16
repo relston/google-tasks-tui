@@ -49,7 +49,10 @@ pub struct Theme {
 }
 
 impl Default for Theme {
-    /// ANSI fallback: inherits whatever the terminal is themed with.
+    /// ANSI fallback: inherits whatever the terminal is themed with. It
+    /// paints no background or text color of its own, and the selection and
+    /// header badge use reverse video, so it reads correctly on light and
+    /// dark terminals alike without detecting which one it is on.
     fn default() -> Self {
         Self {
             name: "terminal (ANSI)".into(),
@@ -58,8 +61,8 @@ impl Default for Theme {
             surface: Color::Reset,
             accent: Color::Blue,
             muted: Color::DarkGray,
-            sel_bg: Color::Blue,
-            sel_fg: Color::Black,
+            sel_bg: Color::Reset,
+            sel_fg: Color::Reset,
             red: Color::Red,
             green: Color::Green,
             yellow: Color::Yellow,
@@ -78,6 +81,17 @@ impl Theme {
             style.reversed()
         } else {
             style
+        }
+    }
+
+    /// The header badge: the background color on the accent. Without a
+    /// painted background there is no known color to put on the accent, so
+    /// it reverses the terminal's own colors instead.
+    pub fn badge(&self) -> Style {
+        if self.bg == Color::Reset {
+            Style::default().reversed()
+        } else {
+            Style::default().fg(self.bg).bg(self.accent)
         }
     }
 
@@ -625,10 +639,45 @@ blue = "Bright_Blue"
                 .reversed()
         );
 
-        let colored = Theme::default();
+        assert_eq!(t.badge(), Style::default().reversed());
+    }
+
+    #[test]
+    fn ansi_fallback_selection_and_badge_follow_the_terminal() {
+        // Reverse video swaps the terminal's own foreground and background,
+        // so it stays readable whether the terminal is light or dark.
+        let t = Theme::default();
         assert_eq!(
-            colored.selection(),
-            Style::default().fg(Color::Black).bg(Color::Blue)
+            (t.bg, t.fg, t.surface),
+            (Color::Reset, Color::Reset, Color::Reset)
+        );
+        assert_eq!(
+            t.selection(),
+            Style::default()
+                .fg(Color::Reset)
+                .bg(Color::Reset)
+                .reversed()
+        );
+        assert_eq!(t.badge(), Style::default().reversed());
+
+        let painted = Theme {
+            bg: Color::Rgb(0xff, 0xff, 0xff),
+            accent: Color::Rgb(0x1e, 0x66, 0xf5),
+            sel_bg: Color::Rgb(0xcc, 0xd0, 0xda),
+            sel_fg: Color::Rgb(0x4c, 0x4f, 0x69),
+            ..Theme::default()
+        };
+        assert_eq!(
+            painted.selection(),
+            Style::default()
+                .fg(Color::Rgb(0x4c, 0x4f, 0x69))
+                .bg(Color::Rgb(0xcc, 0xd0, 0xda))
+        );
+        assert_eq!(
+            painted.badge(),
+            Style::default()
+                .fg(Color::Rgb(0xff, 0xff, 0xff))
+                .bg(Color::Rgb(0x1e, 0x66, 0xf5))
         );
     }
 }

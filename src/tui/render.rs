@@ -58,7 +58,7 @@ impl App {
         .areas(f.area());
 
         let mut head = vec![
-            Span::styled(" Tasks ", Style::default().fg(t.bg).bg(t.accent).bold()),
+            Span::styled(" Tasks ", t.badge().bold()),
             Span::styled(format!("  theme: {}", t.name), Style::default().fg(t.muted)),
         ];
         if self.pending_operation.is_some() {

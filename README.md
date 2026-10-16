@@ -321,9 +321,13 @@ requires `--yes` because Google removes every task in that list.
 
 Colors resolve in three layers, each overriding the one before:
 
-1. **Terminal ANSI palette.** Every role defaults to an ANSI color (or the
-   terminal's default background and foreground), so the app matches
-   whatever your terminal is themed with.
+1. **Terminal ANSI palette.** Every role defaults to an ANSI color or the
+   terminal's default background and foreground, so the app matches
+   whatever your terminal is themed with. It paints no background of its
+   own, and selections and the header badge use reverse video, so it reads
+   correctly whether the terminal is light or dark. There is no separate
+   light/dark setting to detect: the terminal (or the Omarchy theme) is that
+   signal.
 2. **Omarchy**, when `source = "auto"` (the default) finds an active theme.
 3. **`[theme]` in `config.toml`.**
 
@@ -337,7 +341,8 @@ background = "reset"     # the terminal's default
 ```
 
 Roles: `background`, `foreground`, `surface`, `accent`, `muted`,
-`selection`, `selection_foreground`, `red`, `green`, `yellow`, `blue`. An
+`selection`, `selection_foreground`, `red`, `green`, `yellow`, `blue`. A
+`selection` of `"reset"` means reverse video. An
 invalid color is reported in the status bar and the whole config falls back
 to its defaults.
 
@@ -372,7 +377,7 @@ key it finds:
 | `surface`   | `lighter_background`, `color0`                               | `bg`            |
 | `accent`    | `accent`, `color4`                                           | ANSI blue       |
 | `muted`     | `muted`, `dark_foreground`, `color8`                         | ANSI bright black |
-| `sel_bg`    | `selection`, `selection_background`                          | ANSI blue       |
+| `sel_bg`    | `selection`, `selection_background`                          | reverse video   |
 | `sel_fg`    | `selection_foreground`, `bright_foreground`, `foreground`    | `fg`            |
 
 The theme name shown in the header comes from the symlink target

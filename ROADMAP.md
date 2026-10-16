@@ -227,9 +227,16 @@ above:
 - Edit task due dates in the TUI.
 - Manage task lists in the TUI.
 - Expose task moves through the CLI.
-- Honor light-mode theme metadata.
 - Reassess `toml` and ratatui upgrades against the chosen MSRV.
+- Give muted text (hints, inactive titles, completed tasks, field labels) its
+  own theme role, for example Omarchy's `light_foreground`. Omarchy's `muted`
+  is a border color with 1.5–3.0 contrast on most bundled themes.
 
 Dropped: an Omarchy `theme-set.d` hook for faster theme reload. Omarchy
 swaps the palette before retheming other apps and runs `theme-set` hooks
 only after those finish, so the 500 ms theme poll already reloads first.
+
+Dropped: honoring light-mode theme metadata. Omarchy themes supply every
+color we paint, and the ANSI fallback paints no background and uses reverse
+video for selections and the header badge, so the terminal (or the Omarchy
+theme) already decides light versus dark.
