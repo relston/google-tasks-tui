@@ -59,8 +59,12 @@ disk, desktop), and the two front ends. Each file name says what it does.
 
 - Keep the board read-only until every list in the active refresh generation
   succeeds. Ignore stale-generation responses.
-- Serialize mutations. Every optimistic mutation must retain enough context to
-  roll back, and failures must return the app to read-only recovery.
+- Serialize mutations. Every mutation goes through `App::submit` (or
+  `submit_create`): it copies the affected lists, applies the change on
+  screen, and sends one `Op` to the worker. The worker replies with an
+  `Outcome` of Google's authoritative lists and tasks; a failure restores the
+  copies (and any new-task draft) and returns the app to read-only recovery.
+  Add new mutations as `Op` variants, not new message types.
 - Preserve editor, selection, and operation identity across delayed worker
   responses. The `quit` action defaults to `q`; Escape defaults to
   close/cancel and never quits. Graceful shutdown waits for pending writes; a
@@ -71,17 +75,17 @@ disk, desktop), and the two front ends. Each file name says what it does.
   bindings produce a visible diagnostic.
 - Cross-list moves preserve parent/child order, report partial completion, and
   reconcile both source and destination lists.
-- Same-list reparenting uses `tasks.move` without `destinationTasklist`.
-  Parent candidates are other open top-level tasks that Google permits as
-  parents; optimistic parent changes retain rollback context and task-ID
-  selection. Tasks with children and completed-hidden tasks cannot become
-  subtasks. Unparenting sets `previous` to the former parent so promotion does
-  not jump to the top of the list.
-- Reorders move a task among its open siblings under the same parent with
-  `tasks.move` (`previous` = the sibling to land after, none for first).
-  Google stores positions as dense counters and renumbers siblings on every
-  move, so the worker reloads the list after the move and that reload replaces
-  the optimistic positions. Never patch sibling positions by guessing.
+- Same-list reparenting and reordering are both `Op::Place`: `tasks.move`
+  without `destinationTasklist`, followed by a reload of the list. Google
+  stores positions as dense counters and renumbers siblings on every move, so
+  the reload replaces the optimistic positions. Never patch sibling positions
+  by guessing.
+- Parent candidates are other open top-level tasks that Google permits as
+  parents; selection follows the task ID. Tasks with children and
+  completed-hidden tasks cannot become subtasks. Unparenting sets `previous`
+  to the former parent so promotion does not jump to the top of the list.
+- Reorders move a task among its open siblings under the same parent
+  (`previous` = the sibling to land after, none for first).
   Presses made while the same task's reorder is saving move it locally and
   are sent as one follow-up move once the save lands. A failure restores the
   list from before the first press and drops the queued presses.

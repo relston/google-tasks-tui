@@ -1,269 +1,180 @@
+//! The background thread that talks to Google. Commands arrive one at a
+//! time, so mutations are serialized behind any refresh in progress.
+
 use std::sync::mpsc::{Receiver, Sender};
 
-use crate::google::{CreateTask, MoveTask, TaskPatch, TasksApi};
+use crate::google::{CreateTask, Error, MoveTask, TaskPatch, TasksApi};
 use crate::model::{Task, TaskList};
 
-pub(super) enum Cmd {
-    Refresh(u64),
+/// A change to make in Google.
+pub(super) enum Op {
     Patch {
-        operation: u64,
-        list_id: String,
-        task_id: String,
+        list: String,
+        task: String,
         patch: TaskPatch,
         etag: String,
     },
-    Delete {
-        operation: u64,
-        list_id: String,
-        task_id: String,
-        etag: String,
-    },
     Create {
-        operation: u64,
-        list_id: String,
+        list: String,
         task: CreateTask,
         parent: Option<String>,
-        selection: Option<String>,
     },
-    Move {
-        operation: u64,
+    Delete {
+        list: String,
+        task: String,
+        etag: String,
+    },
+    /// Move a task and its subtasks into another list, then reload both lists.
+    MoveToList {
         from: String,
         to: String,
         ids: Vec<String>,
     },
-    Reparent {
-        operation: u64,
-        list_id: String,
-        task_id: String,
+    /// Reparent or reorder within a list. Google renumbers siblings when a
+    /// task moves, so the list is reloaded to learn every new position.
+    Place {
+        list: String,
+        task: String,
         parent: Option<String>,
         previous: Option<String>,
     },
-    /// A one-step reorder. Google renumbers siblings when a task moves, so
-    /// the list is fetched again to learn every new position.
-    Reorder {
-        operation: u64,
-        list_id: String,
-        task_id: String,
-        parent: Option<String>,
-        previous: Option<String>,
+}
+
+/// What Google says is true after an operation.
+#[derive(Default)]
+pub(super) struct Outcome {
+    /// Lists Google sent back in full.
+    pub replaced: Vec<(String, Vec<Task>)>,
+    /// Single tasks Google returned.
+    pub upserted: Vec<(String, Task)>,
+    /// Part of the operation landed, but the board needs a refresh.
+    pub warning: Option<Warning>,
+}
+
+pub(super) enum Warning {
+    PartialMove {
+        moved: usize,
+        failed: String,
+        error: Error,
     },
+    ReloadFailed(Error),
+}
+
+pub(super) enum Cmd {
+    Refresh(u64),
+    Run { id: u64, op: Op },
 }
 
 pub(super) enum Msg {
-    Lists(u64, Result<Vec<TaskList>, String>),
-    Tasks(u64, String, Result<Vec<Task>, String>),
-    Updated {
-        operation: u64,
-        list_id: String,
-        task_id: String,
-        result: Result<Task, String>,
+    Lists(u64, Result<Vec<TaskList>, Error>),
+    Tasks(u64, String, Result<Vec<Task>, Error>),
+    Finished {
+        id: u64,
+        result: Result<Outcome, Error>,
     },
-    Deleted {
-        operation: u64,
-        list_id: String,
-        task_id: String,
-        result: Result<(), String>,
-    },
-    Created {
-        operation: u64,
-        list_id: String,
-        selection: Option<String>,
-        result: Result<Task, String>,
-    },
-    Moved {
-        operation: u64,
-        from: String,
-        to: String,
-        ids: Vec<String>,
-        result: MoveOutcome,
-    },
-    Reparented {
-        operation: u64,
-        list_id: String,
-        task_id: String,
-        parent: Option<String>,
-        result: Result<Task, String>,
-    },
-    Reordered {
-        operation: u64,
-        list_id: String,
-        task_id: String,
-        parent: Option<String>,
-        result: Result<Task, String>,
-        /// The list after the move, fetched only when the move succeeded.
-        tasks: Option<Result<Vec<Task>, String>>,
-    },
-}
-
-pub(super) struct MoveFailure {
-    pub task_id: String,
-    pub error: String,
-}
-
-pub(super) struct MoveOutcome {
-    pub moved: Vec<Task>,
-    pub failure: Option<MoveFailure>,
-    pub source: Result<Vec<Task>, String>,
-    pub destination: Result<Vec<Task>, String>,
 }
 
 pub(super) fn worker<A: TasksApi>(mut client: A, commands: Receiver<Cmd>, output: Sender<Msg>) {
     for command in commands {
-        let sent = match command {
-            Cmd::Create {
-                operation,
-                list_id,
-                task,
-                parent,
-                selection,
-            } => output.send(Msg::Created {
-                operation,
-                result: client
-                    .create(&list_id, &task, parent.as_deref())
-                    .map_err(|error| error.to_string()),
-                list_id,
-                selection,
-            }),
-            Cmd::Delete {
-                operation,
-                list_id,
-                task_id,
-                etag,
-            } => output.send(Msg::Deleted {
-                operation,
-                result: client
-                    .delete(&list_id, &task_id, Some(&etag))
-                    .map_err(|error| error.to_string()),
-                list_id,
-                task_id,
-            }),
-            Cmd::Patch {
-                operation,
-                list_id,
-                task_id,
-                patch,
-                etag,
-            } => output.send(Msg::Updated {
-                operation,
-                result: client
-                    .patch(&list_id, &task_id, &patch, Some(&etag))
-                    .map_err(|error| error.to_string()),
-                list_id,
-                task_id,
-            }),
-            Cmd::Move {
-                operation,
-                from,
-                to,
-                ids,
-            } => {
-                let mut moved = Vec::new();
-                let mut failure = None;
-                let requests = move_requests(&to, &ids);
-                if requests.is_empty() {
-                    failure = Some(MoveFailure {
-                        task_id: String::new(),
-                        error: "no task".into(),
-                    });
-                } else {
-                    for (id, movement) in requests {
-                        match client.move_task(&from, &id, &movement) {
-                            Ok(task) => moved.push(task),
-                            Err(error) => {
-                                failure = Some(MoveFailure {
-                                    task_id: id,
-                                    error: error.to_string(),
-                                });
-                                break;
-                            }
-                        }
-                    }
+        match command {
+            Cmd::Run { id, op } => {
+                let result = execute(&mut client, op);
+                if output.send(Msg::Finished { id, result }).is_err() {
+                    return;
                 }
-                let source = client.tasks(&from).map_err(|error| error.to_string());
-                let destination = client.tasks(&to).map_err(|error| error.to_string());
-                output.send(Msg::Moved {
-                    operation,
-                    from,
-                    to,
-                    ids,
-                    result: MoveOutcome {
-                        moved,
-                        failure,
-                        source,
-                        destination,
-                    },
-                })
-            }
-            Cmd::Reparent {
-                operation,
-                list_id,
-                task_id,
-                parent,
-                previous,
-            } => output.send(Msg::Reparented {
-                operation,
-                result: client
-                    .move_task(
-                        &list_id,
-                        &task_id,
-                        &MoveTask {
-                            destination_list: None,
-                            parent: parent.clone(),
-                            previous,
-                        },
-                    )
-                    .map_err(|error| error.to_string()),
-                list_id,
-                task_id,
-                parent,
-            }),
-            Cmd::Reorder {
-                operation,
-                list_id,
-                task_id,
-                parent,
-                previous,
-            } => {
-                let result = client
-                    .move_task(
-                        &list_id,
-                        &task_id,
-                        &MoveTask {
-                            destination_list: None,
-                            parent: parent.clone(),
-                            previous,
-                        },
-                    )
-                    .map_err(|error| error.to_string());
-                let tasks = result
-                    .is_ok()
-                    .then(|| client.tasks(&list_id).map_err(|error| error.to_string()));
-                output.send(Msg::Reordered {
-                    operation,
-                    list_id,
-                    task_id,
-                    parent,
-                    result,
-                    tasks,
-                })
             }
             Cmd::Refresh(generation) => {
-                let lists = client.tasklists().map_err(|error| error.to_string());
+                let lists = client.tasklists();
                 let ids: Vec<String> = lists.iter().flatten().map(|list| list.id.clone()).collect();
                 if output.send(Msg::Lists(generation, lists)).is_err() {
                     return;
                 }
                 for id in ids {
-                    let tasks = client.tasks(&id).map_err(|error| error.to_string());
+                    let tasks = client.tasks(&id);
                     if output.send(Msg::Tasks(generation, id, tasks)).is_err() {
                         return;
                     }
                 }
-                continue;
             }
-        };
-        if sent.is_err() {
-            return;
+        }
+    }
+}
+
+fn execute<A: TasksApi>(client: &mut A, op: Op) -> Result<Outcome, Error> {
+    match op {
+        Op::Patch {
+            list,
+            task,
+            patch,
+            etag,
+        } => {
+            let task = client.patch(&list, &task, &patch, Some(&etag))?;
+            Ok(Outcome {
+                upserted: vec![(list, task)],
+                ..Outcome::default()
+            })
+        }
+        Op::Create { list, task, parent } => {
+            let task = client.create(&list, &task, parent.as_deref())?;
+            Ok(Outcome {
+                upserted: vec![(list, task)],
+                ..Outcome::default()
+            })
+        }
+        Op::Delete { list, task, etag } => {
+            client.delete(&list, &task, Some(&etag))?;
+            Ok(Outcome::default())
+        }
+        Op::MoveToList { from, to, ids } => {
+            let mut moved = 0;
+            let mut warning = None;
+            for (id, movement) in move_requests(&to, &ids) {
+                match client.move_task(&from, &id, &movement) {
+                    Ok(_) => moved += 1,
+                    Err(error) => {
+                        warning = Some(Warning::PartialMove {
+                            moved,
+                            failed: id,
+                            error,
+                        });
+                        break;
+                    }
+                }
+            }
+            let source = client.tasks(&from)?;
+            let destination = client.tasks(&to)?;
+            Ok(Outcome {
+                replaced: vec![(from, source), (to, destination)],
+                upserted: Vec::new(),
+                warning,
+            })
+        }
+        Op::Place {
+            list,
+            task,
+            parent,
+            previous,
+        } => {
+            let moved = client.move_task(
+                &list,
+                &task,
+                &MoveTask {
+                    destination_list: None,
+                    parent,
+                    previous,
+                },
+            )?;
+            Ok(match client.tasks(&list) {
+                Ok(tasks) => Outcome {
+                    replaced: vec![(list, tasks)],
+                    ..Outcome::default()
+                },
+                Err(error) => Outcome {
+                    upserted: vec![(list, moved)],
+                    warning: Some(Warning::ReloadFailed(error)),
+                    ..Outcome::default()
+                },
+            })
         }
     }
 }
@@ -290,13 +201,14 @@ pub(super) fn move_requests(destination: &str, ids: &[String]) -> Vec<(String, M
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::google::{Error, ListPatch, Result};
+    use crate::google::{ListPatch, Result};
     use std::sync::{mpsc, Arc, Mutex};
 
     #[derive(Clone, Default)]
     struct Fake {
         calls: Arc<Mutex<Vec<String>>>,
         fail_move: Option<String>,
+        fail_tasks: bool,
     }
 
     impl Fake {
@@ -324,6 +236,9 @@ mod tests {
 
         fn tasks(&mut self, list_id: &str) -> Result<Vec<Task>> {
             self.record(format!("tasks:{list_id}"));
+            if self.fail_tasks {
+                return Err(Error::Timeout);
+            }
             Ok(vec![Task {
                 id: format!("{list_id}-task"),
                 ..Default::default()
@@ -410,22 +325,56 @@ mod tests {
         }
     }
 
-    fn run_one(fake: Fake, command: Cmd) -> Msg {
+    fn run(fake: Fake, op: Op) -> (u64, std::result::Result<Outcome, Error>) {
         let (commands, input) = mpsc::channel();
         let (output, messages) = mpsc::channel();
-        commands.send(command).unwrap();
+        commands.send(Cmd::Run { id: 42, op }).unwrap();
         drop(commands);
         worker(fake, input, output);
-        messages.recv().unwrap()
+        match messages.recv().unwrap() {
+            Msg::Finished { id, result } => (id, result),
+            _ => panic!("expected a finished operation"),
+        }
+    }
+
+    fn list_ids(outcome: &Outcome) -> Vec<&str> {
+        outcome
+            .replaced
+            .iter()
+            .map(|(list, _)| list.as_str())
+            .collect()
     }
 
     #[test]
-    fn move_executes_parent_then_ordered_children_and_preserves_context() {
+    fn replies_carry_the_operation_id_and_googles_task() {
         let fake = Fake::default();
-        let message = run_one(
+        let (id, result) = run(
             fake.clone(),
-            Cmd::Move {
-                operation: 42,
+            Op::Patch {
+                list: "list".into(),
+                task: "task".into(),
+                patch: TaskPatch {
+                    title: Some("changed".into()),
+                    ..Default::default()
+                },
+                etag: "\"v1\"".into(),
+            },
+        );
+
+        assert_eq!(id, 42);
+        assert_eq!(fake.calls(), ["patch:list:task:\"v1\""]);
+        let outcome = result.unwrap();
+        assert_eq!(outcome.upserted.len(), 1);
+        assert_eq!(outcome.upserted[0].0, "list");
+        assert_eq!(outcome.upserted[0].1.id, "task");
+    }
+
+    #[test]
+    fn move_executes_parent_then_ordered_children_and_reloads_both_lists() {
+        let fake = Fake::default();
+        let (_, result) = run(
+            fake.clone(),
+            Op::MoveToList {
                 from: "source".into(),
                 to: "destination".into(),
                 ids: vec!["parent".into(), "first".into(), "second".into()],
@@ -442,56 +391,26 @@ mod tests {
                 "tasks:destination",
             ]
         );
-        let Msg::Moved {
-            operation,
-            from,
-            to,
-            ids,
-            result,
-        } = message
-        else {
-            panic!("expected move result");
-        };
-        assert_eq!(operation, 42);
-        assert_eq!(from, "source");
-        assert_eq!(to, "destination");
-        assert_eq!(ids, ["parent", "first", "second"]);
-        assert_eq!(result.moved.len(), 3);
-        assert!(result.failure.is_none());
-        assert!(result.source.is_ok());
-        assert!(result.destination.is_ok());
+        let outcome = result.unwrap();
+        assert_eq!(list_ids(&outcome), ["source", "destination"]);
+        assert!(outcome.warning.is_none());
     }
 
     #[test]
-    fn partial_move_stops_at_failure_and_still_reconciles_both_lists() {
+    fn partial_move_stops_at_failure_and_still_reloads_both_lists() {
         let fake = Fake {
             fail_move: Some("first".into()),
             ..Default::default()
         };
-        let message = run_one(
+        let (_, result) = run(
             fake.clone(),
-            Cmd::Move {
-                operation: 7,
+            Op::MoveToList {
                 from: "source".into(),
                 to: "destination".into(),
                 ids: vec!["parent".into(), "first".into(), "never".into()],
             },
         );
 
-        let Msg::Moved { result, .. } = message else {
-            panic!("expected move result");
-        };
-        assert_eq!(
-            result
-                .moved
-                .iter()
-                .map(|task| task.id.as_str())
-                .collect::<Vec<_>>(),
-            ["parent"]
-        );
-        let failure = result.failure.unwrap();
-        assert_eq!(failure.task_id, "first");
-        assert!(failure.error.contains("first failed"));
         assert_eq!(
             fake.calls(),
             [
@@ -501,127 +420,100 @@ mod tests {
                 "tasks:destination",
             ]
         );
-    }
-
-    #[test]
-    fn mutation_responses_echo_operation_and_resource_context() {
-        let message = run_one(
-            Fake::default(),
-            Cmd::Patch {
-                operation: 99,
-                list_id: "list".into(),
-                task_id: "task".into(),
-                patch: TaskPatch {
-                    title: Some("changed".into()),
-                    ..Default::default()
-                },
-                etag: "\"v1\"".into(),
-            },
-        );
-
-        let Msg::Updated {
-            operation,
-            list_id,
-            task_id,
-            result,
-        } = message
+        let outcome = result.unwrap();
+        assert_eq!(list_ids(&outcome), ["source", "destination"]);
+        let Some(Warning::PartialMove {
+            moved,
+            failed,
+            error,
+        }) = outcome.warning
         else {
-            panic!("expected update result");
+            panic!("expected a partial move");
         };
-        assert_eq!(
-            (operation, list_id.as_str(), task_id.as_str()),
-            (99, "list", "task")
-        );
-        assert_eq!(result.unwrap().id, "task");
+        assert_eq!((moved, failed.as_str()), (1, "first"));
+        assert!(error.to_string().contains("first failed"));
     }
 
     #[test]
-    fn unparent_uses_previous_sibling_and_preserves_context() {
+    fn unparent_places_after_the_former_parent_then_reloads_the_list() {
         let fake = Fake::default();
-        let message = run_one(
+        let (_, result) = run(
             fake.clone(),
-            Cmd::Reparent {
-                operation: 7,
-                list_id: "list".into(),
-                task_id: "child".into(),
+            Op::Place {
+                list: "list".into(),
+                task: "child".into(),
                 parent: None,
                 previous: Some("former-parent".into()),
             },
         );
 
-        assert_eq!(fake.calls(), ["move:list:child:::former-parent"]);
-        let Msg::Reparented {
-            operation,
-            list_id,
-            task_id,
-            parent,
-            result,
-        } = message
-        else {
-            panic!("expected reparent result");
-        };
-        assert_eq!(operation, 7);
-        assert_eq!(list_id, "list");
-        assert_eq!(task_id, "child");
-        assert_eq!(parent, None);
-        assert_eq!(result.unwrap().parent, None);
+        assert_eq!(
+            fake.calls(),
+            ["move:list:child:::former-parent", "tasks:list"]
+        );
+        assert_eq!(list_ids(&result.unwrap()), ["list"]);
     }
 
     #[test]
-    fn reorder_moves_then_reloads_the_list() {
+    fn placing_under_a_parent_moves_then_reloads_the_list() {
         let fake = Fake::default();
-        let message = run_one(
+        let (_, result) = run(
             fake.clone(),
-            Cmd::Reorder {
-                operation: 8,
-                list_id: "list".into(),
-                task_id: "two".into(),
+            Op::Place {
+                list: "list".into(),
+                task: "two".into(),
                 parent: Some("parent".into()),
                 previous: None,
             },
         );
 
         assert_eq!(fake.calls(), ["move:list:two::parent:", "tasks:list"]);
-        let Msg::Reordered {
-            operation,
-            task_id,
-            parent,
-            result,
-            tasks,
-            ..
-        } = message
-        else {
-            panic!("expected reorder result");
-        };
-        assert_eq!((operation, task_id.as_str()), (8, "two"));
-        assert_eq!(parent.as_deref(), Some("parent"));
-        assert!(result.is_ok());
-        assert!(tasks.is_some_and(|tasks| tasks.is_ok()));
+        assert_eq!(list_ids(&result.unwrap()), ["list"]);
     }
 
     #[test]
-    fn failed_reorder_skips_the_reload() {
+    fn a_failed_place_skips_the_reload() {
         let fake = Fake {
             fail_move: Some("two".into()),
             ..Fake::default()
         };
-        let message = run_one(
+        let (_, result) = run(
             fake.clone(),
-            Cmd::Reorder {
-                operation: 9,
-                list_id: "list".into(),
-                task_id: "two".into(),
+            Op::Place {
+                list: "list".into(),
+                task: "two".into(),
                 parent: None,
                 previous: Some("one".into()),
             },
         );
 
         assert_eq!(fake.calls(), ["move:list:two:::one"]);
-        let Msg::Reordered { result, tasks, .. } = message else {
-            panic!("expected reorder result");
-        };
         assert!(result.is_err());
-        assert!(tasks.is_none());
+    }
+
+    #[test]
+    fn a_failed_reload_keeps_the_moved_task_and_warns() {
+        let fake = Fake {
+            fail_tasks: true,
+            ..Fake::default()
+        };
+        let (_, result) = run(
+            fake,
+            Op::Place {
+                list: "list".into(),
+                task: "two".into(),
+                parent: None,
+                previous: None,
+            },
+        );
+
+        let outcome = result.unwrap();
+        assert!(outcome.replaced.is_empty());
+        assert_eq!(outcome.upserted[0].1.id, "two");
+        assert!(matches!(
+            outcome.warning,
+            Some(Warning::ReloadFailed(Error::Timeout))
+        ));
     }
 
     #[test]

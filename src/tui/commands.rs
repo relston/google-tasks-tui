@@ -2,7 +2,7 @@
 //! the mutation that tells Google.
 
 use crate::board::{
-    eligible_parents, move_ids, reorder_after, reorder_step, subtask_parent, ReorderPlan,
+    eligible_parents, move_ids, reorder_after, reorder_step, subtask_parent, Board, ReorderPlan,
 };
 use crate::desktop::{self, Clipboard};
 use crate::google::{CreateTask, TaskPatch};
@@ -12,11 +12,11 @@ use crate::model::{normalize_title, urls_in, Status, Task, TaskList};
 
 use super::app::{App, Interaction, QuitState, Shelf};
 use super::editor::{Edit, EditTarget, FieldId};
-use super::mutation::{MutationContext, PendingOperation};
+use super::mutation::Reorder;
 use super::picker::{Picker, PickerRow};
 use super::sync::{SyncState, READ_ONLY};
 use super::view::text::{clean, title_of};
-use super::worker::Cmd;
+use super::worker::Op;
 
 /// A delete waiting on a y/n answer in the status bar.
 pub(super) struct Pending {
@@ -41,6 +41,14 @@ pub(super) struct ParentPick {
     pub(super) list_id: String,
     pub(super) task_id: String,
     pub(super) picker: Picker,
+}
+
+fn set_positions(board: &mut Board, list_id: &str, positions: &[(String, String)]) {
+    for (task_id, position) in positions {
+        if let Some(task) = board.task_mut(list_id, task_id) {
+            task.position = position.clone();
+        }
+    }
 }
 
 /// Everything the task links to: the links Google attached to it (a Gmail
@@ -173,9 +181,7 @@ impl App {
             return;
         };
         if let EditTarget::New {
-            list_id,
-            parent,
-            selection,
+            list_id, parent, ..
         } = &e.target
         {
             let title = match normalize_title(&e.buf) {
@@ -187,61 +193,65 @@ impl App {
                 }
             };
             self.error = None;
-            let (list_id, parent, selection) = (list_id.clone(), parent.clone(), selection.clone());
-            self.send_mutation(MutationContext::Create(e), |operation| Cmd::Create {
-                operation,
-                list_id,
+            let op = Op::Create {
+                list: list_id.clone(),
                 task: CreateTask {
                     title,
                     ..Default::default()
                 },
-                parent,
-                selection,
-            });
+                parent: parent.clone(),
+            };
+            self.submit_create(e, op);
             return;
         }
-        // Show the change straight away; Google confirms it a moment later.
         let Some((list_id, task_id, field)) = e.existing() else {
             return;
         };
         let (list_id, task_id) = (list_id.to_string(), task_id.to_string());
-        let Some(before) = self.board.task(&list_id, &task_id).cloned() else {
+        let Some(etag) = self
+            .board
+            .task(&list_id, &task_id)
+            .map(|task| task.etag.clone())
+        else {
             self.recover("edited task disappeared".into());
             return;
         };
-        let fields = match field {
-            FieldId::Title => {
-                let title = match normalize_title(&e.buf) {
-                    Ok(title) => title,
-                    Err(error) => {
-                        self.error = Some(error.into());
-                        self.interaction = Interaction::Editing(e);
-                        return;
-                    }
-                };
-                if let Some(task) = self.board.task_mut(&list_id, &task_id) {
-                    task.title = title.clone();
-                }
-                self.rebuild_column(&list_id);
-                TaskPatch {
+        let patch = match field {
+            FieldId::Title => match normalize_title(&e.buf) {
+                Ok(title) => TaskPatch {
                     title: Some(title),
                     ..Default::default()
+                },
+                Err(error) => {
+                    self.error = Some(error.into());
+                    self.interaction = Interaction::Editing(e);
+                    return;
                 }
-            }
-            FieldId::Notes => {
-                let notes = e.buf.trim_end().to_string();
-                if let Some(task) = self.board.task_mut(&list_id, &task_id) {
-                    task.notes = Some(notes.clone()).filter(|notes| !notes.is_empty());
-                }
-                self.rebuild_column(&list_id);
-                TaskPatch {
-                    notes: Some(notes),
-                    ..Default::default()
-                }
-            }
+            },
+            FieldId::Notes => TaskPatch {
+                notes: Some(e.buf.trim_end().to_string()),
+                ..Default::default()
+            },
         };
         self.error = None;
-        self.send_patch(list_id, task_id, fields, before);
+        // Show the change straight away; Google confirms it a moment later.
+        let (title, notes) = (patch.title.clone(), patch.notes.clone());
+        let op = Op::Patch {
+            list: list_id.clone(),
+            task: task_id.clone(),
+            patch,
+            etag,
+        };
+        self.submit("save", op, &[&list_id], |board| {
+            if let Some(task) = board.task_mut(&list_id, &task_id) {
+                if let Some(title) = title {
+                    task.title = title;
+                }
+                if let Some(notes) = notes {
+                    task.notes = Some(notes).filter(|notes| !notes.is_empty());
+                }
+            }
+        });
     }
 
     /// Tick or untick the selected task.
@@ -256,20 +266,29 @@ impl App {
         let Some(task_id) = col.selected_id.clone() else {
             return;
         };
-        let Some(task) = self.board.task_mut(&list_id, &task_id) else {
+        let Some(task) = self.board.task(&list_id, &task_id) else {
             return;
         };
-        let before = task.clone();
-        // Show the new state now; Google's copy replaces it when it answers.
-        task.status = if task.is_done() {
-            task.completed = None;
+        let status = if task.is_done() {
             Status::NeedsAction
         } else {
             Status::Completed
         };
-        let fields = TaskPatch::status(task.status);
-        self.rebuild_column(&list_id);
-        self.send_patch(list_id, task_id, fields, before);
+        let op = Op::Patch {
+            list: list_id.clone(),
+            task: task_id.clone(),
+            patch: TaskPatch::status(status),
+            etag: task.etag.clone(),
+        };
+        // Show the new state now; Google's copy replaces it when it answers.
+        self.submit("save", op, &[&list_id], |board| {
+            if let Some(task) = board.task_mut(&list_id, &task_id) {
+                task.status = status;
+                if status == Status::NeedsAction {
+                    task.completed = None;
+                }
+            }
+        });
     }
 
     /// Ask before deleting; `confirm_delete` does the work after the configured
@@ -312,28 +331,26 @@ impl App {
 
     pub(super) fn confirm_delete(&mut self) {
         let interaction = std::mem::replace(&mut self.interaction, Interaction::Idle);
-        let Interaction::ConfirmDelete(p) = interaction else {
+        let Interaction::ConfirmDelete(pending) = interaction else {
             self.interaction = interaction;
             return;
         };
-        // Drop the task and its subtasks locally; Google cascades the same way.
-        let removed = self.board.remove_tree(&p.list_id, &p.task_id);
-        self.rebuild_column(&p.list_id);
         self.error = None;
-        let (list_id, task_id, etag) = (p.list_id, p.task_id, p.etag);
-        self.send_mutation(
-            MutationContext::Delete {
-                list_id: list_id.clone(),
-                task_id: task_id.clone(),
-                removed,
-            },
-            |operation| Cmd::Delete {
-                operation,
-                list_id,
-                task_id,
-                etag,
-            },
-        );
+        let Pending {
+            list_id,
+            task_id,
+            etag,
+            ..
+        } = pending;
+        let op = Op::Delete {
+            list: list_id.clone(),
+            task: task_id.clone(),
+            etag,
+        };
+        // Drop the task and its subtasks locally; Google cascades the same way.
+        self.submit("delete", op, &[&list_id], |board| {
+            board.remove_tree(&list_id, &task_id);
+        });
     }
 
     /// Copy the selected task as markdown, ready to paste into a note.
@@ -498,31 +515,22 @@ impl App {
         parent: Option<String>,
         previous: Option<String>,
     ) {
-        let Some(before) = self.board.task(list_id, task_id).cloned() else {
+        if self.board.task(list_id, task_id).is_none() {
             self.error = Some("task disappeared before it could move".into());
             return;
-        };
-        if let Some(task) = self.board.task_mut(list_id, task_id) {
-            task.parent = parent.clone();
         }
-        self.rebuild_column(list_id);
         self.error = None;
-        let list_id = list_id.to_string();
-        let task_id = task_id.to_string();
-        self.send_mutation(
-            MutationContext::Reparent {
-                list_id: list_id.clone(),
-                task_id: task_id.clone(),
-                before: Box::new(before),
-            },
-            |operation| Cmd::Reparent {
-                operation,
-                list_id,
-                task_id,
-                parent,
-                previous,
-            },
-        );
+        let op = Op::Place {
+            list: list_id.into(),
+            task: task_id.into(),
+            parent: parent.clone(),
+            previous,
+        };
+        self.submit("reparent", op, &[list_id], |board| {
+            if let Some(task) = board.task_mut(list_id, task_id) {
+                task.parent = parent;
+            }
+        });
     }
 
     /// Move the selected task one place among its open siblings. Presses made
@@ -537,17 +545,11 @@ impl App {
         };
         let list_id = column.list.id.clone();
         let task_id = selected.task.id.clone();
-        let queue = matches!(
-            &self.pending_operation,
-            Some(PendingOperation {
-                context: MutationContext::Reorder {
-                    list_id: pending_list,
-                    task_id: pending_task,
-                    ..
-                },
-                ..
-            }) if *pending_list == list_id && *pending_task == task_id
-        );
+        let queue = self
+            .pending_operation
+            .as_ref()
+            .and_then(|pending| pending.reorder.as_ref())
+            .is_some_and(|reorder| reorder.list_id == list_id && reorder.task_id == task_id);
         if queue && self.sync != SyncState::Ready {
             self.error = Some(READ_ONLY.into());
             return;
@@ -568,12 +570,12 @@ impl App {
             return;
         }
         self.apply_positions(&list_id, &plan.positions);
-        if let Some(PendingOperation {
-            context: MutationContext::Reorder { queued, .. },
-            ..
-        }) = &mut self.pending_operation
+        if let Some(reorder) = self
+            .pending_operation
+            .as_mut()
+            .and_then(|pending| pending.reorder.as_mut())
         {
-            *queued = true;
+            reorder.queued = true;
         }
     }
 
@@ -607,31 +609,28 @@ impl App {
         task_id: String,
         plan: ReorderPlan,
     ) -> bool {
-        let before = self.board.tasks(&list_id);
-        self.apply_positions(&list_id, &plan.positions);
-        self.send_mutation(
-            MutationContext::Reorder {
-                list_id: list_id.clone(),
-                task_id: task_id.clone(),
-                before,
-                queued: false,
-            },
-            |operation| Cmd::Reorder {
-                operation,
+        let op = Op::Place {
+            list: list_id.clone(),
+            task: task_id.clone(),
+            parent: plan.parent,
+            previous: plan.previous,
+        };
+        let positions = plan.positions;
+        let sent = self.submit("reorder", op, &[&list_id], |board| {
+            set_positions(board, &list_id, &positions)
+        });
+        if let Some(pending) = self.pending_operation.as_mut().filter(|_| sent) {
+            pending.reorder = Some(Reorder {
                 list_id,
                 task_id,
-                parent: plan.parent,
-                previous: plan.previous,
-            },
-        )
+                queued: false,
+            });
+        }
+        sent
     }
 
     pub(super) fn apply_positions(&mut self, list_id: &str, positions: &[(String, String)]) {
-        for (task_id, position) in positions {
-            if let Some(task) = self.board.task_mut(list_id, task_id) {
-                task.position = position.clone();
-            }
-        }
+        set_positions(&mut self.board, list_id, positions);
         self.rebuild_column(list_id);
     }
 
@@ -691,29 +690,19 @@ impl App {
         let Some(dest_idx) = self.columns.iter().position(|c| c.list.id == dest_id) else {
             return;
         };
-        let source_before = self.board.tasks(&from_id);
-        let destination_before = self.board.tasks(&dest_id);
-        self.board.move_tree(&from_id, &dest_id, &task_id);
-        self.rebuild_column(&from_id);
-        self.rebuild_column(&dest_id);
-        self.columns[dest_idx].select_id(Some(task_id.clone()));
-        self.focus = dest_idx;
         self.error = None;
-        self.send_mutation(
-            MutationContext::Move {
-                from: from_id.clone(),
-                to: dest_id.clone(),
-                ids: ids.clone(),
-                source_before,
-                destination_before,
-            },
-            |operation| Cmd::Move {
-                operation,
-                from: from_id,
-                to: dest_id,
-                ids,
-            },
-        );
+        let op = Op::MoveToList {
+            from: from_id.clone(),
+            to: dest_id.clone(),
+            ids,
+        };
+        let moved = self.submit("move", op, &[&from_id, &dest_id], |board| {
+            board.move_tree(&from_id, &dest_id, &task_id);
+        });
+        if moved {
+            self.columns[dest_idx].select_id(Some(task_id));
+            self.focus = dest_idx;
+        }
     }
 
     pub(super) fn start_help(&mut self) {
@@ -779,8 +768,8 @@ mod tests {
 
         app.start_move();
         app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-        match commands.recv().unwrap() {
-            Cmd::Move { ids, from, to, .. } => {
+        match sent(&commands) {
+            (_, Op::MoveToList { ids, from, to }) => {
                 assert_eq!(from, "a");
                 assert_eq!(to, "b");
                 assert_eq!(ids, ["open", "done-child"]);
@@ -817,16 +806,15 @@ mod tests {
         assert_eq!(app.columns[0].selected_id.as_deref(), Some("a-two"));
         assert!(app.board.task("a", "a-one").unwrap().is_done());
 
-        let Cmd::Patch { operation, .. } = commands.recv().unwrap() else {
-            panic!("expected patch");
-        };
+        let (operation, _) = sent(&commands);
         let mut saved = task("a-one", None, "1", true);
         saved.title = "A one".into();
-        app.on_msg(Msg::Updated {
-            operation,
-            list_id: "a".into(),
-            task_id: "a-one".into(),
-            result: Ok(saved),
+        app.on_msg(Msg::Finished {
+            id: operation,
+            result: Ok(Outcome {
+                upserted: vec![("a".into(), saved)],
+                ..Outcome::default()
+            }),
         });
 
         assert!(app.error.is_none(), "{:?}", app.error);
@@ -1012,14 +1000,55 @@ mod tests {
         assert_eq!(app.columns[0].selected_id.as_deref(), Some("child"));
         assert!(matches!(
             commands.recv().unwrap(),
-            Cmd::Reparent {
-                list_id,
-                task_id,
+            Cmd::Run {
+                op: Op::Place {
+                list: list_id,
+                task: task_id,
                 parent: None,
                 previous: Some(previous),
                 ..
+            },
+                ..
             } if list_id == "a" && task_id == "child" && previous == "parent"
         ));
+    }
+
+    #[test]
+    fn unparenting_keeps_its_place_after_google_renumbers_siblings() {
+        let (mut app, commands) = app_with_lists(&["a"]);
+        let _ = commands.recv().unwrap(); // startup refresh
+        app.sync = SyncState::Ready;
+        set_tasks(
+            &mut app,
+            "a",
+            vec![
+                task("parent", None, "0", false),
+                task("next", None, "1", false),
+                task("child", Some("parent"), "0", false),
+            ],
+            "child",
+        );
+
+        app.unparent_task();
+        let (id, _) = sent(&commands);
+        // Google lands the child right after its former parent and bumps
+        // every later sibling, so the child's new position equals `next`'s
+        // old one.
+        app.on_msg(finished(
+            id,
+            vec![(
+                "a",
+                vec![
+                    task("parent", None, "0", false),
+                    task("child", None, "1", false),
+                    task("next", None, "2", false),
+                ],
+            )],
+        ));
+
+        assert_eq!(ids(&app, "a"), ["parent", "child", "next"]);
+        assert_eq!(app.columns[0].selected_id.as_deref(), Some("child"));
+        assert!(app.error.is_none(), "{:?}", app.error);
     }
 
     #[test]
@@ -1043,13 +1072,16 @@ mod tests {
 
         assert_eq!(ids(&app, "a"), ["second", "first", "child", "third"]);
         assert_eq!(app.columns[0].selected_id.as_deref(), Some("first"));
-        let Cmd::Reorder {
+        let (
             operation,
-            list_id,
-            task_id,
-            parent,
-            previous,
-        } = commands.recv().unwrap()
+            Op::Place {
+                list: list_id,
+                task: task_id,
+                parent,
+                previous,
+                ..
+            },
+        ) = sent(&commands)
         else {
             panic!("expected a same-list move");
         };
@@ -1066,19 +1098,18 @@ mod tests {
         // Google renumbers siblings as dense counters: the moved task takes
         // the neighbor's old slot and the neighbor is bumped. The reloaded
         // list replaces the local guess, so the row stays where it moved.
-        app.on_msg(Msg::Reordered {
+        app.on_msg(finished(
             operation,
-            list_id: "a".into(),
-            task_id: "first".into(),
-            parent: None,
-            result: Ok(task("first", None, "1", false)),
-            tasks: Some(Ok(vec![
-                task("second", None, "0", false),
-                task("first", None, "1", false),
-                task("child", Some("first"), "0", false),
-                task("third", None, "2", false),
-            ])),
-        });
+            vec![(
+                "a",
+                vec![
+                    task("second", None, "0", false),
+                    task("first", None, "1", false),
+                    task("child", Some("first"), "0", false),
+                    task("third", None, "2", false),
+                ],
+            )],
+        ));
         assert_eq!(app.board.task("a", "second").unwrap().position, "0");
         assert_eq!(app.board.task("a", "first").unwrap().position, "1");
         assert_eq!(ids(&app, "a"), ["second", "first", "child", "third"]);
@@ -1108,10 +1139,13 @@ mod tests {
         assert_eq!(ids(&app, "a"), ["parent", "two", "one"]);
         assert!(matches!(
             commands.recv().unwrap(),
-            Cmd::Reorder {
-                task_id,
+            Cmd::Run {
+                op: Op::Place {
+                task: task_id,
                 parent: Some(parent),
                 previous: None,
+                ..
+            },
                 ..
             } if task_id == "two" && parent == "parent"
         ));
@@ -1134,17 +1168,8 @@ mod tests {
 
         app.reorder_task(false);
         assert_eq!(ids(&app, "a"), ["second", "first"]);
-        let Cmd::Reorder { operation, .. } = commands.recv().unwrap() else {
-            panic!("expected a same-list move");
-        };
-        app.on_msg(Msg::Reordered {
-            operation,
-            list_id: "a".into(),
-            task_id: "second".into(),
-            parent: None,
-            result: Err("offline".into()),
-            tasks: None,
-        });
+        let (operation, _) = sent(&commands);
+        app.on_msg(refused(operation));
 
         assert_eq!(ids(&app, "a"), ["first", "second"]);
         assert_eq!(app.board.task("a", "first").unwrap().position, "1");
@@ -1173,16 +1198,14 @@ mod tests {
         );
 
         app.reorder_task(false);
-        let Cmd::Reorder { operation, .. } = commands.recv().unwrap() else {
-            panic!("expected a same-list move");
-        };
-        app.on_msg(Msg::Reordered {
-            operation,
-            list_id: "a".into(),
-            task_id: "second".into(),
-            parent: None,
-            result: Ok(task("second", None, "0", false)),
-            tasks: Some(Err("timeout".into())),
+        let (operation, _) = sent(&commands);
+        app.on_msg(Msg::Finished {
+            id: operation,
+            result: Ok(Outcome {
+                upserted: vec![("a".into(), task("second", None, "0", false))],
+                warning: Some(Warning::ReloadFailed(crate::google::Error::Timeout)),
+                ..Outcome::default()
+            }),
         });
 
         assert_eq!(ids(&app, "a"), ["second", "first"]);
@@ -1224,12 +1247,7 @@ mod tests {
         let down = KeyEvent::new(KeyCode::Char('j'), KeyModifiers::ALT);
 
         app.on_key(down);
-        let Cmd::Reorder {
-            operation,
-            previous,
-            ..
-        } = commands.recv().unwrap()
-        else {
+        let (operation, Op::Place { previous, .. }) = sent(&commands) else {
             panic!("expected a same-list move");
         };
         assert_eq!(previous.as_deref(), Some("b"));
@@ -1240,21 +1258,23 @@ mod tests {
         assert!(app.error.is_none(), "{:?}", app.error);
         assert_eq!(ids(&app, "a"), ["b", "c", "d", "a"]);
 
-        app.on_msg(reordered(operation, "a", &["b", "a", "c", "d"]));
+        app.on_msg(reordered(operation, &["b", "a", "c", "d"]));
         assert_eq!(ids(&app, "a"), ["b", "c", "d", "a"]);
         assert_eq!(app.columns[0].selected_id.as_deref(), Some("a"));
-        let Cmd::Reorder {
+        let (
             operation,
-            task_id,
-            previous,
-            ..
-        } = commands.recv().unwrap()
+            Op::Place {
+                task: task_id,
+                previous,
+                ..
+            },
+        ) = sent(&commands)
         else {
             panic!("expected the queued presses as one move");
         };
         assert_eq!((task_id.as_str(), previous.as_deref()), ("a", Some("d")));
 
-        app.on_msg(reordered(operation, "a", &["b", "c", "d", "a"]));
+        app.on_msg(reordered(operation, &["b", "c", "d", "a"]));
         assert!(commands.try_recv().is_err());
         assert_eq!(ids(&app, "a"), ["b", "c", "d", "a"]);
         assert!(app.pending_operation.is_none());
@@ -1269,17 +1289,18 @@ mod tests {
         reorder_list(&mut app, &["a", "b", "c"]);
 
         app.on_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::ALT));
-        let Cmd::Reorder { operation, .. } = commands.recv().unwrap() else {
-            panic!("expected a same-list move");
-        };
+        let (operation, _) = sent(&commands);
         app.on_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::ALT));
         assert_eq!(ids(&app, "a"), ["a", "b", "c"]);
 
-        app.on_msg(reordered(operation, "a", &["b", "a", "c"]));
+        app.on_msg(reordered(operation, &["b", "a", "c"]));
         assert_eq!(ids(&app, "a"), ["a", "b", "c"]);
         assert!(matches!(
             commands.recv().unwrap(),
-            Cmd::Reorder { task_id, previous: None, .. } if task_id == "a"
+            Cmd::Run {
+                op: Op::Place { task: task_id, previous: None, .. },
+                ..
+            } if task_id == "a"
         ));
     }
 
@@ -1291,20 +1312,11 @@ mod tests {
         reorder_list(&mut app, &["a", "b", "c"]);
 
         app.on_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::ALT));
-        let Cmd::Reorder { operation, .. } = commands.recv().unwrap() else {
-            panic!("expected a same-list move");
-        };
+        let (operation, _) = sent(&commands);
         app.on_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::ALT));
         assert_eq!(ids(&app, "a"), ["b", "c", "a"]);
 
-        app.on_msg(Msg::Reordered {
-            operation,
-            list_id: "a".into(),
-            task_id: "a".into(),
-            parent: None,
-            result: Err("offline".into()),
-            tasks: None,
-        });
+        app.on_msg(refused(operation));
 
         assert_eq!(ids(&app, "a"), ["a", "b", "c"]);
         assert!(matches!(commands.recv().unwrap(), Cmd::Refresh(_)));
@@ -1328,16 +1340,8 @@ mod tests {
         );
 
         app.unparent_task();
-        let Cmd::Reparent { operation, .. } = commands.recv().unwrap() else {
-            panic!("expected reparent command");
-        };
-        app.on_msg(Msg::Reparented {
-            operation,
-            list_id: "a".into(),
-            task_id: "child".into(),
-            parent: None,
-            result: Err("offline".into()),
-        });
+        let (operation, _) = sent(&commands);
+        app.on_msg(refused(operation));
 
         assert_eq!(
             app.board
@@ -1406,10 +1410,13 @@ mod tests {
         );
         assert!(matches!(
             commands.recv().unwrap(),
-            Cmd::Reparent {
-                list_id,
-                task_id,
+            Cmd::Run {
+                op: Op::Place {
+                list: list_id,
+                task: task_id,
                 parent: Some(parent),
+                ..
+            },
                 ..
             } if list_id == "a" && task_id == "selected" && parent == "available"
         ));

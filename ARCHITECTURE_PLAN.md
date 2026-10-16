@@ -151,13 +151,13 @@ mechanical so the diff is easy to review.
 Replace the per-mutation `Cmd`, `Msg`, worker arm, `MutationContext`,
 `on_msg` arm, and `rollback` arm with `Op`, `Outcome`, and snapshot rollback.
 
-- [ ] a) Write lifecycle tests: submit copies and applies; success applies the outcome; failure restores lists and drafts; a warning applies, then recovers.
-- [ ] b) Define `Op` and `Outcome`; make the worker `execute` an `Op` and reply with `Msg::Finished` carrying the typed `google::Error`.
-- [ ] c) Add the pending operation (ID, copied lists, draft, success follow-up, queued reorder) with `submit` and `finish`.
-- [ ] d) Port patch, create, delete, and cross-list move to `submit`.
-- [ ] e) Port reparent and reorder to `Place` with a list reload; add a test that unparenting keeps its place after Google renumbers siblings.
-- [ ] f) Delete `MutationContext`, the per-operation `Cmd` / `Msg` variants, the response-matching checks, and the `rollback` match.
-- [ ] g) Update the mutation invariants in [`CLAUDE.md`](CLAUDE.md).
+- [x] a) Write lifecycle tests: submit copies and applies; success applies the outcome; failure restores lists and drafts; a warning applies, then recovers.
+- [x] b) Define `Op` and `Outcome`; make the worker `execute` an `Op` and reply with `Msg::Finished` carrying the typed `google::Error`.
+- [x] c) Add the pending operation (ID, copied lists, draft, success follow-up, queued reorder) with `submit` and `finish`. (The draft doubles as the success follow-up: a created task is selected only if the selection has not moved since.)
+- [x] d) Port patch, create, delete, and cross-list move to `submit`.
+- [x] e) Port reparent and reorder to `Place` with a list reload; add a test that unparenting keeps its place after Google renumbers siblings.
+- [x] f) Delete `MutationContext`, the per-operation `Cmd` / `Msg` variants, the response-matching checks, and the `rollback` match.
+- [x] g) Update the mutation invariants in [`CLAUDE.md`](CLAUDE.md).
 
 ## Phase 4: One key action table
 

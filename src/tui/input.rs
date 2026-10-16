@@ -186,14 +186,19 @@ mod tests {
             "a-one",
         );
 
-        app.send_patch(
-            "a".into(),
-            "a-one".into(),
-            TaskPatch {
-                title: Some("changed".into()),
-                ..Default::default()
+        app.submit(
+            "save",
+            Op::Patch {
+                list: "a".into(),
+                task: "a-one".into(),
+                patch: TaskPatch {
+                    title: Some("changed".into()),
+                    ..Default::default()
+                },
+                etag: String::new(),
             },
-            task("a-one", None, "1", false),
+            &["a"],
+            |_| {},
         );
         app.on_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
         app.on_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
@@ -208,7 +213,7 @@ mod tests {
             .is_some_and(|error| error.contains("current save")));
         assert_eq!(
             cmds.try_iter()
-                .filter(|command| matches!(command, Cmd::Patch { .. }))
+                .filter(|command| matches!(command, Cmd::Run { .. }))
                 .count(),
             1
         );

@@ -4,6 +4,7 @@
 use ratatui::widgets::ListState;
 
 use crate::cache;
+use crate::google::Error;
 use crate::model::{Task, TaskList};
 
 use super::app::{App, QuitState};
@@ -112,7 +113,7 @@ impl App {
         self.sync == SyncState::Refreshing
     }
 
-    pub(super) fn lists_loaded(&mut self, generation: u64, result: Result<Vec<TaskList>, String>) {
+    pub(super) fn lists_loaded(&mut self, generation: u64, result: Result<Vec<TaskList>, Error>) {
         if generation != self.refresh_generation {
             return;
         }
@@ -120,7 +121,7 @@ impl App {
             Ok(lists) => lists,
             Err(e) => {
                 self.sync = SyncState::Failed;
-                self.error = Some(e);
+                self.error = Some(e.to_string());
                 return;
             }
         };
@@ -162,7 +163,7 @@ impl App {
         &mut self,
         generation: u64,
         id: String,
-        res: Result<Vec<Task>, String>,
+        res: Result<Vec<Task>, Error>,
     ) {
         if generation != self.refresh_generation {
             return;
@@ -209,7 +210,11 @@ mod tests {
             "a".into(),
             Ok(vec![task("a-fresh", None, "1", false)]),
         ));
-        app.on_msg(Msg::Tasks(generation, "b".into(), Err("offline".into())));
+        app.on_msg(Msg::Tasks(
+            generation,
+            "b".into(),
+            Err(crate::google::Error::Transport("offline".into())),
+        ));
 
         assert_ne!(
             app.sync,
@@ -224,14 +229,7 @@ mod tests {
     fn pending_mutations_prevent_cache_snapshots() {
         let (mut app, _cmds) = app_with_lists(&["a"]);
         app.sync = SyncState::Ready;
-        pending(
-            &mut app,
-            MutationContext::Patch {
-                list_id: "a".into(),
-                task_id: "a-cached".into(),
-                before: Box::new(task("a-cached", None, "1", false)),
-            },
-        );
+        pending(&mut app);
 
         assert!(!app.save_cache());
     }

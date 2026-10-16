@@ -249,7 +249,7 @@ impl App {
         match msg {
             Msg::Lists(generation, lists) => self.lists_loaded(generation, lists),
             Msg::Tasks(generation, list_id, tasks) => self.tasks_loaded(generation, list_id, tasks),
-            reply => self.mutation_replied(reply),
+            Msg::Finished { id, result } => self.finish(id, result),
         }
     }
 }
@@ -271,14 +271,7 @@ mod tests {
     #[test]
     fn quit_waits_for_writes_and_a_second_quit_forces_it() {
         let (mut app, _cmds) = app_with_lists(&["a"]);
-        pending(
-            &mut app,
-            MutationContext::Patch {
-                list_id: "a".into(),
-                task_id: "a-cached".into(),
-                before: Box::new(task("a-cached", None, "1", false)),
-            },
-        );
+        pending(&mut app);
 
         app.on_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
         assert!(
@@ -298,14 +291,7 @@ mod tests {
         let mut config = Config::default();
         config.keys.quit = Some(BindingConfig::one("ctrl+x"));
         let (mut app, _cmds) = app_with_lists_and_config(&["a"], config);
-        pending(
-            &mut app,
-            MutationContext::Patch {
-                list_id: "a".into(),
-                task_id: "a-cached".into(),
-                before: Box::new(task("a-cached", None, "1", false)),
-            },
-        );
+        pending(&mut app);
 
         app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
 
@@ -319,19 +305,11 @@ mod tests {
     #[test]
     fn a_waiting_quit_finishes_when_the_last_write_returns() {
         let (mut app, _cmds) = app_with_lists(&["a"]);
-        let operation = pending(
-            &mut app,
-            MutationContext::Create(new_edit("a", Some("a-cached"), "draft")),
-        );
+        let operation = pending(&mut app);
 
         app.on_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
         assert!(!app.should_exit());
-        app.on_msg(Msg::Created {
-            operation,
-            list_id: "a".into(),
-            selection: Some("a-cached".into()),
-            result: Err("offline".into()),
-        });
+        app.on_msg(refused(operation));
 
         assert!(app.pending_operation.is_none());
         assert!(app.should_exit());
@@ -340,14 +318,7 @@ mod tests {
     #[test]
     fn worker_disconnect_does_not_hang_a_waiting_quit() {
         let (mut app, _cmds) = app_with_lists(&["a"]);
-        pending(
-            &mut app,
-            MutationContext::Patch {
-                list_id: "a".into(),
-                task_id: "a-cached".into(),
-                before: Box::new(task("a-cached", None, "1", false)),
-            },
-        );
+        pending(&mut app);
         app.quit = QuitState::Waiting;
 
         app.worker_disconnected();
@@ -369,23 +340,19 @@ mod tests {
         reorder_list(&mut app, &["a", "b", "c"]);
 
         app.on_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::ALT));
-        let Cmd::Reorder { operation, .. } = commands.recv().unwrap() else {
-            panic!("expected a same-list move");
-        };
+        let (operation, _) = sent(&commands);
         app.on_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::ALT));
         app.on_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
         assert!(!app.should_exit());
 
-        app.on_msg(reordered(operation, "a", &["b", "a", "c"]));
+        app.on_msg(reordered(operation, &["b", "a", "c"]));
         assert!(
             !app.should_exit(),
             "the queued move is still a pending write"
         );
-        let Cmd::Reorder { operation, .. } = commands.recv().unwrap() else {
-            panic!("expected the queued presses as one move");
-        };
+        let (operation, _) = sent(&commands);
 
-        app.on_msg(reordered(operation, "a", &["b", "c", "a"]));
+        app.on_msg(reordered(operation, &["b", "c", "a"]));
         assert!(app.should_exit());
     }
 

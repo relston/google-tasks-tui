@@ -233,10 +233,13 @@ mod tests {
         );
         assert!(matches!(
             commands.recv().unwrap(),
-            Cmd::Reorder {
-                task_id,
+            Cmd::Run {
+                op: Op::Place {
+                task: task_id,
                 parent: Some(parent),
                 previous: None,
+                ..
+            },
                 ..
             } if task_id == "two" && parent == "done-parent"
         ));

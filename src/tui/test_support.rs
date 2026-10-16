@@ -88,9 +88,40 @@ pub(super) fn new_edit(list_id: &str, selection: Option<&str>, buf: &str) -> Edi
     }
 }
 
-pub(super) fn pending(app: &mut App, context: MutationContext) -> u64 {
-    app.pending_operation = Some(PendingOperation { id: 1, context });
+/// Mark a save as in flight, as if a command had just been sent.
+pub(super) fn pending(app: &mut App) -> u64 {
+    app.pending_operation = Some(PendingOperation::for_test(1));
     1
+}
+
+/// Google's answer to an operation: these lists, as reloaded.
+pub(super) fn finished(id: u64, lists: Vec<(&str, Vec<Task>)>) -> Msg {
+    Msg::Finished {
+        id,
+        result: Ok(Outcome {
+            replaced: lists
+                .into_iter()
+                .map(|(list, tasks)| (list.to_string(), tasks))
+                .collect(),
+            ..Outcome::default()
+        }),
+    }
+}
+
+/// Google refused an operation.
+pub(super) fn refused(id: u64) -> Msg {
+    Msg::Finished {
+        id,
+        result: Err(crate::google::Error::Transport("offline".into())),
+    }
+}
+
+/// The id of the operation the app just sent.
+pub(super) fn sent(commands: &Receiver<Cmd>) -> (u64, Op) {
+    match commands.recv().unwrap() {
+        Cmd::Run { id, op } => (id, op),
+        Cmd::Refresh(_) => panic!("expected an operation, got a refresh"),
+    }
 }
 
 pub(super) fn shown(app: &App, list_id: &str) -> Vec<(String, u8)> {
@@ -121,25 +152,14 @@ pub(super) fn ids(app: &App, list_id: &str) -> Vec<String> {
         .collect()
 }
 
-pub(super) fn reordered(operation: u64, task_id: &str, list: &[&str]) -> Msg {
-    let tasks: Vec<Task> = list
+/// Google's reloaded list `a` after a reorder, in this order.
+pub(super) fn reordered(id: u64, list: &[&str]) -> Msg {
+    let tasks = list
         .iter()
         .enumerate()
-        .map(|(index, id)| task(id, None, &index.to_string(), false))
+        .map(|(index, task_id)| task(task_id, None, &index.to_string(), false))
         .collect();
-    let moved = tasks
-        .iter()
-        .find(|task| task.id == task_id)
-        .unwrap()
-        .clone();
-    Msg::Reordered {
-        operation,
-        list_id: "a".into(),
-        task_id: task_id.into(),
-        parent: None,
-        result: Ok(moved),
-        tasks: Some(Ok(tasks)),
-    }
+    finished(id, vec![("a", tasks)])
 }
 
 pub(super) fn reorder_list(app: &mut App, ids: &[&str]) {
