@@ -426,7 +426,7 @@ what you'll use unless `extended-keys` is on.
 Tests inject temporary configuration and theme roots; they do not change
 process-wide environment variables or touch your real files.
 
-## Roadmap
+## Tasks and changes
 
-Deferred feature work and architecture history are tracked in
-[`ROADMAP.md`](ROADMAP.md).
+Open work is tracked in [`TASKS.md`](TASKS.md); notable changes are in
+[`CHANGELOG.md`](CHANGELOG.md).
