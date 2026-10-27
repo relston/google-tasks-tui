@@ -110,6 +110,12 @@ disk, desktop), and the two front ends. Each file name says what it does.
 - Missing themes and disposable cache failures must not crash the app. Remote
   mutation persistence failures must remain visible to the user.
 
+## Tasks and changelog
+
+Open work lives in [`TASKS.md`](TASKS.md). When you finish a task, delete it
+from `TASKS.md` and add a short entry describing the change under today's
+date in [`CHANGELOG.md`](CHANGELOG.md), in the same commit as the work.
+
 ## Verification
 
 Run all required checks before completing work:

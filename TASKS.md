@@ -1,6 +1,6 @@
 # Tasks
 
-Open work, roughly in priority order. Move finished items to
+Open work, roughly in priority order. Delete finished items and log them in
 [`CHANGELOG.md`](CHANGELOG.md).
 
 ## Bugs
