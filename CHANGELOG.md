@@ -4,6 +4,17 @@ Notable changes to google-tasks-tui, newest first. There are no tagged
 releases yet; entries are grouped by date. Open work is tracked in
 [`TASKS.md`](TASKS.md).
 
+## 2026-10-28
+
+### Fixed
+
+- A cross-list move whose tasks moved but whose list reload failed is no
+  longer reported as "move failed" and rolled back. It reports "saved;
+  reloading the list failed" and keeps the partial-move detail. A move where
+  nothing moved still fails and restores the board.
+- Reorder presses queued during a save no longer disappear silently: a
+  refresh mid-save or a failed reload now says "queued reorder dropped".
+
 ## 2026-10-16
 
 ### Added

@@ -48,7 +48,7 @@ pub(super) struct Outcome {
     /// Single tasks Google returned.
     pub upserted: Vec<(String, Task)>,
     /// Part of the operation landed, but the board needs a refresh.
-    pub warning: Option<Warning>,
+    pub warnings: Vec<Warning>,
 }
 
 pub(super) enum Warning {
@@ -127,12 +127,13 @@ fn execute<A: TasksApi>(client: &mut A, op: Op) -> Result<Outcome, Error> {
         }
         Op::MoveToList { from, to, ids } => {
             let mut moved = 0;
-            let mut warning = None;
+            let mut warnings = Vec::new();
             for (id, movement) in move_requests(&to, &ids) {
                 match client.move_task(&from, &id, &movement) {
                     Ok(_) => moved += 1,
+                    Err(error) if moved == 0 => return Err(error),
                     Err(error) => {
-                        warning = Some(Warning::PartialMove {
+                        warnings.push(Warning::PartialMove {
                             moved,
                             failed: id,
                             error,
@@ -141,12 +142,18 @@ fn execute<A: TasksApi>(client: &mut A, op: Op) -> Result<Outcome, Error> {
                     }
                 }
             }
-            let source = client.tasks(&from)?;
-            let destination = client.tasks(&to)?;
+            // Tasks have moved, so a failed reload is a warning, not a failure.
+            let mut replaced = Vec::new();
+            for list in [from, to] {
+                match client.tasks(&list) {
+                    Ok(tasks) => replaced.push((list, tasks)),
+                    Err(error) => warnings.push(Warning::ReloadFailed(error)),
+                }
+            }
             Ok(Outcome {
-                replaced: vec![(from, source), (to, destination)],
+                replaced,
                 upserted: Vec::new(),
-                warning,
+                warnings,
             })
         }
         Op::Place {
@@ -171,7 +178,7 @@ fn execute<A: TasksApi>(client: &mut A, op: Op) -> Result<Outcome, Error> {
                 },
                 Err(error) => Outcome {
                     upserted: vec![(list, moved)],
-                    warning: Some(Warning::ReloadFailed(error)),
+                    warnings: vec![Warning::ReloadFailed(error)],
                     ..Outcome::default()
                 },
             })
@@ -393,7 +400,7 @@ mod tests {
         );
         let outcome = result.unwrap();
         assert_eq!(list_ids(&outcome), ["source", "destination"]);
-        assert!(outcome.warning.is_none());
+        assert!(outcome.warnings.is_empty());
     }
 
     #[test]
@@ -422,15 +429,15 @@ mod tests {
         );
         let outcome = result.unwrap();
         assert_eq!(list_ids(&outcome), ["source", "destination"]);
-        let Some(Warning::PartialMove {
+        let [Warning::PartialMove {
             moved,
             failed,
             error,
-        }) = outcome.warning
+        }] = outcome.warnings.as_slice()
         else {
             panic!("expected a partial move");
         };
-        assert_eq!((moved, failed.as_str()), (1, "first"));
+        assert_eq!((*moved, failed.as_str()), (1, "first"));
         assert!(error.to_string().contains("first failed"));
     }
 
@@ -511,9 +518,89 @@ mod tests {
         assert!(outcome.replaced.is_empty());
         assert_eq!(outcome.upserted[0].1.id, "two");
         assert!(matches!(
-            outcome.warning,
-            Some(Warning::ReloadFailed(Error::Timeout))
+            outcome.warnings.as_slice(),
+            [Warning::ReloadFailed(Error::Timeout)]
         ));
+    }
+
+    #[test]
+    fn a_failed_reload_after_a_move_to_list_warns_instead_of_failing() {
+        let fake = Fake {
+            fail_tasks: true,
+            ..Fake::default()
+        };
+        let (_, result) = run(
+            fake.clone(),
+            Op::MoveToList {
+                from: "source".into(),
+                to: "destination".into(),
+                ids: vec!["parent".into(), "child".into()],
+            },
+        );
+
+        assert_eq!(
+            fake.calls(),
+            [
+                "move:source:parent:destination::",
+                "move:source:child:destination:parent:",
+                "tasks:source",
+                "tasks:destination",
+            ]
+        );
+        let outcome = result.unwrap();
+        assert!(outcome.replaced.is_empty());
+        assert!(matches!(
+            outcome.warnings.as_slice(),
+            [
+                Warning::ReloadFailed(Error::Timeout),
+                Warning::ReloadFailed(Error::Timeout)
+            ]
+        ));
+    }
+
+    #[test]
+    fn a_partial_move_keeps_its_detail_when_the_reload_also_fails() {
+        let fake = Fake {
+            fail_move: Some("child".into()),
+            fail_tasks: true,
+            ..Fake::default()
+        };
+        let (_, result) = run(
+            fake,
+            Op::MoveToList {
+                from: "source".into(),
+                to: "destination".into(),
+                ids: vec!["parent".into(), "child".into()],
+            },
+        );
+
+        assert!(matches!(
+            result.unwrap().warnings.as_slice(),
+            [
+                Warning::PartialMove { moved: 1, .. },
+                Warning::ReloadFailed(_),
+                Warning::ReloadFailed(_)
+            ]
+        ));
+    }
+
+    #[test]
+    fn a_move_to_list_that_moves_nothing_fails_without_reloading() {
+        let fake = Fake {
+            fail_move: Some("parent".into()),
+            ..Fake::default()
+        };
+        let (_, result) = run(
+            fake.clone(),
+            Op::MoveToList {
+                from: "source".into(),
+                to: "destination".into(),
+                ids: vec!["parent".into(), "child".into()],
+            },
+        );
+
+        assert_eq!(fake.calls(), ["move:source:parent:destination::"]);
+        assert!(result.is_err());
     }
 
     #[test]

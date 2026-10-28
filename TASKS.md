@@ -3,23 +3,6 @@
 Open work, roughly in priority order. Delete finished items and log them in
 [`CHANGELOG.md`](CHANGELOG.md).
 
-## Bugs
-
-- [ ] **A successful cross-list move can be reported as "move failed".** In
-  [`src/tui/worker.rs`](src/tui/worker.rs), `Op::MoveToList` reloads both
-  lists with `client.tasks(&from)?` and `client.tasks(&to)?`. If a reload
-  fails after the moves succeeded, the whole op becomes an error: the status
-  says "move failed", the board briefly reverts, and any partial-move detail
-  is lost. Return `Ok` with a `ReloadFailed` warning (combined with the
-  partial-move warning when both apply), as `Op::Place` does.
-- [ ] **Queued reorder presses can disappear without a message.**
-  `send_queued_reorder` in [`src/tui/commands.rs`](src/tui/commands.rs)
-  skips the follow-up move when sync is not `Ready` (for example after `r`
-  mid-save, since `Action::Refresh` is unconditional in
-  [`src/tui/input.rs`](src/tui/input.rs)), and a `ReloadFailed` warning
-  drops the queue without mentioning it. Tell the user the queued reorder
-  was dropped.
-
 ## Improvements
 
 - [ ] Replace the key hints in the bottom status line with a single hint for

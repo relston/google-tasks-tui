@@ -162,25 +162,17 @@ impl App {
                 self.follow_created(draft, &list_id, task_id);
             }
         }
-        match outcome.warning {
-            Some(Warning::PartialMove {
-                moved,
-                failed,
-                error,
-            }) => self.recover(format!(
-                "{} partially completed ({moved} moved); {failed} failed: {error}",
-                pending.label
-            )),
-            Some(Warning::ReloadFailed(error)) => self.recover(format!(
-                "{} saved; reloading the list failed: {error}",
-                pending.label
-            )),
-            None => {
-                if let Some((list_id, task_id, previous)) = queued {
-                    self.send_queued_reorder(list_id, task_id, previous);
-                }
+        if outcome.warnings.is_empty() {
+            if let Some((list_id, task_id, previous)) = queued {
+                self.send_queued_reorder(list_id, task_id, previous);
             }
+            return;
         }
+        let mut message = warning_message(pending.label, &outcome.warnings);
+        if queued.is_some() {
+            message.push_str("; queued reorder dropped");
+        }
+        self.recover(message);
     }
 
     /// Select a new task if the user is still where they created it.
@@ -238,11 +230,57 @@ impl App {
     }
 }
 
+/// Describe what landed and what still needs a refresh.
+fn warning_message(label: &str, warnings: &[Warning]) -> String {
+    let partial = warnings
+        .iter()
+        .any(|warning| matches!(warning, Warning::PartialMove { .. }));
+    let mut parts = Vec::new();
+    if !partial {
+        parts.push("saved".to_string());
+    }
+    for warning in warnings {
+        parts.push(match warning {
+            Warning::PartialMove {
+                moved,
+                failed,
+                error,
+            } => format!("partially completed ({moved} moved); {failed} failed: {error}"),
+            Warning::ReloadFailed(error) => format!("reloading the list failed: {error}"),
+        });
+    }
+    parts.dedup();
+    format!("{label} {}", parts.join("; "))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::google::Error;
     use crate::tui::test_support::*;
+
+    #[test]
+    fn warning_messages_keep_partial_detail_and_name_reload_failures() {
+        let reload = || Warning::ReloadFailed(Error::Timeout);
+        let partial = Warning::PartialMove {
+            moved: 1,
+            failed: "child".into(),
+            error: Error::Timeout,
+        };
+        let timeout = Error::Timeout.to_string();
+
+        assert_eq!(
+            warning_message("move", &[reload(), reload()]),
+            format!("move saved; reloading the list failed: {timeout}")
+        );
+        assert_eq!(
+            warning_message("move", &[partial, reload()]),
+            format!(
+                "move partially completed (1 moved); child failed: {timeout}; \
+                 reloading the list failed: {timeout}"
+            )
+        );
+    }
 
     fn patch_title(app: &mut App, title: &str) -> bool {
         let title = title.to_string();
@@ -309,7 +347,7 @@ mod tests {
                         ..task("a-cached", None, "0", false)
                     },
                 )],
-                warning: None,
+                warnings: Vec::new(),
             }),
         });
 
@@ -377,7 +415,7 @@ mod tests {
                         ..task("a-cached", None, "0", false)
                     },
                 )],
-                warning: Some(Warning::ReloadFailed(Error::Timeout)),
+                warnings: vec![Warning::ReloadFailed(Error::Timeout)],
             }),
         });
 
@@ -681,11 +719,11 @@ mod tests {
                     ("b".into(), vec![there, moved_parent]),
                 ],
                 upserted: Vec::new(),
-                warning: Some(Warning::PartialMove {
+                warnings: vec![Warning::PartialMove {
                     moved: 1,
                     failed: "child".into(),
                     error: Error::Transport("cannot move assigned task".into()),
-                }),
+                }],
             }),
         });
 

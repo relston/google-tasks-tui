@@ -587,7 +587,11 @@ impl App {
         task_id: String,
         previous: Option<String>,
     ) {
-        if self.sync != SyncState::Ready || self.quit == QuitState::Now {
+        if self.quit == QuitState::Now {
+            return;
+        }
+        if self.sync != SyncState::Ready {
+            self.error = Some("queued reorder dropped: the board is refreshing".into());
             return;
         }
         let rows = self.board.rows(&list_id);
@@ -1203,7 +1207,7 @@ mod tests {
             id: operation,
             result: Ok(Outcome {
                 upserted: vec![("a".into(), task("second", None, "0", false))],
-                warning: Some(Warning::ReloadFailed(crate::google::Error::Timeout)),
+                warnings: vec![Warning::ReloadFailed(crate::google::Error::Timeout)],
                 ..Outcome::default()
             }),
         });
@@ -1322,6 +1326,56 @@ mod tests {
         assert!(matches!(commands.recv().unwrap(), Cmd::Refresh(_)));
         assert!(commands.try_recv().is_err());
         assert!(app.pending_operation.is_none());
+    }
+
+    #[test]
+    fn a_refresh_during_a_reorder_drops_queued_presses_with_a_message() {
+        let (mut app, commands) = app_with_lists(&["a"]);
+        let _ = commands.recv().unwrap(); // startup refresh
+        app.sync = SyncState::Ready;
+        reorder_list(&mut app, &["a", "b", "c"]);
+
+        app.on_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::ALT));
+        let (operation, _) = sent(&commands);
+        app.on_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::ALT));
+        app.refresh();
+        assert!(matches!(commands.recv().unwrap(), Cmd::Refresh(_)));
+
+        app.on_msg(reordered(operation, &["b", "a", "c"]));
+
+        assert!(commands.try_recv().is_err());
+        assert_eq!(
+            app.error.as_deref(),
+            Some("queued reorder dropped: the board is refreshing")
+        );
+    }
+
+    #[test]
+    fn a_failed_reload_mentions_the_dropped_queued_presses() {
+        let (mut app, commands) = app_with_lists(&["a"]);
+        let _ = commands.recv().unwrap(); // startup refresh
+        app.sync = SyncState::Ready;
+        reorder_list(&mut app, &["a", "b", "c"]);
+
+        app.on_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::ALT));
+        let (operation, _) = sent(&commands);
+        app.on_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::ALT));
+        app.on_msg(Msg::Finished {
+            id: operation,
+            result: Ok(Outcome {
+                upserted: vec![("a".into(), task("a", None, "1", false))],
+                warnings: vec![Warning::ReloadFailed(crate::google::Error::Timeout)],
+                ..Outcome::default()
+            }),
+        });
+
+        assert!(matches!(commands.recv().unwrap(), Cmd::Refresh(_)));
+        assert!(commands.try_recv().is_err());
+        assert!(app
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("reorder saved")
+                && error.ends_with("queued reorder dropped")));
     }
 
     #[test]
