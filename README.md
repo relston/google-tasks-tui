@@ -117,7 +117,7 @@ available as subcommands for scripts and agents (`google-tasks-tui lists`,
   `Ctrl-A`/`Ctrl-E`. Changes show immediately; a failed save reports in the
   status bar and resyncs.
 - Colors come from semantic roles: background, foreground, surface, accent,
-  muted, selection, red, green, yellow, blue. By default they use the
+  muted, subtle, selection, red, green, yellow, blue. By default they use the
   terminal's ANSI palette; on Omarchy the roles with no ANSI equivalent come
   from the active `colors.toml`. `[theme]` in `config.toml` overrides any
   role.
@@ -188,7 +188,9 @@ google-tasks-tui --default-config
 ```
 
 In the app, `?` opens the Keyboard overlay, which lists every action with the
-keys it is bound to right now.
+keys it is bound to right now. On the board the status bar shows only that
+key (`? keyboard shortcuts`); editors, pickers, and filters show the keys
+that apply there.
 
 The Keyboard overlay and status hints always show the active bindings.
 Conflicting user bindings report which action won. User overrides displace
@@ -329,9 +331,14 @@ selection = "#3b4252"    # 24-bit
 background = "reset"     # the terminal's default
 ```
 
-Roles: `background`, `foreground`, `surface`, `accent`, `muted`,
+Roles: `background`, `foreground`, `surface`, `accent`, `muted`, `subtle`,
 `selection`, `selection_foreground`, `red`, `green`, `yellow`, `blue`. A
-`selection` of `"reset"` means reverse video. An
+`selection` of `"reset"` means reverse video. `muted` colors lines such as
+inactive column borders; `subtle` colors text that should recede (hints,
+completed tasks, inactive list titles, field labels). When the final
+foreground and background are both 24-bit, `subtle` defaults to the
+foreground faded toward the background until it reaches 4.5:1 contrast;
+otherwise it is ANSI bright black. An
 invalid color is reported in the status bar and the whole config falls back
 to its defaults.
 
@@ -366,6 +373,7 @@ key it finds:
 | `surface`   | `lighter_background`, `color0`                               | `bg`            |
 | `accent`    | `accent`, `color4`                                           | ANSI blue       |
 | `muted`     | `muted`, `dark_foreground`, `color8`                         | ANSI bright black |
+| `subtle`    | derived from `fg` and `bg` (4.5:1 contrast)                  | ANSI bright black |
 | `sel_bg`    | `selection`, `selection_background`                          | reverse video   |
 | `sel_fg`    | `selection_foreground`, `bright_foreground`, `foreground`    | `fg`            |
 

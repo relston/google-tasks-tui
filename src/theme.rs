@@ -11,6 +11,11 @@
 //! `colors.toml`, which exists in the current layout
 //! (~/.local/state/omarchy/current, named keys like `accent`, `muted`) and the
 //! older one (~/.config/omarchy/current, `color0..color15`).
+//!
+//! `muted` is for lines such as inactive borders; Omarchy's `muted` is a
+//! border color that is hard to read as text. Text that should recede (hints,
+//! completed tasks, labels) uses `subtle`, which is derived from the final
+//! foreground and background when both are 24-bit.
 
 use std::{collections::HashMap, env, ffi::OsStr, fmt, fs, path::PathBuf, time::SystemTime};
 
@@ -40,6 +45,7 @@ pub struct Theme {
     pub surface: Color,
     pub accent: Color,
     pub muted: Color,
+    pub subtle: Color,
     pub sel_bg: Color,
     pub sel_fg: Color,
     pub red: Color,
@@ -61,6 +67,7 @@ impl Default for Theme {
             surface: Color::Reset,
             accent: Color::Blue,
             muted: Color::DarkGray,
+            subtle: Color::DarkGray,
             sel_bg: Color::Reset,
             sel_fg: Color::Reset,
             red: Color::Red,
@@ -95,13 +102,14 @@ impl Theme {
         }
     }
 
-    fn roles_mut(&mut self) -> [&mut Color; 11] {
+    fn roles_mut(&mut self) -> [&mut Color; 12] {
         [
             &mut self.bg,
             &mut self.fg,
             &mut self.surface,
             &mut self.accent,
             &mut self.muted,
+            &mut self.subtle,
             &mut self.sel_bg,
             &mut self.sel_fg,
             &mut self.red,
@@ -144,6 +152,7 @@ pub struct ThemeConfig {
     pub surface: Option<ColorSpec>,
     pub accent: Option<ColorSpec>,
     pub muted: Option<ColorSpec>,
+    pub subtle: Option<ColorSpec>,
     pub selection: Option<ColorSpec>,
     pub selection_foreground: Option<ColorSpec>,
     pub red: Option<ColorSpec>,
@@ -154,12 +163,13 @@ pub struct ThemeConfig {
 
 impl ThemeConfig {
     /// Every role key, in the order the config template documents them.
-    pub const ROLES: [&'static str; 11] = [
+    pub const ROLES: [&'static str; 12] = [
         "background",
         "foreground",
         "surface",
         "accent",
         "muted",
+        "subtle",
         "selection",
         "selection_foreground",
         "red",
@@ -175,6 +185,7 @@ impl ThemeConfig {
             self.surface,
             self.accent,
             self.muted,
+            self.subtle,
             self.selection,
             self.selection_foreground,
             self.red,
@@ -432,7 +443,58 @@ pub fn load(config: &ThemeConfig) -> Theme {
 }
 
 fn resolve(config: &ThemeConfig, base: Option<Theme>, support: ColorSupport) -> Theme {
-    config.apply(base.unwrap_or_default()).fit(support)
+    let mut theme = config.apply(base.unwrap_or_default());
+    if config.subtle.is_none() {
+        if let (Color::Rgb(r, g, b), Color::Rgb(br, bgg, bb)) = (theme.fg, theme.bg) {
+            theme.subtle = recede((r, g, b), (br, bgg, bb));
+        }
+    }
+    theme.fit(support)
+}
+
+/// The contrast secondary text aims for: WCAG AA for body text.
+const SUBTLE_CONTRAST: f64 = 4.5;
+
+/// The foreground faded toward the background as far as it can go while
+/// staying readable. A foreground already below the target is kept as is.
+fn recede(fg: Rgb, bg: Rgb) -> Color {
+    let mix = |t: f64| {
+        let channel =
+            |a: u8, b: u8| (f64::from(a) + (f64::from(b) - f64::from(a)) * t).round() as u8;
+        (
+            channel(fg.0, bg.0),
+            channel(fg.1, bg.1),
+            channel(fg.2, bg.2),
+        )
+    };
+    let (mut readable, mut unreadable) = (0.0, 1.0);
+    for _ in 0..16 {
+        let t = (readable + unreadable) / 2.0;
+        if contrast(mix(t), bg) >= SUBTLE_CONTRAST {
+            readable = t;
+        } else {
+            unreadable = t;
+        }
+    }
+    let (r, g, b) = mix(readable);
+    Color::Rgb(r, g, b)
+}
+
+/// WCAG contrast ratio between two colors, from 1 to 21.
+fn contrast(a: Rgb, b: Rgb) -> f64 {
+    let luminance = |(r, g, b): Rgb| {
+        let linear = |c: u8| {
+            let c = f64::from(c) / 255.0;
+            if c <= 0.03928 {
+                c / 12.92
+            } else {
+                ((c + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b)
+    };
+    let (a, b) = (luminance(a), luminance(b));
+    (a.max(b) + 0.05) / (a.min(b) + 0.05)
 }
 
 fn try_load(roots: &Roots) -> Option<Theme> {
@@ -558,6 +620,49 @@ blue = "Bright_Blue"
         ] {
             assert!(parse(raw).is_err(), "{raw:?}");
         }
+    }
+
+    #[test]
+    fn subtle_text_fades_the_foreground_to_a_readable_contrast() {
+        let nord = Theme {
+            bg: Color::Rgb(0x2e, 0x34, 0x40),
+            fg: Color::Rgb(0xd8, 0xde, 0xe9),
+            ..Theme::default()
+        };
+        let t = resolve(&ThemeConfig::default(), Some(nord), ColorSupport::TrueColor);
+        let Color::Rgb(r, g, b) = t.subtle else {
+            panic!("expected a 24-bit subtle color, got {:?}", t.subtle);
+        };
+        let ratio = contrast((r, g, b), (0x2e, 0x34, 0x40));
+        assert!((4.5..4.7).contains(&ratio), "{ratio}");
+
+        // A light theme fades toward its background too.
+        let light = recede((0x4c, 0x4f, 0x69), (0xef, 0xf1, 0xf5));
+        let Color::Rgb(r, g, b) = light else { panic!() };
+        assert!(r > 0x4c && contrast((r, g, b), (0xef, 0xf1, 0xf5)) >= 4.5);
+
+        // A foreground already below the target stays put.
+        assert_eq!(
+            recede((0x60, 0x60, 0x60), (0x40, 0x40, 0x40)),
+            Color::Rgb(0x60, 0x60, 0x60)
+        );
+    }
+
+    #[test]
+    fn subtle_follows_overrides_and_stays_ansi_without_rgb() {
+        let t = resolve(&ThemeConfig::default(), None, ColorSupport::TrueColor);
+        assert_eq!(t.subtle, Color::DarkGray);
+
+        let config = parse("background = \"#000000\"\nforeground = \"#ffffff\"").unwrap();
+        let t = resolve(&config, None, ColorSupport::TrueColor);
+        assert!(matches!(t.subtle, Color::Rgb(r, _, _) if r < 0xff));
+
+        let config =
+            parse("background = \"#000000\"\nforeground = \"#ffffff\"\nsubtle = \"cyan\"").unwrap();
+        assert_eq!(
+            resolve(&config, None, ColorSupport::TrueColor).subtle,
+            Color::Cyan
+        );
     }
 
     #[test]

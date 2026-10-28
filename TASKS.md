@@ -5,13 +5,6 @@ Open work, roughly in priority order. Delete finished items and log them in
 
 ## Improvements
 
-- [ ] Replace the key hints in the bottom status line with a single hint for
-  opening the keyboard shortcuts window (for example `? help`), built from
-  the resolved keymap. Keep the contextual hints for editors, pickers, and
-  confirmations.
-- [ ] Give muted text (hints, inactive titles, completed tasks, field labels)
-  its own theme role, for example Omarchy's `light_foreground`. Omarchy's
-  `muted` is a border color with 1.5–3.0 contrast on most bundled themes.
 - [ ] Decide whether an unknown task `status` from Google should fail the
   whole list. `Status` deserializes strictly, while due dates and timestamps
   are deliberately lenient.

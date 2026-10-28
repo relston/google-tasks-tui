@@ -55,7 +55,10 @@ impl App {
 
         let mut head = vec![
             Span::styled(" Tasks ", t.badge().bold()),
-            Span::styled(format!("  theme: {}", t.name), Style::default().fg(t.muted)),
+            Span::styled(
+                format!("  theme: {}", t.name),
+                Style::default().fg(t.subtle),
+            ),
         ];
         if self.pending_operation.is_some() {
             head.push(Span::styled("  saving…", Style::default().fg(t.yellow)));
@@ -194,9 +197,7 @@ mod tests {
     fn status_hints_use_the_active_keymap() {
         let mut app = one_list_app();
         let mut config = Config::default();
-        config
-            .keys
-            .insert("create_task".into(), BindingConfig::one("n"));
+        config.keys.insert("help".into(), BindingConfig::one("h"));
         let (keymap, diagnostics) = config.keymap();
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
         app.config = config;
@@ -204,8 +205,10 @@ mod tests {
         app.sync = SyncState::Ready;
 
         let screen = render_app(&app, 160, 8);
-        assert!(screen.contains("n new"), "{screen}");
-        assert!(!screen.contains("c new"), "{screen}");
+        assert!(screen.contains("h keyboard shortcuts"), "{screen}");
+        assert!(!screen.contains("? keyboard"), "{screen}");
+        // The board shows only the way into the full list of shortcuts.
+        assert!(!screen.contains("new"), "{screen}");
     }
 
     /// A control character reaching a cell is not cosmetic: printing `\r`

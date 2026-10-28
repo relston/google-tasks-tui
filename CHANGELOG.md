@@ -6,6 +6,18 @@ releases yet; entries are grouped by date. Open work is tracked in
 
 ## 2026-10-28
 
+### Added
+
+- A `subtle` theme role for secondary text: hints, completed tasks, inactive
+  list titles, and field labels. It defaults to the foreground faded toward
+  the background at 4.5:1 contrast, so this text stays readable on every
+  bundled Omarchy theme. `muted` now colors only lines and borders.
+
+### Changed
+
+- The board's status bar shows a single `? keyboard shortcuts` hint instead
+  of every key. Editors, pickers, and filters keep their contextual hints.
+
 ### Fixed
 
 - A cross-list move whose tasks moved but whose list reload failed is no

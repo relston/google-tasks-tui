@@ -43,6 +43,7 @@ const THEME: &str = "\
 # surface = \"reset\"
 # accent = \"blue\"
 # muted = \"bright-black\"
+# subtle = \"bright-black\"
 # selection = \"reset\"
 # selection_foreground = \"reset\"
 # red = \"red\"

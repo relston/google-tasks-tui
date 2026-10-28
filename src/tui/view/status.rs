@@ -87,42 +87,8 @@ impl App {
             ])
         } else if self.sync != SyncState::Ready {
             " syncing with Google… board is read-only until it lands".into()
-        } else if self.shelf.is_open() {
-            self.hints(&[
-                (Action::NextField, "field"),
-                (Action::Edit, "edit"),
-                (Action::CreateTask, "new"),
-                (Action::CreateSubtask, "subtask"),
-                (Action::ChooseParent, "parent"),
-                (Action::ToggleDone, "done"),
-                (Action::ToggleCompleted, "completed"),
-                (Action::CopyTask, "copy"),
-                (Action::BrowseLinks, "link"),
-                (Action::MoveTask, "move"),
-                (Action::DeleteTask, "delete"),
-                (Action::Help, "help"),
-                (Action::Quit, "quit"),
-            ])
         } else {
-            self.hints(&[
-                (Action::PreviousList, "previous list"),
-                (Action::NextList, "next list"),
-                (Action::PreviousTask, "previous task"),
-                (Action::NextTask, "next task"),
-                (Action::ChooseParent, "parent"),
-                (Action::ToggleDone, "done"),
-                (Action::ToggleCompleted, "completed"),
-                (Action::ToggleDetails, "details"),
-                (Action::CreateTask, "new"),
-                (Action::CreateSubtask, "subtask"),
-                (Action::Edit, "edit"),
-                (Action::CopyTask, "copy"),
-                (Action::BrowseLinks, "link"),
-                (Action::MoveTask, "move"),
-                (Action::DeleteTask, "delete"),
-                (Action::Help, "help"),
-                (Action::Quit, "quit"),
-            ])
+            self.hints(&[(Action::Help, "keyboard shortcuts")])
         };
         let pending = match &self.interaction {
             Interaction::ConfirmDelete(pending) => Some(pending),
@@ -135,7 +101,7 @@ impl App {
             ),
             (None, Some(e), _) => Line::styled(format!(" {e}"), Style::default().fg(t.red)),
             (None, None, Some(n)) => Line::styled(format!(" {n}"), Style::default().fg(t.green)),
-            (None, None, None) => Line::styled(hints, Style::default().fg(t.muted)),
+            (None, None, None) => Line::styled(hints, Style::default().fg(t.subtle)),
         };
         f.render_widget(status_line, status);
     }

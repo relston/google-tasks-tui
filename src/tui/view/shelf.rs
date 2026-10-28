@@ -63,7 +63,7 @@ impl App {
         let lines = vec![
             marked(vec![input], true, t).remove(0),
             Line::default(),
-            Line::styled(caption, Style::default().fg(t.muted)),
+            Line::styled(caption, Style::default().fg(t.subtle)),
         ];
         f.render_widget(Paragraph::new(lines), inner);
         f.set_cursor_position((inner.x + 2 + offset as u16, inner.y));
@@ -78,7 +78,7 @@ impl App {
         let Some(row) = col.selected() else { return };
         let task = &row.task;
         let today = Local::now().date_naive();
-        let muted = Style::default().fg(t.muted);
+        let subtle = Style::default().fg(t.subtle);
 
         let block = Block::bordered()
             .border_type(BorderType::Rounded)
@@ -213,7 +213,7 @@ impl App {
         let on_title = self.shelf == Shelf::Open(FieldId::Title);
         f.render_widget(Paragraph::new(marked(title_lines, on_title, t)), title_a);
         f.render_widget(Paragraph::new(marked(meta, false, t)), meta_a);
-        f.render_widget(Line::styled("  Notes", muted.bold()), notes_label_a);
+        f.render_widget(Line::styled("  Notes", subtle.bold()), notes_label_a);
 
         let stored = task.notes.as_deref().unwrap_or("");
         let raw = editing
@@ -223,7 +223,7 @@ impl App {
         let notes_text = cleaned.as_ref();
         let rows = notes_a.height as usize;
         let notes_lines = if notes_text.is_empty() && editing_field != Some(FieldId::Notes) {
-            vec![Line::styled("(none)", muted)]
+            vec![Line::styled("(none)", subtle)]
         } else {
             let segs = wrap(notes_text, w);
             let mut scroll = 0;
@@ -285,7 +285,7 @@ pub(super) fn marked<'a>(lines: Vec<Line<'a>>, focused: bool, t: &Theme) -> Vec<
 
 fn field<'a>(key: &str, value: Span<'a>, t: &Theme) -> Line<'a> {
     Line::from(vec![
-        Span::styled(format!("{key:<11}"), Style::default().fg(t.muted)),
+        Span::styled(format!("{key:<11}"), Style::default().fg(t.subtle)),
         value,
     ])
 }
@@ -306,7 +306,7 @@ pub(super) fn due_color(d: NaiveDate, today: NaiveDate, t: &Theme) -> Color {
     match (d - today).num_days() {
         n if n < 0 => t.red,
         0 => t.yellow,
-        _ => t.muted,
+        _ => t.subtle,
     }
 }
 

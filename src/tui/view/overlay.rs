@@ -46,7 +46,7 @@ impl App {
         let items: Vec<ListItem> = if picker.is_empty() {
             vec![ListItem::new(Line::styled(
                 " no matches",
-                Style::default().fg(t.muted),
+                Style::default().fg(t.subtle),
             ))]
         } else {
             picker
@@ -82,7 +82,7 @@ impl App {
                         // makes it harder to read, and it is not the label.
                         lines.push(Line::styled(
                             format!("  {}", ellipsize(subtitle, text_w.saturating_sub(2))),
-                            Style::default().fg(t.muted),
+                            Style::default().fg(t.subtle),
                         ));
                     }
                     ListItem::new(lines)
@@ -99,7 +99,7 @@ impl App {
         };
         let filter_style = match picker.typing() || !picker.query().is_empty() {
             true => Style::default().fg(t.yellow),
-            false => Style::default().fg(t.muted),
+            false => Style::default().fg(t.subtle),
         };
         let block = Block::bordered()
             .border_type(BorderType::Rounded)

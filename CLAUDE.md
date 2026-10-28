@@ -62,7 +62,9 @@ disk, desktop), and the two front ends. Each file name says what it does.
   ANSI defaults, then Omarchy (`source = "auto"`) for roles with no ANSI
   equivalent, then `[theme]` overrides. It then fits colors to the terminal
   (`NO_COLOR`, 256/16-color fallback). Hue roles stay ANSI; render
-  selections through `Theme::selection()` so they survive `NO_COLOR`.
+  selections through `Theme::selection()` so they survive `NO_COLOR`. Use
+  `muted` only for lines and borders and `subtle` for secondary text;
+  `subtle` is derived from foreground and background to stay readable.
 
 ## Safety invariants
 

@@ -66,7 +66,7 @@ impl App {
                 " No task lists"
             };
             f.render_widget(
-                Paragraph::new(msg).style(Style::default().fg(t.muted)),
+                Paragraph::new(msg).style(Style::default().fg(t.subtle)),
                 area,
             );
             return;
@@ -123,7 +123,7 @@ impl App {
         let col = &self.columns[i];
 
         let open = col.rows.iter().filter(|r| !r.task.is_done()).count();
-        let title_fg = if focused { t.fg } else { t.muted };
+        let title_fg = if focused { t.fg } else { t.subtle };
         let block = Block::bordered()
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(if focused { t.accent } else { t.muted }))
@@ -131,7 +131,7 @@ impl App {
                 format!(" {} ", clean(&col.list.title)),
                 Style::default().fg(title_fg).bold(),
             ))
-            .title(Line::styled(format!(" {open} "), Style::default().fg(t.muted)).right_aligned())
+            .title(Line::styled(format!(" {open} "), Style::default().fg(t.subtle)).right_aligned())
             .style(Style::default().bg(surface));
 
         if col.rows.is_empty() {
@@ -144,7 +144,7 @@ impl App {
             };
             f.render_widget(
                 Paragraph::new(msg)
-                    .style(Style::default().fg(t.muted))
+                    .style(Style::default().fg(t.subtle))
                     .block(block),
                 area,
             );
@@ -191,11 +191,11 @@ pub(super) fn task_item<'a>(
             "✓ ",
             t.green,
             Style::default()
-                .fg(t.muted)
+                .fg(t.subtle)
                 .add_modifier(Modifier::CROSSED_OUT),
         )
     } else {
-        ("○ ", t.muted, Style::default().fg(t.fg))
+        ("○ ", t.subtle, Style::default().fg(t.fg))
     };
     let title = title_of(task);
     // The indent and the ○/✓ marker both eat into the room left for the title.
@@ -223,7 +223,7 @@ pub(super) fn task_item<'a>(
             }
             spans.push(Span::styled(title[from..to].to_string(), style));
             if i == last && noted {
-                spans.push(Span::styled(" ≡", Style::default().fg(t.muted)));
+                spans.push(Span::styled(" ≡", Style::default().fg(t.subtle)));
             }
             Line::from(spans)
         })
