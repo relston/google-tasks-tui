@@ -45,7 +45,8 @@ disk, desktop), and the two front ends. Each file name says what it does.
   drawing uses, applied to the terminal size the event loop records.
 - `Picker` backs every modal list (Browse, Move, Select Parent, Keyboard). Rows carry display
   text plus an opaque `value`, so one `draw_picker` and one `picker_key` serve
-  all three. `/` filters by case-insensitive substring over title and subtitle;
+  all three. `draw_picker` dims the board behind every overlay; the read-only
+  Keyboard card flows into up to three columns, each sized to its entries. `/` filters by case-insensitive substring over title and subtitle;
   selection resets to the top on every query change so it can never point at a
   hidden row. Keep presentation out of app state: rows hold `String`s, not
   `Line`s.

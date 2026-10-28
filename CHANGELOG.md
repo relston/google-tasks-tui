@@ -15,6 +15,11 @@ releases yet; entries are grouped by date. Open work is tracked in
 
 ### Changed
 
+- The Keyboard window is wider and shorter: shortcuts flow into up to three
+  columns, each sized to its own keys, so descriptions are no longer cut
+  off.
+- The board dims behind every overlay (Keyboard, Browse, Move, Select
+  Parent).
 - The board's status bar shows a single `? keyboard shortcuts` hint instead
   of every key. Editors, pickers, and filters keep their contextual hints.
 
