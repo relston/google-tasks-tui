@@ -1,40 +1,42 @@
 # Tasks
 
 Open work, roughly in priority order. Delete finished items and log them in
-[`CHANGELOG.md`](CHANGELOG.md).
+[`CHANGELOG.md`](CHANGELOG.md). Each task keeps its number for good: new
+tasks take the next unused number, and numbers are never reused.
 
 ## Improvements
 
-- [ ] Enable bracketed paste in the TUI. Without it a paste arrives as
+- **1.** Enable bracketed paste in the TUI. Without it a paste arrives as
   keypresses: a newline in a title editor saves the task, and the rest of
   the paste runs as board keys (`d`, `y`, `q`). Push and pop it with the
   other terminal flags, and insert `Event::Paste` text into the editor
   (newlines kept in notes, flattened in titles).
-- [ ] Make the CLI's post-mutation cache update best effort. A failed list
+- **2.** Make the CLI's post-mutation cache update best effort. A failed list
   reload or a malformed cache after a successful create, update, done,
   undone, or delete currently exits 1, and `create` never prints the new
   task, so a script may retry and duplicate it. Print the result, warn on
   stderr, and exit 0.
-- [ ] Decide whether an unknown task `status` from Google should fail the
+- **3.** Decide whether an unknown task `status` from Google should fail the
   whole list. `Status` deserializes strictly, while due dates and timestamps
   are deliberately lenient.
-- [ ] Consider checking mutation responses against the request (task ID,
+- **4.** Consider checking mutation responses against the request (task ID,
   parent) as the pre-refactor handlers did. List reloads cover moves; a
   mismatched patch or create response would add a stray row.
 
 ## Features
 
-- [ ] Edit task due dates in the TUI.
-- [ ] Manage task lists in the TUI.
-- [ ] Expose task moves (reorder, reparent, cross-list) through the CLI.
-- [ ] Search tasks across all lists. A key opens a picker that filters every
-  task by title and notes (case-insensitive substring, like the existing `/`
-  filter), shows each match's list as its subtitle, and on Enter focuses that
-  list and selects the task. Consider a matching CLI `search` command.
+- **5.** Edit task due dates in the TUI.
+- **6.** Manage task lists in the TUI.
+- **7.** Expose task moves (reorder, reparent, cross-list) through the CLI.
+- **8.** Search tasks across all lists. A key opens a picker that filters
+  every task by title and notes (case-insensitive substring, like the
+  existing `/` filter), shows each match's list as its subtitle, and on Enter
+  focuses that list and selects the task. Consider a matching CLI `search`
+  command.
 
 ## Maintenance
 
-- [ ] Reassess `toml` and ratatui upgrades against the chosen MSRV.
+- **9.** Reassess `toml` and ratatui upgrades against the chosen MSRV.
 
 ## Dropped
 

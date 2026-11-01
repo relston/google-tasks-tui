@@ -1,0 +1,9 @@
+{"ts":"2026-09-24T03:20:18.084Z","cmd":"goto","args":"https://issuetracker.google.com/issues?q=tasks%20api%20starred","origin":"https://issuetracker.google.com/issues?q=tasks%20api%20starred","durationMs":965,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-09-24T03:20:20.129Z","cmd":"text","args":"","origin":"https://issuetracker.google.com/issues?q=tasks%20api%20starred","durationMs":7,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-09-24T03:20:25.879Z","cmd":"goto","args":"https://issuetracker.google.com/issues/552675456","origin":"https://issuetracker.google.com/issues/552675456","durationMs":536,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-09-24T03:20:28.921Z","cmd":"text","args":"","origin":"https://issuetracker.google.com/issues/552675456","durationMs":3,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-09-25T06:59:31.466Z","cmd":"goto","args":"https://github.com/herdrdev/herdr","origin":"https://github.com/herdrdev/herdr","durationMs":2120,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-09-25T06:59:34.550Z","cmd":"url","args":"","origin":"https://github.com/herdrdev/herdr","durationMs":7,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-09-25T06:59:34.633Z","cmd":"text","args":"","origin":"https://github.com/herdrdev/herdr","durationMs":17,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-09-25T06:59:46.587Z","cmd":"goto","args":"https://raw.githubusercontent.com/herdrdev/herdr/master/Cargo.toml","origin":"https://raw.githubusercontent.com/herdrdev/herdr/master/Cargo.toml","durationMs":172,"status":"ok","hasCookies":false,"mode":"launched"}
+{"ts":"2026-09-25T06:59:48.669Z","cmd":"text","args":"","origin":"https://raw.githubusercontent.com/herdrdev/herdr/master/Cargo.toml","durationMs":2,"status":"ok","hasCookies":false,"mode":"launched"}
