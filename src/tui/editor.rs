@@ -70,6 +70,20 @@ impl Edit {
         self.cursor += c.len_utf8();
     }
 
+    /// Insert pasted text at the cursor. Titles flatten newlines to spaces;
+    /// notes keep them (normalizing `\r\n` / `\r` to `\n`).
+    pub(super) fn paste(&mut self, text: &str) {
+        let text = match self.field() {
+            FieldId::Title => text
+                .chars()
+                .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
+                .collect::<String>(),
+            FieldId::Notes => text.replace("\r\n", "\n").replace('\r', "\n"),
+        };
+        self.buf.insert_str(self.cursor, &text);
+        self.cursor += text.len();
+    }
+
     pub(super) fn left(&mut self) {
         if let Some((i, _)) = self.buf[..self.cursor].grapheme_indices(true).next_back() {
             self.cursor = i;
@@ -216,5 +230,26 @@ mod tests {
         assert_eq!(e.cursor, 5);
         e.step_visual_line(3, false);
         assert_eq!(e.cursor, 2);
+    }
+
+    #[test]
+    fn paste_flattens_newlines_in_titles_and_keeps_them_in_notes() {
+        let mut title = edit("Buy ");
+        title.paste("milk\nand eggs\rdy");
+        assert_eq!(title.buf, "Buy milk and eggs dy");
+        assert_eq!(title.cursor, title.buf.len());
+
+        let mut notes = Edit {
+            target: EditTarget::Existing {
+                list_id: "l".into(),
+                task_id: "t".into(),
+                field: FieldId::Notes,
+            },
+            buf: "Phase 1\n".into(),
+            cursor: "Phase 1\n".len(),
+        };
+        notes.paste("see PR\r\nand ship\rit");
+        assert_eq!(notes.buf, "Phase 1\nsee PR\nand ship\nit");
+        assert_eq!(notes.cursor, notes.buf.len());
     }
 }

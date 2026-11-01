@@ -8,8 +8,8 @@ use std::{
 use ratatui::{
     crossterm::{
         event::{
-            self, Event, KeyEventKind, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
-            PushKeyboardEnhancementFlags,
+            self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyEventKind,
+            KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
         },
         execute, terminal,
     },
@@ -52,10 +52,10 @@ fn run(term: &mut DefaultTerminal, mut app: App, msgs: Receiver<Msg>) -> std::io
         term.draw(|f| app.draw(f, &mut view))?;
         // Block on input, but wake often enough to pick up API results.
         if event::poll(TICK)? {
-            if let Event::Key(k) = event::read()? {
-                if k.kind == KeyEventKind::Press {
-                    app.on_key(k);
-                }
+            match event::read()? {
+                Event::Key(k) if k.kind == KeyEventKind::Press => app.on_key(k),
+                Event::Paste(text) => app.on_paste(text),
+                _ => {}
             }
         }
         loop {
@@ -105,6 +105,9 @@ impl TerminalGuard<DefaultTerminal> {
             detailed_keys: false,
             restore: restore_terminal,
         };
+        // Paste as one Event::Paste so newlines do not save the editor or
+        // run board keys. DisableBracketedPaste always runs on restore.
+        let _ = execute!(io::stdout(), EnableBracketedPaste);
         guard.detailed_keys = enable_key_detail();
         guard
     }
@@ -117,6 +120,7 @@ impl<T> Drop for TerminalGuard<T> {
 }
 
 fn restore_terminal(detailed_keys: bool) {
+    let _ = execute!(io::stdout(), DisableBracketedPaste);
     if detailed_keys {
         let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags);
     }

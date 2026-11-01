@@ -256,8 +256,8 @@ fn execute(
             let task = api
                 .create(&list.id, &task, parent.as_deref())
                 .map_err(api_fail)?;
-            refresh_cache(api, paths, &list.id)?;
             write_task(out, format, &task)?;
+            refresh_cache(api, paths, &list.id);
         }
         Command::Update {
             task_id,
@@ -292,8 +292,8 @@ fn execute(
             let task = api
                 .patch(&list_id, &task.id, &patch, Some(&task.etag))
                 .map_err(api_fail)?;
-            refresh_cache(api, paths, &list_id)?;
             write_task(out, format, &task)?;
+            refresh_cache(api, paths, &list_id);
         }
         Command::Done { task_id, list } => {
             patch_status(
@@ -326,15 +326,15 @@ fn execute(
             let (list_id, task) = find_task(api, &task_id, list.as_deref())?;
             api.delete(&list_id, &task.id, Some(&task.etag))
                 .map_err(api_fail)?;
-            refresh_cache(api, paths, &list_id)?;
+            refresh_cache(api, paths, &list_id);
         }
         Command::List { cmd } => match cmd {
             ListCmd::Create { title } => {
                 let title = normalize_title(&title)
                     .map_err(|_| Error::Usage("a list needs a title".into()))?;
                 let list = api.create_list(&title).map_err(api_fail)?;
-                cache_upsert_list(api, paths, list.clone())?;
                 write_list(out, format, &list)?;
+                cache_upsert_list(api, paths, list);
             }
             ListCmd::Update { list, title } => {
                 let title = normalize_title(&title)
@@ -344,8 +344,8 @@ fn execute(
                 let list = api
                     .patch_list(&list.id, &ListPatch { title }, Some(&list.etag))
                     .map_err(api_fail)?;
-                cache_upsert_list(api, paths, list.clone())?;
                 write_list(out, format, &list)?;
+                cache_upsert_list(api, paths, list);
             }
             ListCmd::Delete { list, yes } => {
                 let lists = tasklists(api)?;
@@ -358,7 +358,7 @@ fn execute(
                 }
                 let id = list.id.clone();
                 api.delete_list(&id).map_err(api_fail)?;
-                cache_remove_list(api, paths, &id)?;
+                cache_remove_list(api, paths, &id);
             }
         },
     }
@@ -383,8 +383,9 @@ fn patch_status(
             Some(&task.etag),
         )
         .map_err(api_fail)?;
-    refresh_cache(api, paths, &list_id)?;
-    write_task(out, format, &task)
+    write_task(out, format, &task)?;
+    refresh_cache(api, paths, &list_id);
+    Ok(())
 }
 
 fn tasklists(api: &mut impl TasksApi) -> Result<Vec<TaskList>, Error> {
@@ -452,23 +453,34 @@ fn parse_due(d: &str) -> Result<NaiveDate, Error> {
         .map_err(|_| Error::Usage(format!("due date must be YYYY-MM-DD, not {d:?}")))
 }
 
-fn cache_state(api: &impl TasksApi, paths: &Paths) -> Result<(Board, cache::Meta), Error> {
+fn cache_state(api: &impl TasksApi, paths: &Paths) -> Result<(Board, cache::Meta), String> {
     let account = api.account_fingerprint();
-    let (cache, meta) = cache::load_for(paths, &account)
-        .map_err(|error| Error::Fail(format!("reading cache: {error}")))?;
+    let (cache, meta) =
+        cache::load_for(paths, &account).map_err(|error| format!("reading cache: {error}"))?;
     Ok((Board::from_cache(cache), meta))
 }
 
-fn save_board(paths: &Paths, board: &Board, meta: &mut cache::Meta) -> Result<(), Error> {
-    cache::save_for(paths, &board.snapshot(), meta).map_err(|error| {
-        Error::Fail(format!(
-            "Google mutation succeeded, but local cache update failed: {error}"
-        ))
-    })
+fn save_board(paths: &Paths, board: &Board, meta: &mut cache::Meta) -> Result<(), String> {
+    cache::save_for(paths, &board.snapshot(), meta)
+        .map_err(|error| format!("writing cache: {error}"))
 }
 
-fn refresh_cache(api: &mut impl TasksApi, paths: &Paths, list_id: &str) -> Result<(), Error> {
-    let tasks = api.tasks(list_id).map_err(api_fail)?;
+/// Reload one list into the startup cache. Failures are disposable: warn on
+/// stderr and leave the Google mutation's printed result alone.
+fn refresh_cache(api: &mut impl TasksApi, paths: &Paths, list_id: &str) {
+    if let Err(error) = refresh_cache_inner(api, paths, list_id) {
+        eprintln!("warning: local cache update failed: {error}");
+    }
+}
+
+fn refresh_cache_inner(
+    api: &mut impl TasksApi,
+    paths: &Paths,
+    list_id: &str,
+) -> Result<(), String> {
+    let tasks = api
+        .tasks(list_id)
+        .map_err(|error| format!("reloading list: {error}"))?;
     let (mut board, mut meta) = cache_state(api, paths)?;
     if board.list(list_id).is_none() {
         if let Ok(lists) = api.tasklists() {
@@ -481,13 +493,33 @@ fn refresh_cache(api: &mut impl TasksApi, paths: &Paths, list_id: &str) -> Resul
     save_board(paths, &board, &mut meta)
 }
 
-fn cache_upsert_list(api: &impl TasksApi, paths: &Paths, list: TaskList) -> Result<(), Error> {
+fn cache_upsert_list(api: &impl TasksApi, paths: &Paths, list: TaskList) {
+    if let Err(error) = cache_upsert_list_inner(api, paths, list) {
+        eprintln!("warning: local cache update failed: {error}");
+    }
+}
+
+fn cache_upsert_list_inner(
+    api: &impl TasksApi,
+    paths: &Paths,
+    list: TaskList,
+) -> Result<(), String> {
     let (mut board, mut meta) = cache_state(api, paths)?;
     board.upsert_list(list);
     save_board(paths, &board, &mut meta)
 }
 
-fn cache_remove_list(api: &impl TasksApi, paths: &Paths, list_id: &str) -> Result<(), Error> {
+fn cache_remove_list(api: &impl TasksApi, paths: &Paths, list_id: &str) {
+    if let Err(error) = cache_remove_list_inner(api, paths, list_id) {
+        eprintln!("warning: local cache update failed: {error}");
+    }
+}
+
+fn cache_remove_list_inner(
+    api: &impl TasksApi,
+    paths: &Paths,
+    list_id: &str,
+) -> Result<(), String> {
     let (mut board, mut meta) = cache_state(api, paths)?;
     board.remove_list(list_id);
     save_board(paths, &board, &mut meta)
@@ -544,6 +576,8 @@ mod tests {
         lists: Vec<TaskList>,
         tasks: HashMap<String, Vec<Task>>,
         fail: Option<String>,
+        /// Fail `tasks()` once `task_fetches` reaches this 1-based count.
+        fail_tasks_from: Option<usize>,
         creates: usize,
         patches: Vec<Value>,
         deletes: Vec<(String, String)>,
@@ -582,6 +616,7 @@ mod tests {
                     ("lw".into(), vec![t2]),
                 ]),
                 fail: None,
+                fail_tasks_from: None,
                 creates: 0,
                 patches: Vec::new(),
                 deletes: Vec::new(),
@@ -606,6 +641,11 @@ mod tests {
 
         fn tasks(&mut self, list_id: &str) -> crate::google::Result<Vec<Task>> {
             self.task_fetches += 1;
+            if let Some(from) = self.fail_tasks_from {
+                if self.task_fetches >= from {
+                    return Err(ApiError::Transport("reload failed".into()));
+                }
+            }
             if let Some(e) = &self.fail {
                 return Err(ApiError::Transport(e.clone()));
             }
@@ -757,6 +797,14 @@ mod tests {
     }
 
     fn run(api: &mut Fake, args: &[&str]) -> (Result<(), Error>, String) {
+        run_with_cache(api, args, None)
+    }
+
+    fn run_with_cache(
+        api: &mut Fake,
+        args: &[&str],
+        seed_cache: Option<&str>,
+    ) -> (Result<(), Error>, String) {
         let root = std::env::temp_dir().join(format!(
             "gtt-cli-{}-{}",
             std::process::id(),
@@ -770,6 +818,9 @@ mod tests {
             credentials: root.join("credentials.json"),
             config_dir: root.clone(),
         };
+        if let Some(raw) = seed_cache {
+            fs::write(paths.cache(), raw).unwrap();
+        }
         let parsed = parse(args);
         let mut out = Vec::new();
         let res = execute(
@@ -779,11 +830,9 @@ mod tests {
             &mut out,
             &paths,
         );
-        api.last_cache = Some(
-            cache::load_for(&paths, &api.account_fingerprint())
-                .unwrap()
-                .0,
-        );
+        api.last_cache = cache::load_for(&paths, &api.account_fingerprint())
+            .ok()
+            .map(|(cache, _)| cache);
         let _ = fs::remove_dir_all(&root);
         (res, String::from_utf8(out).unwrap())
     }
@@ -960,6 +1009,35 @@ mod tests {
             .lists
             .iter()
             .any(|c| c.list.id == "lw" && c.tasks.iter().any(|t| t.title == "New")));
+    }
+
+    #[test]
+    fn create_still_prints_when_the_cache_reload_fails() {
+        let mut api = Fake::new();
+        // create without --parent never fetches tasks until the cache refresh.
+        api.fail_tasks_from = Some(1);
+        let (res, json) = run(
+            &mut api,
+            &["-f", "json", "create", "--list", "Work", "--title", "New"],
+        );
+        assert!(res.is_ok(), "{res:?}");
+        assert_eq!(api.creates, 1);
+        let t: Task = serde_json::from_str(json.trim()).unwrap();
+        assert_eq!(t.title, "New");
+        assert_eq!(t.id, "n10");
+    }
+
+    #[test]
+    fn create_still_prints_when_the_cache_file_is_malformed() {
+        let mut api = Fake::new();
+        let (res, json) = run_with_cache(
+            &mut api,
+            &["-f", "json", "create", "--list", "Work", "--title", "New"],
+            Some("{not valid json"),
+        );
+        assert!(res.is_ok(), "{res:?}");
+        let t: Task = serde_json::from_str(json.trim()).unwrap();
+        assert_eq!(t.title, "New");
     }
 
     #[test]

@@ -23,6 +23,29 @@ impl App {
         self.settle();
     }
 
+    /// Bracketed paste: insert into the active editor, never as board keys.
+    pub(super) fn on_paste(&mut self, text: String) {
+        self.notice = None;
+        if self.quit != QuitState::Running {
+            return;
+        }
+        if !matches!(self.interaction, Interaction::Editing(_)) {
+            return;
+        }
+        if self.editor_width().is_none() {
+            let cancel = self.keymap.labels_for(Action::CancelEdit).join("/");
+            self.error = Some(format!(
+                "terminal too small to show the editor; {cancel} cancels"
+            ));
+            self.settle();
+            return;
+        }
+        if let Some(edit) = self.edit_mut() {
+            edit.paste(&text);
+        }
+        self.settle();
+    }
+
     fn handle_key(&mut self, k: KeyEvent) {
         // A notice is for the keypress that earned it, and no longer.
         self.notice = None;
@@ -360,5 +383,38 @@ mod tests {
         assert!(!picker
             .rows()
             .any(|row| { row.subtitle.as_deref() == Some("delete task") }));
+    }
+
+    #[test]
+    fn paste_into_a_title_editor_does_not_save_or_run_board_keys() {
+        let (mut app, commands) = app_with_lists(&["a"]);
+        let _ = commands.recv().unwrap();
+        app.sync = SyncState::Ready;
+        set_tasks(
+            &mut app,
+            "a",
+            vec![task("a-one", None, "1", false)],
+            "a-one",
+        );
+        app.viewport = ratatui::layout::Rect::new(0, 0, 80, 24);
+        app.shelf = Shelf::Open(FieldId::Title);
+        app.interaction = Interaction::Editing(Edit {
+            target: EditTarget::Existing {
+                list_id: "a".into(),
+                task_id: "a-one".into(),
+                field: FieldId::Title,
+            },
+            buf: "Buy ".into(),
+            cursor: 4,
+        });
+
+        app.on_paste("milk\ndyq".into());
+
+        assert!(matches!(app.interaction, Interaction::Editing(_)));
+        assert_eq!(app.edit().unwrap().buf, "Buy milk dyq");
+        assert!(commands
+            .try_iter()
+            .all(|cmd| !matches!(cmd, Cmd::Run { .. })));
+        assert!(!app.should_exit());
     }
 }

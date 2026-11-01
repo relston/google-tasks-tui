@@ -6,16 +6,6 @@ tasks take the next unused number, and numbers are never reused.
 
 ## Improvements
 
-- **1.** Enable bracketed paste in the TUI. Without it a paste arrives as
-  keypresses: a newline in a title editor saves the task, and the rest of
-  the paste runs as board keys (`d`, `y`, `q`). Push and pop it with the
-  other terminal flags, and insert `Event::Paste` text into the editor
-  (newlines kept in notes, flattened in titles).
-- **2.** Make the CLI's post-mutation cache update best effort. A failed list
-  reload or a malformed cache after a successful create, update, done,
-  undone, or delete currently exits 1, and `create` never prints the new
-  task, so a script may retry and duplicate it. Print the result, warn on
-  stderr, and exit 0.
 - **3.** Decide whether an unknown task `status` from Google should fail the
   whole list. `Status` deserializes strictly, while due dates and timestamps
   are deliberately lenient.

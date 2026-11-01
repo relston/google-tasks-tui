@@ -4,6 +4,19 @@ Notable changes to google-tasks-tui, newest first. There are no tagged
 releases yet; entries are grouped by date. Open work is tracked in
 [`TASKS.md`](TASKS.md).
 
+## 2026-11-01
+
+### Fixed
+
+- The TUI enables bracketed paste with the other terminal flags, so a paste
+  arrives as one `Event::Paste` instead of keypresses. Pasted text goes into
+  the active editor (newlines kept in notes, flattened to spaces in titles)
+  and never runs as board commands.
+- After a successful CLI create, update, done, undone, delete, or list
+  mutation, a failed list reload or cache write no longer exits 1. The
+  command prints the result first, warns on stderr, and exits 0 so scripts
+  do not retry and duplicate a create.
+
 ## 2026-10-28
 
 ### Added
