@@ -6,7 +6,7 @@ easier to change without changing behavior, except for the fixes it calls out.
 
 Complete phases in order. Write each test first and confirm that it fails for
 the expected reason. End every phase with the required checks from
-[`CLAUDE.md`](CLAUDE.md), `cargo install --path .`, and one commit on `main`.
+[`AGENTS.md`](AGENTS.md), `cargo install --path .`, and one commit on `main`.
 
 ## Target design
 
@@ -144,7 +144,7 @@ mechanical so the diff is easy to review.
 - [x] f) Split [`src/tui/app.rs`](src/tui/app.rs) into `editor.rs`, `picker.rs`, `columns.rs`, `sync.rs`, `mutation.rs`, `input.rs`, and `commands.rs`.
 - [x] g) Split `src/tui/render.rs` into `view/` modules for layout, columns, shelf, overlay, status, and text.
 - [x] h) Move each test next to the code it covers.
-- [x] i) Update the architecture section of [`CLAUDE.md`](CLAUDE.md) and the links in [`README.md`](README.md).
+- [x] i) Update the architecture section of [`AGENTS.md`](AGENTS.md) and the links in [`README.md`](README.md).
 
 ## Phase 3: One mutation lifecycle
 
@@ -157,7 +157,7 @@ Replace the per-mutation `Cmd`, `Msg`, worker arm, `MutationContext`,
 - [x] d) Port patch, create, delete, and cross-list move to `submit`.
 - [x] e) Port reparent and reorder to `Place` with a list reload; add a test that unparenting keeps its place after Google renumbers siblings.
 - [x] f) Delete `MutationContext`, the per-operation `Cmd` / `Msg` variants, the response-matching checks, and the `rollback` match.
-- [x] g) Update the mutation invariants in [`CLAUDE.md`](CLAUDE.md).
+- [x] g) Update the mutation invariants in [`AGENTS.md`](AGENTS.md).
 
 ## Phase 4: One key action table
 
@@ -179,4 +179,4 @@ Make the compiler enforce that drawing does not change application state.
 - [x] c) Move focus clamping, shelf closing, and orphaned-edit handling into a post-update step in `columns.rs`. (`App::settle`, run after every key and worker message.)
 - [x] d) Replace the `edit_width` feedback with a pure layout function that uses the stored terminal size.
 - [x] e) Stop rebuilding the full task tree on every frame while the details shelf is open.
-- [x] f) Add the read-only rendering rule to [`CLAUDE.md`](CLAUDE.md).
+- [x] f) Add the read-only rendering rule to [`AGENTS.md`](AGENTS.md).
