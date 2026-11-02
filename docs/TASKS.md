@@ -1,7 +1,7 @@
 # Tasks
 
 Open work, roughly in priority order. Delete finished items and log them in
-[`CHANGELOG.md`](CHANGELOG.md). Each task keeps its number for good: new
+[`CHANGELOG.md`](../CHANGELOG.md). Each task keeps its number for good: new
 tasks take the next unused number, and numbers are never reused.
 
 ## Improvements

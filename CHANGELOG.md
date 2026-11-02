@@ -2,7 +2,7 @@
 
 Notable changes to google-tasks-tui, newest first. There are no tagged
 releases yet; entries are grouped by date. Open work is tracked in
-[`TASKS.md`](TASKS.md).
+[`docs/TASKS.md`](docs/TASKS.md).
 
 ## 2026-11-02
 

@@ -443,5 +443,5 @@ process-wide environment variables or touch your real files.
 
 ## Tasks and changes
 
-Open work is tracked in [`TASKS.md`](TASKS.md); notable changes are in
-[`CHANGELOG.md`](CHANGELOG.md).
+Open work is tracked in [`docs/TASKS.md`](docs/TASKS.md); notable changes are
+in [`CHANGELOG.md`](CHANGELOG.md).
