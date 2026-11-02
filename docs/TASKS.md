@@ -12,8 +12,8 @@ tasks take the next unused number, and numbers are never reused.
 
 ## Features
 
-- **5.** Edit task due dates in the TUI. Scratch: `--debug-date-time` (centered
-  date panel only so far).
+- **5.** Edit task due dates in the TUI. Scratch: `--debug-date-time` (segment
+  focus with Tab / `n` / `p` so far).
 - **6.** Manage task lists in the TUI.
 - **8.** Search tasks across all lists. A key opens a picker that filters
   every task by title and notes (case-insensitive substring, like the

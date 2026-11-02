@@ -8,9 +8,9 @@ releases yet; entries are grouped by date. Open work is tracked in
 
 ### Added
 
-- `--debug-date-time` opens a blank TUI with a centered panel showing today's
-  date as `YYYY MM DD` (`q` / Esc to quit). Scratch surface for iterating on
-  due-date editing before wiring it into the board (task 5).
+- `--debug-date-time` opens a blank TUI with a centered date panel (`YYYY MM
+  DD`). Year starts selected; Tab / Shift+Tab cycle segments; `n` / `p` bump
+  the focused segment (`q` / Esc to quit). Scratch surface for task 5.
 - CLI `move` exposes the same reorder, reparent, and cross-list moves as the
   TUI: `--up` / `--down` / `--first` / `--after`, `--parent` / `--top-level`,
   and `--to-list`. Partial cross-list moves exit 1 with a count; shared board
