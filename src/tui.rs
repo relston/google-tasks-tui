@@ -25,6 +25,7 @@ use crate::paths::Paths;
 mod app;
 mod columns;
 mod commands;
+mod debug_date;
 mod editor;
 mod input;
 mod mutation;
@@ -169,6 +170,17 @@ impl From<io::Error> for Error {
     fn from(error: io::Error) -> Self {
         Self::Terminal(error)
     }
+}
+
+/// Blank TUI with a centered date panel. No auth, no Google — for iterating
+/// on due-date editing before wiring it into the board.
+pub fn start_debug_date() -> Result<(), Error> {
+    let mut terminal = TerminalGuard::init();
+    let today = chrono::Local::now().date_naive();
+    let res = debug_date::run(terminal.terminal_mut(), today);
+    drop(terminal);
+    res?;
+    Ok(())
 }
 
 pub fn start(paths: &Paths) -> Result<(), Error> {

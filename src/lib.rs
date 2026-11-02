@@ -27,6 +27,15 @@ pub fn entry() -> ExitCode {
         print!("{}", config::default_toml());
         return ExitCode::SUCCESS;
     }
+    if args.debug_date_time {
+        return match tui::start_debug_date() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("{error}");
+                ExitCode::from(1)
+            }
+        };
+    }
     let paths = Paths::from_env();
     let result = match args.command {
         None => tui::start(&paths).map_err(|error| (error.to_string(), 1)),

@@ -38,6 +38,9 @@ pub struct Args {
     /// Print the complete documented default configuration and exit.
     #[arg(long, global = true)]
     pub default_config: bool,
+    /// Open a blank TUI with a centered date panel (due-date editing scratch).
+    #[arg(long, global = true)]
+    pub debug_date_time: bool,
     #[command(subcommand)]
     pub command: Option<Command>,
 }
@@ -1110,6 +1113,13 @@ mod tests {
     fn default_config_flag_needs_no_subcommand() {
         let args = Args::try_parse_from(["google-tasks-tui", "--default-config"]).unwrap();
         assert!(args.default_config);
+        assert!(args.command.is_none());
+    }
+
+    #[test]
+    fn debug_date_time_flag_needs_no_subcommand() {
+        let args = Args::try_parse_from(["google-tasks-tui", "--debug-date-time"]).unwrap();
+        assert!(args.debug_date_time);
         assert!(args.command.is_none());
     }
 
