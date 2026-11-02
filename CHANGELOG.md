@@ -19,8 +19,8 @@ releases yet; entries are grouped by date. Open work is tracked in
   cancels. Delete moves to `x`.
 - `--debug-date-time` opens a blank TUI with a centered date picker (`YYYY MM
   DD`) and a `cal`-style month preview beneath it (month name, no year; the
-  selected day is highlighted). Tab / Shift+Tab / `n` / `p` / digits edit
-  segments (`q` / Esc to quit).
+  selected day is highlighted). Tab / `h`/`l` / Shift+Tab / `n` / `p` /
+  digits edit segments (`q` / Esc to quit).
 - CLI `move` exposes the same reorder, reparent, and cross-list moves as the
   TUI: `--up` / `--down` / `--first` / `--after`, `--parent` / `--top-level`,
   and `--to-list`. Partial cross-list moves exit 1 with a count; shared board
@@ -28,6 +28,8 @@ releases yet; entries are grouped by date. Open work is tracked in
 
 ### Changed
 
+- Due-date editor status hints mention `n`/`p` to adjust the focused segment
+  and `h`/`l` (with Tab) to move between year, month, and day.
 - `--debug-date-time` draws the segment editor and month calendar inside one
   shared bordered panel instead of two stacked boxes.
 - Keep unknown Google task `status` values strict: deserialization fails the

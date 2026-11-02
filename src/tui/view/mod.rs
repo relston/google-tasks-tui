@@ -212,6 +212,20 @@ mod tests {
         assert!(!screen.contains("new"), "{screen}");
     }
 
+    #[test]
+    fn date_edit_status_mentions_adjust_and_segment_keys() {
+        let mut app = one_list_app();
+        app.sync = SyncState::Ready;
+        app.on_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+        let screen = render_app(&app, 160, 20);
+        assert!(screen.contains("n/p"), "{screen}");
+        assert!(screen.contains("h/l"), "{screen}");
+        assert!(
+            screen.contains("set due date") || screen.contains("enter"),
+            "{screen}"
+        );
+    }
+
     /// A control character reaching a cell is not cosmetic: printing `\r`
     /// walks the terminal cursor back to column 0 and shifts the rest of the
     /// row. Clipping hid them past a column's edge; wrapping does not.

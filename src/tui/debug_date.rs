@@ -88,11 +88,19 @@ impl DateEditor {
                 self.abandon_draft();
                 self.focus = self.focus.next();
             }
+            KeyCode::Char('l') if key.modifiers.is_empty() => {
+                self.abandon_draft();
+                self.focus = self.focus.next();
+            }
             KeyCode::BackTab => {
                 self.abandon_draft();
                 self.focus = self.focus.previous();
             }
             KeyCode::Tab if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                self.abandon_draft();
+                self.focus = self.focus.previous();
+            }
+            KeyCode::Char('h') if key.modifiers.is_empty() => {
                 self.abandon_draft();
                 self.focus = self.focus.previous();
             }
@@ -443,6 +451,19 @@ mod tests {
         assert_eq!(editor.focus, Segment::Day);
         editor.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT));
         assert_eq!(editor.focus, Segment::Month);
+    }
+
+    #[test]
+    fn h_and_l_cycle_segments() {
+        let mut editor = DateEditor::new(date(2026, 11, 2));
+        editor.on_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
+        assert_eq!(editor.focus, Segment::Month);
+        editor.on_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
+        assert_eq!(editor.focus, Segment::Day);
+        editor.on_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE));
+        assert_eq!(editor.focus, Segment::Month);
+        editor.on_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE));
+        assert_eq!(editor.focus, Segment::Year);
     }
 
     #[test]

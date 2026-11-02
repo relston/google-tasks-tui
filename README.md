@@ -42,6 +42,7 @@ same CRUD is available as subcommands for scripts and agents
 - `Space` ticks or unticks the selected task. It moves to or from the
   completed group straight away, and the selection follows it.
 - `d` opens a floating due-date editor (segment entry plus a month calendar).
+  `h`/`l` or Tab move between segments; `n`/`p` adjust the focused value.
   Enter saves the date to Google; Esc cancels.
 - `x` deletes the selected task after a y/n confirmation in the status bar.
   The prompt names the task and counts the subtasks that go with it, since
@@ -434,7 +435,7 @@ src/
 
 ```sh
 cargo test
-google-tasks-tui --debug-date-time   # blank TUI; Tab / n / p / digits edit date
+google-tasks-tui --debug-date-time   # blank TUI; Tab/h/l / n/p / digits edit date
 ```
 
 `Shift+Enter` needs a terminal that speaks the kitty keyboard protocol
