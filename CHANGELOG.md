@@ -25,6 +25,8 @@ releases yet; entries are grouped by date. Open work is tracked in
 
 ### Changed
 
+- `--debug-date-time` draws the segment editor and month calendar inside one
+  shared bordered panel instead of two stacked boxes.
 - Keep unknown Google task `status` values strict: deserialization fails the
   list rather than accepting them the way due dates and timestamps do.
 

@@ -20,9 +20,10 @@ const TICK: std::time::Duration = std::time::Duration::from_millis(100);
 /// Matches `cal`: seven two-digit day columns with single spaces.
 const CAL_WIDTH: usize = 20;
 const PANEL_WIDTH: u16 = 22;
-const PICKER_HEIGHT: u16 = 3;
-const GAP: u16 = 1;
-const PREVIEW_CHROME: u16 = 4; // borders + month title + weekday header
+const DATE_ROWS: u16 = 1;
+const GAP: u16 = 1; // blank row between date segments and calendar
+const PREVIEW_HEADER: u16 = 2; // month title + weekday header
+const BORDER: u16 = 2; // top + bottom border rows
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Segment {
@@ -260,31 +261,17 @@ fn week_count(date: NaiveDate) -> u16 {
     month_preview_lines(date).len().saturating_sub(2) as u16
 }
 
-/// Centered stack: date picker on top, month preview beneath.
-pub(super) fn stack_rects(area: Rect, date: NaiveDate) -> (Rect, Rect) {
+/// Centered panel that holds the date segments and month calendar together.
+pub(super) fn panel_rect(area: Rect, date: NaiveDate) -> Rect {
     let width = area.width.min(PANEL_WIDTH);
-    let preview_height = PREVIEW_CHROME + week_count(date);
-    let total_height = PICKER_HEIGHT + GAP + preview_height;
-    let height = area.height.min(total_height);
-    let stack = Rect::new(
+    let content = DATE_ROWS + GAP + PREVIEW_HEADER + week_count(date);
+    let height = area.height.min(BORDER + content);
+    Rect::new(
         area.x + area.width.saturating_sub(width) / 2,
         area.y + area.height.saturating_sub(height) / 2,
         width,
         height,
-    );
-    let picker_height = stack.height.min(PICKER_HEIGHT);
-    let picker = Rect::new(stack.x, stack.y, stack.width, picker_height);
-    let preview_top = stack.y.saturating_add(picker_height).saturating_add(GAP);
-    let preview_height = stack
-        .height
-        .saturating_sub(picker_height.saturating_add(GAP));
-    let preview = Rect::new(
-        stack.x,
-        preview_top.min(stack.y + stack.height),
-        stack.width,
-        preview_height,
-    );
-    (picker, preview)
+    )
 }
 
 fn segment_spans(editor: &DateEditor, theme: &Theme) -> Line<'static> {
@@ -348,44 +335,43 @@ fn preview_paragraph(date: NaiveDate, theme: &Theme) -> Paragraph<'static> {
             Line::from(spans)
         })
         .collect();
-    // Left-aligned so short or padded weeks stay under Su..Sa; the block is
-    // already centered as a whole by stack_rects.
+    // Left-aligned so short or padded weeks stay under Su..Sa; the panel is
+    // already centered as a whole by panel_rect.
     Paragraph::new(lines)
 }
 
 pub(super) fn draw(frame: &mut Frame, editor: &DateEditor) {
     let area = frame.area();
     let theme = theme::load(&Config::default().theme);
-    let (picker, preview) = stack_rects(area, editor.date);
-    let stack = Rect::new(
-        picker.x,
-        picker.y,
-        picker.width,
-        preview.y + preview.height - picker.y,
-    );
-    frame.render_widget(Clear, stack);
+    let panel = panel_rect(area, editor.date);
+    frame.render_widget(Clear, panel);
 
-    let picker_block = Block::bordered()
+    let block = Block::bordered()
         .border_type(BorderType::Rounded)
         .title(" date ")
         .border_style(Style::default().fg(theme.muted))
         .style(Style::default().fg(theme.fg).bg(theme.bg));
-    let picker_inner = picker_block.inner(picker);
-    frame.render_widget(picker_block, picker);
+    let inner = block.inner(panel);
+    frame.render_widget(block, panel);
+
+    if inner.height == 0 {
+        return;
+    }
+    let date_area = Rect::new(inner.x, inner.y, inner.width, DATE_ROWS.min(inner.height));
     frame.render_widget(
         Paragraph::new(segment_spans(editor, &theme)).alignment(ratatui::layout::Alignment::Center),
-        picker_inner,
+        date_area,
     );
 
-    if preview.height >= 3 {
-        let preview_block = Block::bordered()
-            .border_type(BorderType::Rounded)
-            .title(" preview ")
-            .border_style(Style::default().fg(theme.muted))
-            .style(Style::default().fg(theme.fg).bg(theme.bg));
-        let preview_inner = preview_block.inner(preview);
-        frame.render_widget(preview_block, preview);
-        frame.render_widget(preview_paragraph(editor.date, &theme), preview_inner);
+    let preview_top = inner
+        .y
+        .saturating_add(DATE_ROWS)
+        .saturating_add(GAP)
+        .min(inner.y + inner.height);
+    let preview_height = inner.height.saturating_sub(DATE_ROWS.saturating_add(GAP));
+    if preview_height > 0 {
+        let preview = Rect::new(inner.x, preview_top, inner.width, preview_height);
+        frame.render_widget(preview_paragraph(editor.date, &theme), preview);
     }
 }
 
@@ -561,17 +547,16 @@ mod tests {
     #[test]
     fn stack_sits_in_the_center_of_the_viewport() {
         let area = Rect::new(0, 0, 80, 24);
-        let (picker, preview) = stack_rects(area, date(2026, 11, 2));
-        assert_eq!(picker.width, PANEL_WIDTH);
-        assert_eq!(picker.height, PICKER_HEIGHT);
-        assert_eq!(picker.x, (80 - PANEL_WIDTH) / 2);
-        assert!(preview.y >= picker.y + picker.height);
-        assert_eq!(preview.x, picker.x);
-        assert_eq!(preview.width, picker.width);
+        // November 2026 has 5 week rows → panel is borders + date + gap + header + weeks.
+        let panel = panel_rect(area, date(2026, 11, 2));
+        assert_eq!(panel.width, PANEL_WIDTH);
+        assert_eq!(panel.height, 2 + DATE_ROWS + GAP + 2 + 5);
+        assert_eq!(panel.x, (80 - PANEL_WIDTH) / 2);
+        assert_eq!(panel.y, (24 - panel.height) / 2);
     }
 
     #[test]
-    fn draw_shows_the_date_picker_and_month_preview() {
+    fn draw_shows_one_panel_with_date_and_month_preview() {
         let editor = DateEditor {
             date: date(2026, 3, 9),
             focus: Segment::Month,
@@ -584,7 +569,10 @@ mod tests {
         assert!(screen.contains("03"), "{screen}");
         assert!(screen.contains("09"), "{screen}");
         assert!(screen.contains("date"), "{screen}");
-        assert!(screen.contains("preview"), "{screen}");
+        assert!(
+            !screen.contains("preview"),
+            "date and calendar share one border; no separate preview title: {screen}"
+        );
         assert!(screen.contains("March"), "{screen}");
         assert!(screen.contains("Su Mo Tu We Th Fr Sa"), "{screen}");
     }
