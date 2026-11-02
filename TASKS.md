@@ -6,9 +6,6 @@ tasks take the next unused number, and numbers are never reused.
 
 ## Improvements
 
-- **3.** Decide whether an unknown task `status` from Google should fail the
-  whole list. `Status` deserializes strictly, while due dates and timestamps
-  are deliberately lenient.
 - **4.** Consider checking mutation responses against the request (task ID,
   parent) as the pre-refactor handlers did. List reloads cover moves; a
   mismatched patch or create response would add a stray row.
