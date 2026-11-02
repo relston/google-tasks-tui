@@ -6,6 +6,12 @@ releases yet; entries are grouped by date. Open work is tracked in
 
 ## 2026-11-02
 
+### Fixed
+
+- Debug date month preview keeps days in fixed weekday columns (pad short
+  weeks, left-align the grid) so trailing dates like `29 30` sit under Su/Mo
+  instead of centering in the week.
+
 ### Added
 
 - `--debug-date-time` opens a blank TUI with a centered date picker (`YYYY MM

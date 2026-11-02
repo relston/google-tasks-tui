@@ -237,15 +237,23 @@ pub(super) fn month_preview_lines(date: NaiveDate) -> Vec<String> {
     while day <= last {
         week.push(format!("{day:2}"));
         if week.len() == 7 {
-            lines.push(week.join(" "));
+            lines.push(format_week(&week));
             week.clear();
         }
         day += 1;
     }
     if !week.is_empty() {
-        lines.push(week.join(" "));
+        while week.len() < 7 {
+            week.push("  ".into());
+        }
+        lines.push(format_week(&week));
     }
     lines
+}
+
+fn format_week(cells: &[String]) -> String {
+    debug_assert_eq!(cells.len(), 7);
+    cells.join(" ")
 }
 
 fn week_count(date: NaiveDate) -> u16 {
@@ -320,12 +328,15 @@ fn preview_paragraph(date: NaiveDate, theme: &Theme) -> Paragraph<'static> {
             if index < 2 {
                 return Line::styled(line, Style::default().fg(theme.fg));
             }
-            // Week rows: " 1  2  3 ..." — highlight the selected day cell.
+            // Fixed columns: each day is two cells, separated by one space.
+            // Do not split on ' ' — single-digit days are " 1" and would break.
             let mut spans = Vec::new();
-            for (cell_index, cell) in line.split(' ').enumerate() {
+            for cell_index in 0..7 {
                 if cell_index > 0 {
                     spans.push(Span::raw(" "));
                 }
+                let start = cell_index * 3;
+                let cell = line.get(start..start + 2).unwrap_or("  ");
                 let day = cell.trim().parse::<u32>().ok();
                 let style = if day == Some(selected) {
                     theme.selection().add_modifier(Modifier::BOLD)
@@ -337,7 +348,9 @@ fn preview_paragraph(date: NaiveDate, theme: &Theme) -> Paragraph<'static> {
             Line::from(spans)
         })
         .collect();
-    Paragraph::new(lines).alignment(ratatui::layout::Alignment::Center)
+    // Left-aligned so short or padded weeks stay under Su..Sa; the block is
+    // already centered as a whole by stack_rects.
+    Paragraph::new(lines)
 }
 
 pub(super) fn draw(frame: &mut Frame, editor: &DateEditor) {
@@ -532,7 +545,7 @@ mod tests {
                 " 8  9 10 11 12 13 14",
                 "15 16 17 18 19 20 21",
                 "22 23 24 25 26 27 28",
-                "29 30",
+                "29 30               ",
             ]
         );
         assert_eq!(
@@ -574,5 +587,18 @@ mod tests {
         assert!(screen.contains("preview"), "{screen}");
         assert!(screen.contains("March"), "{screen}");
         assert!(screen.contains("Su Mo Tu We Th Fr Sa"), "{screen}");
+    }
+
+    #[test]
+    fn preview_week_rows_keep_weekday_columns() {
+        // September 2026 starts on Tuesday, so the 1st is under Tu.
+        let lines = month_preview_lines(date(2026, 9, 1));
+        assert_eq!(lines[1], "Su Mo Tu We Th Fr Sa");
+        assert_eq!(lines[2], "       1  2  3  4  5");
+        assert_eq!(lines[2].len(), CAL_WIDTH);
+        // Last week must stay left-aligned under Su/Mo, not centered.
+        let last = lines.last().unwrap();
+        assert!(last.starts_with("27 28 29 30"), "{last:?}");
+        assert_eq!(last.len(), CAL_WIDTH);
     }
 }
