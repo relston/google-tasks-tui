@@ -119,6 +119,14 @@ Open work lives in [`TASKS.md`](TASKS.md). When you finish a task, delete it
 from `TASKS.md` and add a short entry describing the change under today's
 date in [`CHANGELOG.md`](CHANGELOG.md), in the same commit as the work.
 
+## API parity
+
+[`TASK_API_PARITY.md`](TASK_API_PARITY.md) tracks every Google Tasks API v1
+method against TUI and CLI support. Keep it accurate in the same commit as
+any change that adds, removes, or relocates API usage (new `TasksApi`
+methods, CLI commands, or TUI mutations that call Google). Update the
+checks and notes when coverage changes; do not leave the table stale.
+
 ## Verification
 
 Run all required checks before completing work:
@@ -136,8 +144,8 @@ When a task or coherent set of edits is finished and the verification checks
 pass:
 
 1. Install the local binary: `cargo install --path .`
-2. Commit on `main` (include `TASKS.md` / `CHANGELOG.md` updates in the
-   same commit as the work).
+2. Commit on `main` (include `TASKS.md` / `CHANGELOG.md` /
+   `TASK_API_PARITY.md` updates in the same commit as the work).
 3. Push to `origin`.
 
 Do not leave finished work uninstalled, uncommitted, or unpushed.
