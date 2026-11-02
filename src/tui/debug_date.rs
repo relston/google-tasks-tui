@@ -43,12 +43,21 @@ impl Segment {
             Self::Day => Self::Month,
         }
     }
+
+    fn width(self) -> usize {
+        match self {
+            Self::Year => 4,
+            Self::Month | Self::Day => 2,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct DateEditor {
     pub(super) date: NaiveDate,
     pub(super) focus: Segment,
+    /// Digits typed into the focused segment; `None` means show the date.
+    pub(super) draft: Option<String>,
 }
 
 impl DateEditor {
@@ -56,20 +65,69 @@ impl DateEditor {
         Self {
             date,
             focus: Segment::Year,
+            draft: None,
         }
     }
 
     pub(super) fn on_key(&mut self, key: KeyEvent) {
         match key.code {
-            KeyCode::Tab if key.modifiers.is_empty() => self.focus = self.focus.next(),
-            KeyCode::BackTab => self.focus = self.focus.previous(),
-            KeyCode::Tab if key.modifiers.contains(KeyModifiers::SHIFT) => {
+            KeyCode::Tab if key.modifiers.is_empty() => {
+                self.abandon_draft();
+                self.focus = self.focus.next();
+            }
+            KeyCode::BackTab => {
+                self.abandon_draft();
                 self.focus = self.focus.previous();
             }
-            KeyCode::Char('n') if key.modifiers.is_empty() => self.bump(1),
-            KeyCode::Char('p') if key.modifiers.is_empty() => self.bump(-1),
+            KeyCode::Tab if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                self.abandon_draft();
+                self.focus = self.focus.previous();
+            }
+            KeyCode::Char('n') if key.modifiers.is_empty() => {
+                self.abandon_draft();
+                self.bump(1);
+            }
+            KeyCode::Char('p') if key.modifiers.is_empty() => {
+                self.abandon_draft();
+                self.bump(-1);
+            }
+            KeyCode::Char(c) if key.modifiers.is_empty() && c.is_ascii_digit() => {
+                self.type_digit(c);
+            }
+            KeyCode::Backspace if key.modifiers.is_empty() => {
+                if let Some(draft) = &mut self.draft {
+                    draft.pop();
+                }
+            }
             _ => {}
         }
+    }
+
+    fn abandon_draft(&mut self) {
+        self.draft = None;
+    }
+
+    fn type_digit(&mut self, digit: char) {
+        let width = self.focus.width();
+        // Starting a draft from `None` wipes the committed segment on screen.
+        let draft = self.draft.get_or_insert_with(String::new);
+        if draft.len() >= width {
+            return;
+        }
+        draft.push(digit);
+        if draft.len() == width {
+            self.commit_draft_and_advance();
+        }
+    }
+
+    fn commit_draft_and_advance(&mut self) {
+        let Some(draft) = self.draft.take() else {
+            return;
+        };
+        if let Some(date) = apply_segment(self.date, self.focus, &draft) {
+            self.date = date;
+        }
+        self.focus = self.focus.next();
     }
 
     fn bump(&mut self, delta: i32) {
@@ -79,6 +137,54 @@ impl DateEditor {
             Segment::Day => bump_day(self.date, delta),
         };
     }
+
+    fn display_segment(&self, segment: Segment) -> String {
+        let width = segment.width();
+        if self.focus == segment {
+            if let Some(draft) = &self.draft {
+                let mut text = draft.clone();
+                while text.len() < width {
+                    text.push(' ');
+                }
+                return text;
+            }
+        }
+        match segment {
+            Segment::Year => format!("{:04}", self.date.year()),
+            Segment::Month => format!("{:02}", self.date.month()),
+            Segment::Day => format!("{:02}", self.date.day()),
+        }
+    }
+}
+
+fn apply_segment(date: NaiveDate, segment: Segment, draft: &str) -> Option<NaiveDate> {
+    match segment {
+        Segment::Year => {
+            let year = draft.parse::<i32>().ok()?;
+            clamp_ymd(year, date.month(), date.day())
+        }
+        Segment::Month => {
+            let month = draft.parse::<u32>().ok()?.clamp(1, 12);
+            clamp_ymd(date.year(), month, date.day())
+        }
+        Segment::Day => {
+            let month = date.month();
+            let year = date.year();
+            let max = days_in_month(year, month)?;
+            let day = draft.parse::<u32>().ok()?.clamp(1, max);
+            NaiveDate::from_ymd_opt(year, month, day)
+        }
+    }
+}
+
+fn days_in_month(year: i32, month: u32) -> Option<u32> {
+    let (y, m) = if month == 12 {
+        (year + 1, 1)
+    } else {
+        (year, month + 1)
+    };
+    let first_next = NaiveDate::from_ymd_opt(y, m, 1)?;
+    Some(first_next.pred_opt()?.day())
 }
 
 fn bump_year(date: NaiveDate, delta: i32) -> NaiveDate {
@@ -102,7 +208,6 @@ fn bump_day(date: NaiveDate, delta: i32) -> NaiveDate {
 
 fn clamp_ymd(year: i32, month: u32, day: u32) -> Option<NaiveDate> {
     NaiveDate::from_ymd_opt(year, month, day).or_else(|| {
-        // Feb 29 → Feb 28 on non-leap years, and similar month-end clamps.
         (1..=day)
             .rev()
             .find_map(|d| NaiveDate::from_ymd_opt(year, month, d))
@@ -122,16 +227,25 @@ pub(super) fn panel_rect(area: Rect) -> Rect {
 }
 
 fn segment_spans(editor: &DateEditor, theme: &Theme) -> Line<'static> {
-    let year = format!("{:04}", editor.date.year());
-    let month = format!("{:02}", editor.date.month());
-    let day = format!("{:02}", editor.date.day());
     let gap = Span::styled(" ", Style::default().fg(theme.fg));
     Line::from(vec![
-        segment_span(&year, editor.focus == Segment::Year, theme),
+        segment_span(
+            &editor.display_segment(Segment::Year),
+            editor.focus == Segment::Year,
+            theme,
+        ),
         gap.clone(),
-        segment_span(&month, editor.focus == Segment::Month, theme),
+        segment_span(
+            &editor.display_segment(Segment::Month),
+            editor.focus == Segment::Month,
+            theme,
+        ),
         gap,
-        segment_span(&day, editor.focus == Segment::Day, theme),
+        segment_span(
+            &editor.display_segment(Segment::Day),
+            editor.focus == Segment::Day,
+            theme,
+        ),
     ])
 }
 
@@ -192,11 +306,16 @@ mod tests {
         NaiveDate::from_ymd_opt(y, m, d).unwrap()
     }
 
+    fn digit(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)
+    }
+
     #[test]
     fn starts_with_the_year_focused() {
         let editor = DateEditor::new(date(2026, 11, 2));
         assert_eq!(editor.focus, Segment::Year);
         assert_eq!(editor.date, date(2026, 11, 2));
+        assert_eq!(editor.draft, None);
     }
 
     #[test]
@@ -238,6 +357,71 @@ mod tests {
     }
 
     #[test]
+    fn typing_digits_replaces_the_segment_and_advances_when_full() {
+        let mut editor = DateEditor::new(date(2026, 11, 2));
+        editor.on_key(digit('1'));
+        assert_eq!(editor.draft.as_deref(), Some("1"));
+        assert_eq!(editor.date, date(2026, 11, 2));
+        assert_eq!(editor.display_segment(Segment::Year), "1   ");
+
+        editor.on_key(digit('9'));
+        editor.on_key(digit('9'));
+        editor.on_key(digit('9'));
+        assert_eq!(editor.draft, None);
+        assert_eq!(editor.date, date(1999, 11, 2));
+        assert_eq!(editor.focus, Segment::Month);
+
+        editor.on_key(digit('0'));
+        editor.on_key(digit('3'));
+        assert_eq!(editor.date, date(1999, 3, 2));
+        assert_eq!(editor.focus, Segment::Day);
+
+        editor.on_key(digit('0'));
+        editor.on_key(digit('9'));
+        assert_eq!(editor.date, date(1999, 3, 9));
+        assert_eq!(editor.focus, Segment::Year);
+    }
+
+    #[test]
+    fn typing_clamps_invalid_month_and_day() {
+        let mut editor = DateEditor::new(date(2026, 1, 31));
+        editor.focus = Segment::Month;
+        editor.on_key(digit('1'));
+        editor.on_key(digit('3'));
+        assert_eq!(editor.date, date(2026, 12, 31));
+        assert_eq!(editor.focus, Segment::Day);
+
+        editor.on_key(digit('0'));
+        editor.on_key(digit('0'));
+        assert_eq!(editor.date.day(), 1);
+    }
+
+    #[test]
+    fn tab_while_typing_discards_the_draft() {
+        let mut editor = DateEditor::new(date(2026, 11, 2));
+        editor.on_key(digit('1'));
+        editor.on_key(digit('9'));
+        editor.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(editor.draft, None);
+        assert_eq!(editor.date, date(2026, 11, 2));
+        assert_eq!(editor.focus, Segment::Month);
+    }
+
+    #[test]
+    fn backspace_edits_the_draft() {
+        let mut editor = DateEditor::new(date(2026, 11, 2));
+        editor.on_key(digit('2'));
+        editor.on_key(digit('0'));
+        editor.on_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        assert_eq!(editor.draft.as_deref(), Some("2"));
+        editor.on_key(digit('0'));
+        editor.on_key(digit('2'));
+        editor.on_key(digit('5'));
+        assert_eq!(editor.date, date(2025, 11, 2));
+        assert_eq!(editor.focus, Segment::Month);
+    }
+
+    #[test]
     fn panel_sits_in_the_center_of_the_viewport() {
         let area = Rect::new(0, 0, 80, 24);
         let panel = panel_rect(area);
@@ -252,6 +436,7 @@ mod tests {
         let editor = DateEditor {
             date: date(2026, 3, 9),
             focus: Segment::Month,
+            draft: None,
         };
         let mut terminal = Terminal::new(TestBackend::new(40, 12)).unwrap();
         terminal.draw(|frame| draw(frame, &editor)).unwrap();

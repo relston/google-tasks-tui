@@ -431,7 +431,7 @@ src/
 
 ```sh
 cargo test
-google-tasks-tui --debug-date-time   # blank TUI; Tab / n / p edit date segments
+google-tasks-tui --debug-date-time   # blank TUI; Tab / n / p / digits edit date
 ```
 
 `Shift+Enter` needs a terminal that speaks the kitty keyboard protocol
