@@ -40,3 +40,8 @@ Service endpoint: `https://tasks.googleapis.com`
   (task 6 for the TUI).
 - **`tasks.clear`:** Unsupported in both interfaces. Hiding completed tasks
   in the TUI is local display only and does not clear them in Google.
+- **Due time and recurrence:** The Task resource exposes `due` as a date
+  only (any time portion is discarded). There is no recurrence field, so
+  repeating tasks from the Tasks/Calendar UI cannot be read or written
+  through the API. Tracked upstream as
+  [issuetracker.google.com/issues/479850449](https://issuetracker.google.com/issues/479850449).
