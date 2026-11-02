@@ -244,6 +244,11 @@ google-tasks-tui update TASK_ID --title "Shipped"
 google-tasks-tui done TASK_ID
 google-tasks-tui undone TASK_ID --list Inbox
 google-tasks-tui delete TASK_ID --yes
+google-tasks-tui move TASK_ID --up
+google-tasks-tui move TASK_ID --after OTHER_ID
+google-tasks-tui move TASK_ID --parent PARENT_ID
+google-tasks-tui move TASK_ID --top-level
+google-tasks-tui move TASK_ID --to-list Work
 google-tasks-tui list create --title "Work"
 google-tasks-tui list update Work --title "Projects"
 google-tasks-tui list delete Projects --yes
@@ -252,8 +257,8 @@ google-tasks-tui list delete Projects --yes
 `lists` is a bullet list of titles with ids in backticks. `tasks` is a
 heading per list and GitHub-style checkboxes (`- [ ]` / `- [x]`), with notes
 indented under the item when present. `get` /
-`create` / `update` / `done` / `undone` print one task as a heading plus
-fields. `list create` / `list update` print one list the same way as
+`create` / `update` / `done` / `undone` / `move` print one task as a heading
+plus fields. `list create` / `list update` print one list the same way as
 `lists`. `delete --yes` and `list delete --yes` print nothing. JSON shapes:
 `lists` is an array of `{id, title}`; `tasks --list` is an array of tasks;
 `tasks` is `{ "lists": [ { "list": …, "tasks": […] } ] }`. `cache.json`
@@ -261,6 +266,8 @@ wraps those lists with private schema, account, and generation metadata.
 
 `create` can also take `--parent TASK_ID`. `update` sends only the flags you
 pass (`--title`, `--notes`, `--due`, `--status needsAction|completed`).
+`move` takes exactly one of `--up`, `--down`, `--first`, `--after ID`,
+`--parent ID`, `--top-level`, or `--to-list LIST` (same rules as the TUI).
 `list update` / `list delete` take a list id or unique title. `list delete`
 requires `--yes` because Google removes every task in that list.
 
@@ -271,11 +278,11 @@ requires `--yes` because Google removes every task in that list.
 | Read lists/tasks/details | Yes | Yes | Shared canonical ordering and filtering |
 | Create/edit/complete/delete tasks | Yes | Yes | Same validation and API contracts |
 | Create subtasks | `C` | `create --parent` | Same one-level Google constraint |
-| Reparent/unparent tasks | `<` / `>` | No | Interactive same-list parent picker |
-| Reorder tasks in a list | `Alt-j` / `Alt-k` | No | One place among open siblings; presses made during a save are sent as one move |
+| Reparent/unparent tasks | `<` / `>` | `move --parent` / `--top-level` | Same-list parent rules |
+| Reorder tasks in a list | `Alt-j` / `Alt-k` | `move --up` / `--down` / `--first` / `--after` | One place among open siblings |
 | Edit notes | Yes | Yes | Assigned Docs/Chat tasks are rejected |
 | Edit due date/status directly | Status via `Space` | Yes | Due-date editor remains future TUI work |
-| Move tasks between lists | Yes | No | Interactive destination picker; CLI move remains deferred |
+| Move tasks between lists | Yes | `move --to-list` | Task plus subtasks; partial moves report a count |
 | Task-list create/rename/delete | No | Yes | TUI list management remains deferred |
 | Browse/copy task links | Yes | No | Terminal-interactive behavior |
 

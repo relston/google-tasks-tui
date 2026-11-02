@@ -22,7 +22,7 @@ Service endpoint: `https://tasks.googleapis.com`
 | `tasks.patch` | Partially update a task. | ✓ | ✓ |
 | `tasks.update` | Fully replace a task. | — | — |
 | `tasks.delete` | Delete a task and its subtasks. | ✓ | ✓ |
-| `tasks.move` | Reorder, reparent, or move a task across lists. | ✓ | — |
+| `tasks.move` | Reorder, reparent, or move a task across lists. | ✓ | ✓ |
 | `tasks.clear` | Remove all completed tasks from a list. | — | — |
 
 ## Notes
@@ -33,9 +33,9 @@ Service endpoint: `https://tasks.googleapis.com`
 - **`tasklists.update` / `tasks.update`:** Unused. Title, notes, due date, and
   status changes go through `*.patch`, which is enough for every field we
   edit.
-- **`tasks.move`:** The TUI reorders, reparents, and moves across lists. The
-  CLI can only set a parent on `create`; exposing moves is task 7 in
-  [`TASKS.md`](TASKS.md).
+- **`tasks.move`:** Both interfaces reorder, reparent, and move across lists.
+  The CLI uses `move` with mutually exclusive flags (`--up` / `--down` /
+  `--first` / `--after`, `--parent` / `--top-level`, `--to-list`).
 - **List management:** Create, rename, and delete lists are CLI-only today
   (task 6 for the TUI).
 - **`tasks.clear`:** Unsupported in both interfaces. Hiding completed tasks

@@ -126,21 +126,14 @@ fn execute<A: TasksApi>(client: &mut A, op: Op) -> Result<Outcome, Error> {
             Ok(Outcome::default())
         }
         Op::MoveToList { from, to, ids } => {
-            let mut moved = 0;
+            let tree = crate::google::move_tree(client, &from, &to, &ids)?;
             let mut warnings = Vec::new();
-            for (id, movement) in move_requests(&to, &ids) {
-                match client.move_task(&from, &id, &movement) {
-                    Ok(_) => moved += 1,
-                    Err(error) if moved == 0 => return Err(error),
-                    Err(error) => {
-                        warnings.push(Warning::PartialMove {
-                            moved,
-                            failed: id,
-                            error,
-                        });
-                        break;
-                    }
-                }
+            if let Some((failed, error)) = tree.partial {
+                warnings.push(Warning::PartialMove {
+                    moved: tree.moved,
+                    failed,
+                    error,
+                });
             }
             // Tasks have moved, so a failed reload is a warning, not a failure.
             let mut replaced = Vec::new();
@@ -184,25 +177,6 @@ fn execute<A: TasksApi>(client: &mut A, op: Op) -> Result<Outcome, Error> {
             })
         }
     }
-}
-
-pub(super) fn move_requests(destination: &str, ids: &[String]) -> Vec<(String, MoveTask)> {
-    let Some(root) = ids.first() else {
-        return Vec::new();
-    };
-    ids.iter()
-        .enumerate()
-        .map(|(index, id)| {
-            (
-                id.clone(),
-                MoveTask {
-                    destination_list: Some(destination.to_string()),
-                    parent: (index > 0).then(|| root.clone()),
-                    previous: (index > 1).then(|| ids[index - 1].clone()),
-                },
-            )
-        })
-        .collect()
 }
 
 #[cfg(test)]
@@ -622,18 +596,5 @@ mod tests {
         drop(commands);
         worker(Fake::default(), input, output);
         assert!(messages.try_recv().is_err());
-    }
-
-    #[test]
-    fn move_requests_preserve_subtask_sibling_order() {
-        let ids = vec!["parent".into(), "first".into(), "second".into()];
-        let requests = move_requests("destination", &ids);
-
-        assert_eq!(requests[0].1.parent, None);
-        assert_eq!(requests[0].1.previous, None);
-        assert_eq!(requests[1].1.parent.as_deref(), Some("parent"));
-        assert_eq!(requests[1].1.previous, None);
-        assert_eq!(requests[2].1.parent.as_deref(), Some("parent"));
-        assert_eq!(requests[2].1.previous.as_deref(), Some("first"));
     }
 }

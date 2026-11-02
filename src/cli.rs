@@ -3,12 +3,16 @@
 use std::io::{self, Write};
 
 use chrono::NaiveDate;
-use clap::{builder::PossibleValue, Parser, Subcommand, ValueEnum};
+use clap::{builder::PossibleValue, ArgGroup, Parser, Subcommand, ValueEnum};
 
-use crate::board::{ordered, Board};
+use crate::board::{
+    cross_list_block, eligible_parents, move_ids, ordered, reorder_after, reorder_step,
+    subtask_block, Board,
+};
 use crate::cache;
 use crate::google::{
-    auth::Auth, Client, CreateTask, Error as ApiError, ListPatch, TaskPatch, TasksApi,
+    auth::Auth, move_tree, Client, CreateTask, Error as ApiError, ListPatch, MoveTask, TaskPatch,
+    TasksApi,
 };
 use crate::markdown::{md_lists, md_task, md_task_section};
 use crate::model::{normalize_title, Status, Task, TaskList};
@@ -100,6 +104,38 @@ pub enum Command {
         list: Option<String>,
         #[arg(long)]
         yes: bool,
+    },
+    /// Reorder, reparent, or move a task to another list.
+    #[command(group(
+        ArgGroup::new("kind")
+            .required(true)
+            .args(["up", "down", "first", "after", "parent", "top_level", "to_list"])
+    ))]
+    Move {
+        task_id: String,
+        #[arg(short, long)]
+        list: Option<String>,
+        /// One place up among open siblings.
+        #[arg(long)]
+        up: bool,
+        /// One place down among open siblings.
+        #[arg(long)]
+        down: bool,
+        /// First among open siblings.
+        #[arg(long)]
+        first: bool,
+        /// Place after this open sibling.
+        #[arg(long)]
+        after: Option<String>,
+        /// Make this task a subtask of an open top-level task.
+        #[arg(long)]
+        parent: Option<String>,
+        /// Promote a subtask to the top level.
+        #[arg(long)]
+        top_level: bool,
+        /// Move the task and its subtasks into another list.
+        #[arg(long)]
+        to_list: Option<String>,
     },
     /// Create, rename, or delete a task list.
     List {
@@ -328,6 +364,27 @@ fn execute(
                 .map_err(api_fail)?;
             refresh_cache(api, paths, &list_id);
         }
+        Command::Move {
+            task_id,
+            list,
+            up,
+            down,
+            first,
+            after,
+            parent,
+            top_level,
+            to_list,
+        } => {
+            move_command(
+                api,
+                out,
+                format,
+                paths,
+                &task_id,
+                list.as_deref(),
+                MoveKind::from_flags(up, down, first, after, parent, top_level, to_list)?,
+            )?;
+        }
         Command::List { cmd } => match cmd {
             ListCmd::Create { title } => {
                 let title = normalize_title(&title)
@@ -363,6 +420,179 @@ fn execute(
         },
     }
     Ok(())
+}
+
+enum MoveKind {
+    Up,
+    Down,
+    First,
+    After(String),
+    Parent(String),
+    TopLevel,
+    ToList(String),
+}
+
+impl MoveKind {
+    fn from_flags(
+        up: bool,
+        down: bool,
+        first: bool,
+        after: Option<String>,
+        parent: Option<String>,
+        top_level: bool,
+        to_list: Option<String>,
+    ) -> Result<Self, Error> {
+        Ok(match (up, down, first, after, parent, top_level, to_list) {
+            (true, false, false, None, None, false, None) => Self::Up,
+            (false, true, false, None, None, false, None) => Self::Down,
+            (false, false, true, None, None, false, None) => Self::First,
+            (false, false, false, Some(after), None, false, None) => Self::After(after),
+            (false, false, false, None, Some(parent), false, None) => Self::Parent(parent),
+            (false, false, false, None, None, true, None) => Self::TopLevel,
+            (false, false, false, None, None, false, Some(to_list)) => Self::ToList(to_list),
+            _ => {
+                return Err(Error::Usage(
+                    "move needs exactly one of --up, --down, --first, --after, --parent, --top-level, --to-list"
+                        .into(),
+                ))
+            }
+        })
+    }
+}
+
+fn move_command(
+    api: &mut impl TasksApi,
+    out: &mut impl Write,
+    format: Format,
+    paths: &Paths,
+    task_id: &str,
+    list: Option<&str>,
+    kind: MoveKind,
+) -> Result<(), Error> {
+    match kind {
+        MoveKind::ToList(dest) => move_to_list(api, out, format, paths, task_id, list, &dest),
+        kind => place_in_list(api, out, format, paths, task_id, list, kind),
+    }
+}
+
+fn place_in_list(
+    api: &mut impl TasksApi,
+    out: &mut impl Write,
+    format: Format,
+    paths: &Paths,
+    task_id: &str,
+    list: Option<&str>,
+    kind: MoveKind,
+) -> Result<(), Error> {
+    let (list_id, task) = find_task(api, task_id, list)?;
+    let rows = ordered(tasks(api, &list_id)?);
+    let (parent, previous) = match kind {
+        MoveKind::Up | MoveKind::Down => {
+            let plan = reorder_step(&rows, &task.id, matches!(kind, MoveKind::Down))
+                .map_err(|error| Error::Usage(error.into()))?;
+            (plan.parent, plan.previous)
+        }
+        MoveKind::First => {
+            let plan = reorder_after(&rows, &task.id, None).map_err(reorder_usage)?;
+            (plan.parent, plan.previous)
+        }
+        MoveKind::After(after) => {
+            let plan = reorder_after(&rows, &task.id, Some(&after)).map_err(reorder_usage)?;
+            (plan.parent, plan.previous)
+        }
+        MoveKind::Parent(parent_id) => {
+            if let Some(error) = subtask_block(&rows, &task.id) {
+                return Err(Error::Usage(error.into()));
+            }
+            if !eligible_parents(&rows, &task.id)
+                .iter()
+                .any(|parent| parent.id == parent_id)
+            {
+                return Err(Error::Usage(
+                    "--parent must be an open top-level task in this list".into(),
+                ));
+            }
+            (Some(parent_id), None)
+        }
+        MoveKind::TopLevel => {
+            let Some(former) = task.parent.clone() else {
+                return Err(Error::Usage("task is already top-level".into()));
+            };
+            (None, Some(former))
+        }
+        MoveKind::ToList(_) => unreachable!("handled by move_to_list"),
+    };
+    api.move_task(
+        &list_id,
+        &task.id,
+        &MoveTask {
+            destination_list: None,
+            parent,
+            previous,
+        },
+    )
+    .map_err(api_fail)?;
+    let reloaded = tasks(api, &list_id)?;
+    let task = reloaded
+        .into_iter()
+        .find(|candidate| candidate.id == task.id)
+        .ok_or_else(|| Error::Fail("moved task missing after reload".into()))?;
+    write_task(out, format, &task)?;
+    refresh_cache(api, paths, &list_id);
+    Ok(())
+}
+
+fn move_to_list(
+    api: &mut impl TasksApi,
+    out: &mut impl Write,
+    format: Format,
+    paths: &Paths,
+    task_id: &str,
+    list: Option<&str>,
+    dest_spec: &str,
+) -> Result<(), Error> {
+    let (from_id, task) = find_task(api, task_id, list)?;
+    let lists = tasklists(api)?;
+    let dest = resolve_list(&lists, dest_spec)?;
+    if dest.id == from_id {
+        return Err(Error::Usage("--to-list must be a different list".into()));
+    }
+    let source_tasks = tasks(api, &from_id)?;
+    let rows = ordered(source_tasks);
+    if let Some(error) = cross_list_block(&rows, &task.id) {
+        return Err(Error::Usage(error.into()));
+    }
+    let ids = move_ids(&rows, &task.id);
+    if ids.is_empty() {
+        return Err(Error::Usage(format!("no task {:?}", task.id)));
+    }
+    let total = ids.len();
+    let tree = move_tree(api, &from_id, &dest.id, &ids).map_err(api_fail)?;
+    if let Some((failed, error)) = tree.partial {
+        return Err(Error::Fail(format!(
+            "moved {} of {total}; task {failed} failed: {error}",
+            tree.moved
+        )));
+    }
+    let dest_tasks = tasks(api, &dest.id)?;
+    let moved = dest_tasks
+        .into_iter()
+        .find(|candidate| candidate.id == task.id)
+        .ok_or_else(|| Error::Fail("moved task missing after reload".into()))?;
+    write_task(out, format, &moved)?;
+    refresh_cache(api, paths, &from_id);
+    refresh_cache(api, paths, &dest.id);
+    Ok(())
+}
+
+fn reorder_usage(error: &str) -> Error {
+    Error::Usage(
+        match error {
+            "its new neighbor is no longer beside it" => "--after must be an open sibling",
+            other => other,
+        }
+        .into(),
+    )
 }
 
 fn patch_status(
@@ -578,9 +808,12 @@ mod tests {
         fail: Option<String>,
         /// Fail `tasks()` once `task_fetches` reaches this 1-based count.
         fail_tasks_from: Option<usize>,
+        /// Fail `move_task` for these task ids.
+        fail_moves: Vec<String>,
         creates: usize,
         patches: Vec<Value>,
         deletes: Vec<(String, String)>,
+        moves: Vec<(String, String, MoveTask)>,
         task_fetches: usize,
         next_id: u32,
         last_cache: Option<cache::Cache>,
@@ -603,23 +836,48 @@ mod tests {
                 title: "Work".into(),
                 ..Default::default()
             };
+            let order = TaskList {
+                id: "lo".into(),
+                title: "Order".into(),
+                ..Default::default()
+            };
             let t1 = task("t1", "Buy milk", Status::NeedsAction);
             let t2 = Task {
                 notes: Some("Phase 3\nsee PR".into()),
                 ..task("t2", "Ship CLI", Status::Completed)
             };
+            let a = Task {
+                position: "1".into(),
+                ..task("a", "Alpha", Status::NeedsAction)
+            };
+            let a1 = Task {
+                parent: Some("a".into()),
+                position: "1".into(),
+                ..task("a1", "Alpha child", Status::NeedsAction)
+            };
+            let b = Task {
+                position: "2".into(),
+                ..task("b", "Beta", Status::NeedsAction)
+            };
+            let c = Task {
+                position: "3".into(),
+                ..task("c", "Gamma", Status::NeedsAction)
+            };
             Self {
-                lists: vec![inbox.clone(), other, work],
+                lists: vec![inbox.clone(), other, work, order],
                 tasks: HashMap::from([
                     ("l1".into(), vec![t1]),
                     ("l2".into(), vec![task("t1", "dup", Status::NeedsAction)]),
                     ("lw".into(), vec![t2]),
+                    ("lo".into(), vec![a, a1, b, c]),
                 ]),
                 fail: None,
                 fail_tasks_from: None,
+                fail_moves: Vec::new(),
                 creates: 0,
                 patches: Vec::new(),
                 deletes: Vec::new(),
+                moves: Vec::new(),
                 task_fetches: 0,
                 next_id: 10,
                 last_cache: None,
@@ -726,8 +984,13 @@ mod tests {
             &mut self,
             list_id: &str,
             task_id: &str,
-            movement: &crate::google::MoveTask,
+            movement: &MoveTask,
         ) -> crate::google::Result<Task> {
+            self.moves
+                .push((list_id.into(), task_id.into(), movement.clone()));
+            if self.fail_moves.iter().any(|id| id == task_id) {
+                return Err(ApiError::Transport("move refused".into()));
+            }
             let mut task = {
                 let source = self
                     .tasks
@@ -891,10 +1154,13 @@ mod tests {
     fn lists_markdown_and_json() {
         let mut api = Fake::new();
         let (_, md) = run(&mut api, &["lists"]);
-        assert_eq!(md, "- Inbox (`l1`)\n- Inbox (`l2`)\n- Work (`lw`)\n");
+        assert_eq!(
+            md,
+            "- Inbox (`l1`)\n- Inbox (`l2`)\n- Work (`lw`)\n- Order (`lo`)\n"
+        );
         let (_, json) = run(&mut api, &["lists", "-f", "json"]);
         let v: Vec<TaskList> = serde_json::from_str(json.trim()).unwrap();
-        assert_eq!(v.len(), 3);
+        assert_eq!(v.len(), 4);
     }
 
     #[test]
@@ -911,7 +1177,7 @@ mod tests {
         assert_eq!(v[0].id, "t2");
         let (_, board) = run(&mut api, &["-f", "json", "tasks"]);
         let cache: cache::Cache = serde_json::from_str(board.trim()).unwrap();
-        assert_eq!(cache.lists.len(), 3);
+        assert_eq!(cache.lists.len(), 4);
         let (_, board_md) = run(&mut api, &["tasks"]);
         assert!(board_md.contains("# Inbox (`l1`)"));
         assert!(board_md.contains("- [ ] Buy milk (`t1`)"));
@@ -1135,6 +1401,112 @@ mod tests {
         let err = run(&mut api, &["lists"]).0.unwrap_err();
         assert_eq!(err.exit_code(), 1);
         assert!(matches!(err, Error::Fail(m) if m.contains("sign-in expired")));
+    }
+
+    #[test]
+    fn move_requires_exactly_one_kind_of_flag() {
+        assert!(Args::try_parse_from(["google-tasks-tui", "move", "a"]).is_err());
+        assert!(Args::try_parse_from(["google-tasks-tui", "move", "a", "--up", "--down"]).is_err());
+        let parsed = parse(&["move", "a", "--up"]);
+        assert!(matches!(
+            parsed.command,
+            Some(Command::Move { up: true, .. })
+        ));
+    }
+
+    #[test]
+    fn move_reorders_among_open_siblings() {
+        let mut api = Fake::new();
+        let (res, _) = run(&mut api, &["move", "a", "--list", "Order", "--up"]);
+        assert!(matches!(res, Err(Error::Usage(m)) if m.contains("already first")));
+        assert!(api.moves.is_empty());
+
+        let (res, md) = run(&mut api, &["move", "a", "--list", "Order", "--down"]);
+        assert!(res.is_ok(), "{res:?}");
+        assert!(md.contains("# Alpha"));
+        assert_eq!(api.moves.len(), 1);
+        assert_eq!(api.moves[0].1, "a");
+        assert_eq!(api.moves[0].2.previous.as_deref(), Some("b"));
+        assert!(api.moves[0].2.destination_list.is_none());
+
+        api.moves.clear();
+        let (res, _) = run(&mut api, &["move", "c", "--list", "Order", "--first"]);
+        assert!(res.is_ok(), "{res:?}");
+        assert_eq!(api.moves[0].2.previous, None);
+
+        api.moves.clear();
+        let (res, _) = run(&mut api, &["move", "a", "--list", "Order", "--after", "c"]);
+        assert!(res.is_ok(), "{res:?}");
+        assert_eq!(api.moves[0].2.previous.as_deref(), Some("c"));
+
+        let (res, _) = run(
+            &mut api,
+            &["move", "a", "--list", "Order", "--after", "gone"],
+        );
+        assert!(matches!(res, Err(Error::Usage(m)) if m.contains("--after")));
+    }
+
+    #[test]
+    fn move_reparents_and_promotes() {
+        let mut api = Fake::new();
+        let (res, _) = run(&mut api, &["move", "a", "--list", "Order", "--parent", "b"]);
+        assert!(matches!(res, Err(Error::Usage(m)) if m.contains("subtasks")));
+        assert!(api.moves.is_empty());
+
+        let (res, md) = run(&mut api, &["move", "b", "--list", "Order", "--parent", "a"]);
+        assert!(res.is_ok(), "{res:?}");
+        assert!(md.contains("# Beta"));
+        assert_eq!(api.moves[0].2.parent.as_deref(), Some("a"));
+        assert_eq!(api.moves[0].2.previous, None);
+
+        api.moves.clear();
+        let (res, _) = run(&mut api, &["move", "a1", "--list", "Order", "--top-level"]);
+        assert!(res.is_ok(), "{res:?}");
+        assert_eq!(api.moves[0].2.parent, None);
+        assert_eq!(api.moves[0].2.previous.as_deref(), Some("a"));
+
+        let (res, _) = run(&mut api, &["move", "c", "--list", "Order", "--top-level"]);
+        assert!(matches!(res, Err(Error::Usage(m)) if m.contains("already top-level")));
+    }
+
+    #[test]
+    fn move_to_list_keeps_subtask_order_and_reports_partial() {
+        let mut api = Fake::new();
+        let (res, md) = run(
+            &mut api,
+            &["move", "a", "--list", "Order", "--to-list", "Work"],
+        );
+        assert!(res.is_ok(), "{res:?}");
+        assert!(md.contains("# Alpha"));
+        assert_eq!(api.moves.len(), 2);
+        assert_eq!(api.moves[0].1, "a");
+        assert_eq!(api.moves[0].2.destination_list.as_deref(), Some("lw"));
+        assert_eq!(api.moves[1].1, "a1");
+        assert_eq!(api.moves[1].2.parent.as_deref(), Some("a"));
+        assert!(api
+            .tasks
+            .get("lw")
+            .unwrap()
+            .iter()
+            .any(|task| task.id == "a"));
+        assert!(api
+            .last_cache
+            .as_ref()
+            .unwrap()
+            .lists
+            .iter()
+            .any(|list| list.list.id == "lw" && list.tasks.iter().any(|task| task.id == "a")));
+
+        let mut api = Fake::new();
+        api.fail_moves = vec!["a1".into()];
+        let (res, out) = run(
+            &mut api,
+            &["move", "a", "--list", "Order", "--to-list", "Work"],
+        );
+        assert!(
+            matches!(res, Err(Error::Fail(m)) if m.contains("moved 1 of 2") && m.contains("a1"))
+        );
+        assert!(out.is_empty());
     }
 
     #[test]

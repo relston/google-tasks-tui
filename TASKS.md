@@ -17,7 +17,6 @@ tasks take the next unused number, and numbers are never reused.
 
 - **5.** Edit task due dates in the TUI.
 - **6.** Manage task lists in the TUI.
-- **7.** Expose task moves (reorder, reparent, cross-list) through the CLI.
 - **8.** Search tasks across all lists. A key opens a picker that filters
   every task by title and notes (case-insensitive substring, like the
   existing `/` filter), shows each match's list as its subtitle, and on Enter

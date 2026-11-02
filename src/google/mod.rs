@@ -13,6 +13,37 @@ use crate::model::{Task, TaskList};
 pub use client::Client;
 pub use requests::{CreateTask, ListPatch, MoveTask, TaskPatch};
 
+/// Result of moving a task tree into another list. Reloads are left to the
+/// caller so the TUI can treat them as warnings and the CLI can refresh both.
+#[derive(Debug)]
+pub struct TreeMove {
+    pub moved: usize,
+    /// The first task that failed after at least one success.
+    pub partial: Option<(String, Error)>,
+}
+
+/// Move each id from `from` into `to`, preserving subtask order.
+pub fn move_tree(
+    api: &mut impl TasksApi,
+    from: &str,
+    to: &str,
+    ids: &[String],
+) -> Result<TreeMove> {
+    let mut moved = 0;
+    let mut partial = None;
+    for (id, movement) in MoveTask::tree(to, ids) {
+        match api.move_task(from, &id, &movement) {
+            Ok(_) => moved += 1,
+            Err(error) if moved == 0 => return Err(error),
+            Err(error) => {
+                partial = Some((id, error));
+                break;
+            }
+        }
+    }
+    Ok(TreeMove { moved, partial })
+}
+
 #[derive(Debug)]
 pub enum Error {
     AuthExpired,

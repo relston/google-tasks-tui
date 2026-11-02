@@ -2,7 +2,8 @@
 //! the mutation that tells Google.
 
 use crate::board::{
-    eligible_parents, move_ids, reorder_after, reorder_step, subtask_parent, Board, ReorderPlan,
+    cross_list_block, eligible_parents, move_ids, reorder_after, reorder_step, subtask_block,
+    subtask_parent, Board, ReorderPlan,
 };
 use crate::desktop::{self, Clipboard};
 use crate::google::{CreateTask, TaskPatch};
@@ -433,24 +434,9 @@ impl App {
         let Some(selected) = column.selected() else {
             return;
         };
-        if selected.task.parent.is_some() {
-            self.error = Some("unparent this task before choosing a new parent".into());
-            return;
-        }
-        if selected.task.assignment_info.is_some() {
-            self.error = Some("assigned tasks cannot become subtasks".into());
-            return;
-        }
         let tree = self.board.rows(&column.list.id);
-        if tree
-            .iter()
-            .any(|row| row.task.parent.as_deref() == Some(selected.task.id.as_str()))
-        {
-            self.error = Some("a task with subtasks cannot become a subtask".into());
-            return;
-        }
-        if selected.task.hidden && selected.task.is_done() {
-            self.error = Some("a completed hidden task cannot become a subtask".into());
+        if let Some(error) = subtask_block(&tree, &selected.task.id) {
+            self.error = Some(error.into());
             return;
         }
         let tasks = eligible_parents(&tree, &selected.task.id);
@@ -648,13 +634,8 @@ impl App {
         let Some(selected) = col.selected() else {
             return;
         };
-        if selected.task.assignment_info.is_some()
-            || self.board.rows(&col.list.id).iter().any(|row| {
-                row.task.parent.as_deref() == Some(selected.task.id.as_str())
-                    && row.task.assignment_info.is_some()
-            })
-        {
-            self.error = Some("assigned tasks cannot move between lists".into());
+        if let Some(error) = cross_list_block(&self.board.rows(&col.list.id), &selected.task.id) {
+            self.error = Some(error.into());
             return;
         }
         let current = col.list.id.clone();

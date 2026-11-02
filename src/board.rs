@@ -270,6 +270,40 @@ pub fn eligible_parents(rows: &[Row], task_id: &str) -> Vec<Task> {
         .collect()
 }
 
+/// Why this task cannot become a subtask, if it cannot.
+pub fn subtask_block(rows: &[Row], task_id: &str) -> Option<&'static str> {
+    let row = rows.iter().find(|row| row.task.id == task_id)?;
+    if row.task.parent.is_some() {
+        return Some("unparent this task before choosing a new parent");
+    }
+    if row.task.assignment_info.is_some() {
+        return Some("assigned tasks cannot become subtasks");
+    }
+    if rows
+        .iter()
+        .any(|row| row.task.parent.as_deref() == Some(task_id))
+    {
+        return Some("a task with subtasks cannot become a subtask");
+    }
+    if row.task.hidden && row.task.is_done() {
+        return Some("a completed hidden task cannot become a subtask");
+    }
+    None
+}
+
+/// Why this task (and its subtasks) cannot move to another list, if they cannot.
+pub fn cross_list_block(rows: &[Row], task_id: &str) -> Option<&'static str> {
+    let selected = rows.iter().find(|row| row.task.id == task_id)?;
+    if selected.task.assignment_info.is_some()
+        || rows.iter().any(|row| {
+            row.task.parent.as_deref() == Some(task_id) && row.task.assignment_info.is_some()
+        })
+    {
+        return Some("assigned tasks cannot move between lists");
+    }
+    None
+}
+
 /// A reorder: the task's parent, the open sibling Google should place it
 /// after (`None` means first), and the position changes that show it there.
 #[derive(Debug, PartialEq, Eq)]
@@ -547,6 +581,74 @@ mod tests {
         assert_eq!(move_ids(&rows, "a"), ["a", "a1"]);
         assert_eq!(move_ids(&rows, "a1"), ["a1"]);
         assert!(move_ids(&rows, "gone").is_empty());
+    }
+
+    #[test]
+    fn subtask_block_covers_parent_children_assignment_and_hidden() {
+        let rows = ordered(vec![
+            task("top", None, "1", false),
+            task("child", Some("top"), "1", false),
+            task("available", None, "2", false),
+            Task {
+                hidden: true,
+                ..task("hidden-done", None, "3", true)
+            },
+            Task {
+                assignment_info: Some(crate::model::AssignmentInfo {
+                    link_to_task: "https://example".into(),
+                    surface_type: "DOCUMENT".into(),
+                }),
+                ..task("assigned", None, "4", false)
+            },
+        ]);
+        assert_eq!(
+            subtask_block(&rows, "child"),
+            Some("unparent this task before choosing a new parent")
+        );
+        assert_eq!(
+            subtask_block(&rows, "top"),
+            Some("a task with subtasks cannot become a subtask")
+        );
+        assert_eq!(
+            subtask_block(&rows, "assigned"),
+            Some("assigned tasks cannot become subtasks")
+        );
+        assert_eq!(
+            subtask_block(&rows, "hidden-done"),
+            Some("a completed hidden task cannot become a subtask")
+        );
+        assert_eq!(subtask_block(&rows, "available"), None);
+    }
+
+    #[test]
+    fn cross_list_block_rejects_assigned_tasks_and_subtasks() {
+        let rows = ordered(vec![
+            task("ok", None, "1", false),
+            Task {
+                assignment_info: Some(crate::model::AssignmentInfo {
+                    link_to_task: "https://example".into(),
+                    surface_type: "DOCUMENT".into(),
+                }),
+                ..task("assigned", None, "2", false)
+            },
+            task("parent", None, "3", false),
+            Task {
+                assignment_info: Some(crate::model::AssignmentInfo {
+                    link_to_task: "https://example".into(),
+                    surface_type: "DOCUMENT".into(),
+                }),
+                ..task("assigned-child", Some("parent"), "1", false)
+            },
+        ]);
+        assert_eq!(cross_list_block(&rows, "ok"), None);
+        assert_eq!(
+            cross_list_block(&rows, "assigned"),
+            Some("assigned tasks cannot move between lists")
+        );
+        assert_eq!(
+            cross_list_block(&rows, "parent"),
+            Some("assigned tasks cannot move between lists")
+        );
     }
 
     #[test]

@@ -4,6 +4,15 @@ Notable changes to google-tasks-tui, newest first. There are no tagged
 releases yet; entries are grouped by date. Open work is tracked in
 [`TASKS.md`](TASKS.md).
 
+## 2026-11-02
+
+### Added
+
+- CLI `move` exposes the same reorder, reparent, and cross-list moves as the
+  TUI: `--up` / `--down` / `--first` / `--after`, `--parent` / `--top-level`,
+  and `--to-list`. Partial cross-list moves exit 1 with a count; shared board
+  checks and `MoveTask::tree` keep both interfaces on one set of rules.
+
 ## 2026-11-01
 
 ### Fixed

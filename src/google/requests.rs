@@ -50,12 +50,35 @@ fn null<S: serde::Serializer>(_: &bool, serializer: S) -> Result<S::Ok, S::Error
     serializer.serialize_none()
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MoveTask {
     /// `None` moves within the current list.
     pub destination_list: Option<String>,
     pub parent: Option<String>,
     pub previous: Option<String>,
+}
+
+impl MoveTask {
+    /// Requests that move `ids` (a task, then its subtasks) into `destination`,
+    /// preserving sibling order under the root.
+    pub fn tree(destination: &str, ids: &[String]) -> Vec<(String, MoveTask)> {
+        let Some(root) = ids.first() else {
+            return Vec::new();
+        };
+        ids.iter()
+            .enumerate()
+            .map(|(index, id)| {
+                (
+                    id.clone(),
+                    MoveTask {
+                        destination_list: Some(destination.to_string()),
+                        parent: (index > 0).then(|| root.clone()),
+                        previous: (index > 1).then(|| ids[index - 1].clone()),
+                    },
+                )
+            })
+            .collect()
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -97,5 +120,22 @@ mod tests {
             serde_json::to_value(dated).unwrap(),
             json!({ "title": "Dated", "due": "2026-09-21T00:00:00.000Z" })
         );
+    }
+
+    #[test]
+    fn move_tree_preserves_subtask_sibling_order() {
+        let ids = vec!["parent".into(), "first".into(), "second".into()];
+        let requests = MoveTask::tree("destination", &ids);
+
+        assert_eq!(requests[0].1.parent, None);
+        assert_eq!(requests[0].1.previous, None);
+        assert_eq!(
+            requests[0].1.destination_list.as_deref(),
+            Some("destination")
+        );
+        assert_eq!(requests[1].1.parent.as_deref(), Some("parent"));
+        assert_eq!(requests[1].1.previous, None);
+        assert_eq!(requests[2].1.parent.as_deref(), Some("parent"));
+        assert_eq!(requests[2].1.previous.as_deref(), Some("first"));
     }
 }
