@@ -69,6 +69,11 @@ impl App {
                 (Action::StartFilter, "filter"),
                 (Action::ClosePicker, "close"),
             ])
+        } else if matches!(self.interaction, Interaction::DateEdit(_)) {
+            self.hints(&[
+                (Action::SaveEdit, "set due date"),
+                (Action::CancelEdit, "cancel"),
+            ])
         } else if self.is_creating() {
             self.hints(&[(Action::SaveEdit, "create"), (Action::CancelEdit, "cancel")])
         } else if self.edit().is_some_and(|e| e.field() == FieldId::Notes) {

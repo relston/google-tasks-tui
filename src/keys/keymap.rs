@@ -99,12 +99,15 @@ impl Keymap {
                             }
                         };
 
-                        if matches!(context, BindingContext::Editor | BindingContext::Filter)
-                            && matches!(
-                                binding.combo,
-                                (KeyCode::Char(_), modifiers) if modifiers.is_empty()
-                            )
-                        {
+                        if matches!(
+                            context,
+                            BindingContext::Editor
+                                | BindingContext::Filter
+                                | BindingContext::DateEdit
+                        ) && matches!(
+                            binding.combo,
+                            (KeyCode::Char(_), modifiers) if modifiers.is_empty()
+                        ) {
                             diagnostics.push(format!(
                                 "unsafe keybinding: {} = {raw:?} would intercept typing; disabling binding",
                                 action.name()

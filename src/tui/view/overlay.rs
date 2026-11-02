@@ -12,12 +12,22 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::theme::Theme;
 
-use super::super::app::App;
+use super::super::app::{App, Interaction};
+use super::super::debug_date;
 use super::super::picker::{Picker, PickerStyle};
 use super::text::{ellipsize, wrap};
 use super::ViewState;
 
 impl App {
+    /// Floating due-date panel over a dimmed board.
+    pub(super) fn draw_date_edit(&self, f: &mut Frame, area: Rect, t: &Theme) {
+        let Interaction::DateEdit(edit) = &self.interaction else {
+            return;
+        };
+        dim_backdrop(f.buffer_mut(), area);
+        debug_date::draw_panel(f, area, &edit.editor, t);
+    }
+
     /// Every modal list draws through here, over a dimmed board. Browse and
     /// Move share one list layout; the read-only Keyboard card flows into
     /// columns. Filtering and the empty state are shared.
@@ -246,7 +256,7 @@ const BACKDROP_KEEP: f32 = 0.6;
 /// Push the board back while an overlay is open: 24-bit colors darken, and
 /// anything else (ANSI colors, the terminal default, `NO_COLOR`) gets the
 /// terminal's dim attribute.
-fn dim_backdrop(buf: &mut Buffer, area: Rect) {
+pub(super) fn dim_backdrop(buf: &mut Buffer, area: Rect) {
     let darken = |color: Color| match color {
         Color::Rgb(r, g, b) => {
             let scale = |c: u8| (f32::from(c) * BACKDROP_KEEP).round() as u8;

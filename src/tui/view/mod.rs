@@ -69,6 +69,7 @@ impl App {
 
         self.draw_board(f, body, t, view);
         self.draw_picker(f, body, t, view);
+        self.draw_date_edit(f, body, t);
 
         self.draw_status(f, status, t);
     }
@@ -486,9 +487,16 @@ mod tests {
 
         let mut help = one_list_app();
         help.on_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
-        let screen = render_app(&help, 50, 20);
+        let screen = render_app(&help, 50, 24);
         assert!(screen.contains("Keyboard"), "{screen}");
-        assert!(screen.contains("new task"), "{screen}");
+        assert!(screen.contains("edit due date"), "{screen}");
+
+        let mut due = one_list_app();
+        due.sync = SyncState::Ready;
+        due.on_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+        let screen = render_app(&due, 50, 20);
+        assert!(screen.contains("date"), "{screen}");
+        assert!(screen.contains("Su Mo Tu We Th Fr Sa"), "{screen}");
     }
 
     #[test]

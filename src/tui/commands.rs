@@ -12,6 +12,7 @@ use crate::markdown::md_yank;
 use crate::model::{normalize_title, urls_in, Status, Task, TaskList};
 
 use super::app::{App, Interaction, QuitState, Shelf};
+use super::debug_date::{DateEdit, DateEditor};
 use super::editor::{Edit, EditTarget, FieldId};
 use super::mutation::Reorder;
 use super::picker::{Picker, PickerRow};
@@ -117,6 +118,69 @@ impl App {
             cursor: 0,
         });
         self.shelf = Shelf::Open(FieldId::Title);
+    }
+
+    /// Open the floating due-date editor for the selected task.
+    pub(super) fn start_edit_due(&mut self) {
+        if !self.writable() {
+            return;
+        }
+        let Some(col) = self.columns.get(self.focus) else {
+            return;
+        };
+        let Some(row) = col.selected() else {
+            return;
+        };
+        let due = row
+            .task
+            .due
+            .unwrap_or_else(|| chrono::Local::now().date_naive());
+        self.interaction = Interaction::DateEdit(DateEdit {
+            list_id: col.list.id.clone(),
+            task_id: row.task.id.clone(),
+            editor: DateEditor::new(due),
+        });
+    }
+
+    /// Apply the date editor's value to the selected task via `tasks.patch`.
+    pub(super) fn commit_due(&mut self) {
+        if !self.writable() {
+            return;
+        }
+        let interaction = std::mem::replace(&mut self.interaction, Interaction::Idle);
+        let Interaction::DateEdit(edit) = interaction else {
+            self.interaction = interaction;
+            return;
+        };
+        let DateEdit {
+            list_id,
+            task_id,
+            editor,
+        } = edit;
+        let Some(etag) = self
+            .board
+            .task(&list_id, &task_id)
+            .map(|task| task.etag.clone())
+        else {
+            self.recover("edited task disappeared".into());
+            return;
+        };
+        let due = editor.date;
+        self.error = None;
+        let op = Op::Patch {
+            list: list_id.clone(),
+            task: task_id.clone(),
+            patch: TaskPatch {
+                due: Some(due),
+                ..Default::default()
+            },
+            etag,
+        };
+        self.submit("save", op, &[&list_id], |board| {
+            if let Some(task) = board.task_mut(&list_id, &task_id) {
+                task.due = Some(due);
+            }
+        });
     }
 
     /// Edit the focused shelf field, opening the shelf on the title if it's shut.
@@ -710,6 +774,50 @@ impl App {
 mod tests {
     use super::*;
     use crate::tui::test_support::*;
+    use chrono::NaiveDate;
+
+    #[test]
+    fn d_opens_the_due_date_editor_and_enter_patches_the_task() {
+        let (mut app, commands) = app_with_lists(&["a"]);
+        let _ = commands.recv().unwrap();
+        app.sync = SyncState::Ready;
+        let mut open = task("a-one", None, "1", false);
+        open.due = NaiveDate::from_ymd_opt(2026, 3, 9);
+        set_tasks(&mut app, "a", vec![open], "a-one");
+
+        app.on_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+        let Interaction::DateEdit(edit) = &app.interaction else {
+            panic!("expected date editor");
+        };
+        assert_eq!(
+            edit.editor.date,
+            NaiveDate::from_ymd_opt(2026, 3, 9).unwrap()
+        );
+
+        // Focus starts on year; Tab to day, bump once, then save.
+        app.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert!(matches!(app.interaction, Interaction::Idle));
+        assert_eq!(
+            app.board.task("a", "a-one").and_then(|t| t.due),
+            NaiveDate::from_ymd_opt(2026, 3, 10)
+        );
+        let (
+            _,
+            Op::Patch {
+                list, task, patch, ..
+            },
+        ) = sent(&commands)
+        else {
+            panic!("expected due-date patch");
+        };
+        assert_eq!(list, "a");
+        assert_eq!(task, "a-one");
+        assert_eq!(patch.due, NaiveDate::from_ymd_opt(2026, 3, 10));
+    }
 
     #[test]
     fn hidden_completed_subtasks_stay_part_of_their_parent() {

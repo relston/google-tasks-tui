@@ -172,8 +172,8 @@ impl From<io::Error> for Error {
     }
 }
 
-/// Blank TUI with a centered date panel. No auth, no Google — for iterating
-/// on due-date editing before wiring it into the board.
+/// Blank TUI with a centered date panel. No auth, no Google — handy when
+/// iterating on the shared date editor without a board.
 pub fn start_debug_date() -> Result<(), Error> {
     let mut terminal = TerminalGuard::init();
     let today = chrono::Local::now().date_naive();

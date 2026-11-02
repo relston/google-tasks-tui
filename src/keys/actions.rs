@@ -9,6 +9,7 @@ pub enum BindingContext {
     Picker,
     Filter,
     Editor,
+    DateEdit,
     Confirm,
 }
 
@@ -20,6 +21,7 @@ impl BindingContext {
             Self::Picker => "Picker overlays",
             Self::Filter => "Picker filter input",
             Self::Editor => "Task editor",
+            Self::DateEdit => "Due date editor",
             Self::Confirm => "Confirmation",
         }
     }
@@ -88,7 +90,8 @@ actions! {
     Edit              = "edit",                [Board],         ["i"],                                  "edit focused field";
     ToggleDone        = "toggle_done",         [Board],         ["space"],                              "tick / untick";
     ToggleCompleted   = "toggle_completed",    [Board],         ["v"],                                  "show / hide completed";
-    DeleteTask        = "delete_task",         [Board],         ["d"],                                  "delete task";
+    DeleteTask        = "delete_task",         [Board],         ["x"],                                  "delete task";
+    EditDue           = "edit_due",            [Board],         ["d"],                                  "edit due date";
     CreateTask        = "create_task",         [Board],         ["c"],                                  "new task";
     CreateSubtask     = "create_subtask",      [Board],         ["shift+c"],                            "new subtask";
     Refresh           = "refresh",             [Board],         ["r"],                                  "refresh from Google";
@@ -113,8 +116,8 @@ actions! {
     FilterAccept      = "filter_accept",       [Filter],        ["enter"],                              "choose filtered item";
     FilterAcceptAll   = "filter_accept_all",   [Filter],        ["shift+enter"],                        "choose all filtered items";
     FilterBackspace   = "filter_backspace",    [Filter],        ["backspace"],                          "delete filter character";
-    CancelEdit        = "cancel_edit",         [Editor],        ["esc"],                                "cancel edit";
-    SaveEdit          = "save_edit",           [Editor],        ["enter"],                              "save edit";
+    CancelEdit        = "cancel_edit",         [Editor, DateEdit], ["esc"],                             "cancel edit";
+    SaveEdit          = "save_edit",           [Editor, DateEdit], ["enter"],                           "save edit";
     InsertNewline     = "insert_newline",      [Editor],        ["shift+enter", "alt+enter", "ctrl+j"], "insert notes newline";
     DeleteWord        = "delete_word",         [Editor],        ["ctrl+w"],                             "delete previous word";
     ClearToLineStart  = "clear_to_line_start", [Editor],        ["ctrl+u"],                             "clear to line start";
@@ -175,6 +178,10 @@ mod tests {
             (BindingContext::Editor, "ctrl+w", Action::DeleteWord),
             (BindingContext::Editor, "alt+enter", Action::InsertNewline),
             (BindingContext::Editor, "home", Action::CursorLineStart),
+            (BindingContext::DateEdit, "enter", Action::SaveEdit),
+            (BindingContext::DateEdit, "esc", Action::CancelEdit),
+            (BindingContext::Board, "d", Action::EditDue),
+            (BindingContext::Board, "x", Action::DeleteTask),
             (BindingContext::Confirm, "y", Action::ConfirmDelete),
         ];
 

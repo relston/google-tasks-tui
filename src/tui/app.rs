@@ -14,6 +14,7 @@ use crate::theme::{self, Theme};
 
 use super::columns::{visible_rows, Column};
 use super::commands::{ParentPick, Pending};
+use super::debug_date::DateEdit;
 use super::editor::{Edit, FieldId};
 use super::mutation::PendingOperation;
 use super::picker::Picker;
@@ -50,6 +51,7 @@ pub(super) enum QuitState {
 pub(super) enum Interaction {
     Idle,
     Editing(Edit),
+    DateEdit(DateEdit),
     ConfirmDelete(Pending),
     Browse(Picker),
     Move(Picker),

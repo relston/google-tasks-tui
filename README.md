@@ -11,11 +11,11 @@ It uses your terminal's own palette, follows your active
 `config.toml`, and `NO_COLOR` is honored.
 
 Press `c` to create a task, `C` to create a subtask under the selected one,
-`Space` to tick one off, `d` to delete it, `b` to open URLs from its notes,
-`m` to move it to another list, `?` for the keyboard list, and `Tab`/`i` in
-the shelf to edit its title or notes. Due dates are next. The same CRUD is
-available as subcommands for scripts and agents (`google-tasks-tui lists`,
-`create`, `done`, …).
+`Space` to tick one off, `d` to set its due date, `x` to delete it, `b` to
+open URLs from its notes, `m` to move it to another list, `?` for the
+keyboard list, and `Tab`/`i` in the shelf to edit its title or notes. The
+same CRUD is available as subcommands for scripts and agents
+(`google-tasks-tui lists`, `create`, `done`, …).
 
 ## Features
 
@@ -41,7 +41,9 @@ available as subcommands for scripts and agents (`google-tasks-tui lists`,
   subtask progress, notes, links, and the last-updated time at the bottom.
 - `Space` ticks or unticks the selected task. It moves to or from the
   completed group straight away, and the selection follows it.
-- `d` deletes the selected task after a y/n confirmation in the status bar.
+- `d` opens a floating due-date editor (segment entry plus a month calendar).
+  Enter saves the date to Google; Esc cancels.
+- `x` deletes the selected task after a y/n confirmation in the status bar.
   The prompt names the task and counts the subtasks that go with it, since
   Google deletes those too.
 - `y` copies the selected task to the system clipboard as markdown, ready to
@@ -281,7 +283,7 @@ requires `--yes` because Google removes every task in that list.
 | Reparent/unparent tasks | `<` / `>` | `move --parent` / `--top-level` | Same-list parent rules |
 | Reorder tasks in a list | `Alt-j` / `Alt-k` | `move --up` / `--down` / `--first` / `--after` | One place among open siblings |
 | Edit notes | Yes | Yes | Assigned Docs/Chat tasks are rejected |
-| Edit due date/status directly | Status via `Space` | Yes | Due-date editor remains future TUI work |
+| Edit due date/status directly | Due via `d`; status via `Space` | Yes | Same `tasks.patch` path |
 | Move tasks between lists | Yes | `move --to-list` | Task plus subtasks; partial moves report a count |
 | Task-list create/rename/delete | No | Yes | TUI list management remains deferred |
 | Browse/copy task links | Yes | No | Terminal-interactive behavior |
@@ -307,7 +309,8 @@ requires `--yes` because Google removes every task in that list.
 | `v`            | Show / hide completed tasks     |
 | `Enter`        | Open / close the details shelf  |
 | `i`            | Edit the focused shelf field    |
-| `d`            | Delete the task (asks y/n)      |
+| `d`            | Edit the task's due date         |
+| `x`            | Delete the task (asks y/n)      |
 | `r`            | Refresh from Google             |
 | `t`            | Toggle transparent background   |
 | `?`            | List the keyboard commands      |

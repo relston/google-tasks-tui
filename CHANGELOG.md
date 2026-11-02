@@ -14,10 +14,13 @@ releases yet; entries are grouped by date. Open work is tracked in
 
 ### Added
 
+- TUI `d` opens a floating due-date editor for the selected task (same segment
+  + calendar panel as `--debug-date-time`). Enter patches the due date; Esc
+  cancels. Delete moves to `x`.
 - `--debug-date-time` opens a blank TUI with a centered date picker (`YYYY MM
   DD`) and a `cal`-style month preview beneath it (month name, no year; the
   selected day is highlighted). Tab / Shift+Tab / `n` / `p` / digits edit
-  segments (`q` / Esc to quit). Scratch surface for task 5.
+  segments (`q` / Esc to quit).
 - CLI `move` exposes the same reorder, reparent, and cross-list moves as the
   TUI: `--up` / `--down` / `--first` / `--after`, `--parent` / `--top-level`,
   and `--to-list`. Partial cross-list moves exit 1 with a count; shared board

@@ -8,6 +8,20 @@ use super::app::{App, Interaction, QuitState, Shelf};
 use super::editor::FieldId;
 use super::picker::{picker_key, Picker, PickerKey};
 
+fn date_edit_key(app: &mut App, k: KeyEvent) {
+    match app.keymap.resolve(BindingContext::DateEdit, &k) {
+        Some(Action::CancelEdit) => {
+            app.interaction = Interaction::Idle;
+        }
+        Some(Action::SaveEdit) => app.commit_due(),
+        _ => {
+            if let Interaction::DateEdit(edit) = &mut app.interaction {
+                edit.editor.on_key(k);
+            }
+        }
+    }
+}
+
 pub(super) fn no_modifiers(modifiers: KeyModifiers) -> bool {
     modifiers.is_empty()
 }
@@ -57,6 +71,10 @@ impl App {
         }
         if matches!(self.interaction, Interaction::Editing(_)) {
             self.edit_key(k);
+            return;
+        }
+        if matches!(self.interaction, Interaction::DateEdit(_)) {
+            date_edit_key(self, k);
             return;
         }
         if matches!(self.interaction, Interaction::ConfirmDelete(_)) {
@@ -124,6 +142,7 @@ impl App {
                 }
             }
             Action::Edit => self.start_edit(),
+            Action::EditDue => self.start_edit_due(),
             Action::ToggleDone => self.toggle_done(),
             Action::ToggleCompleted => self.toggle_completed(),
             Action::DeleteTask => self.ask_delete(),
@@ -281,7 +300,7 @@ mod tests {
         let mut config = Config::default();
         config
             .keys
-            .insert("delete_task".into(), BindingConfig::empty());
+            .insert("edit_due".into(), BindingConfig::empty());
         let (mut app, _commands) = app_with_lists_and_config(&["a"], config);
         app.sync = SyncState::Ready;
 

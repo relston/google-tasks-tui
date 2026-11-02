@@ -65,6 +65,14 @@ pub(super) struct DateEditor {
     pub(super) draft: Option<String>,
 }
 
+/// Board overlay: edit a selected task's due date.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct DateEdit {
+    pub(super) list_id: String,
+    pub(super) task_id: String,
+    pub(super) editor: DateEditor,
+}
+
 impl DateEditor {
     pub(super) fn new(date: NaiveDate) -> Self {
         Self {
@@ -340,9 +348,8 @@ fn preview_paragraph(date: NaiveDate, theme: &Theme) -> Paragraph<'static> {
     Paragraph::new(lines)
 }
 
-pub(super) fn draw(frame: &mut Frame, editor: &DateEditor) {
-    let area = frame.area();
-    let theme = theme::load(&Config::default().theme);
+/// Draw the date panel centered in `area` using `theme`.
+pub(super) fn draw_panel(frame: &mut Frame, area: Rect, editor: &DateEditor, theme: &Theme) {
     let panel = panel_rect(area, editor.date);
     frame.render_widget(Clear, panel);
 
@@ -359,7 +366,7 @@ pub(super) fn draw(frame: &mut Frame, editor: &DateEditor) {
     }
     let date_area = Rect::new(inner.x, inner.y, inner.width, DATE_ROWS.min(inner.height));
     frame.render_widget(
-        Paragraph::new(segment_spans(editor, &theme)).alignment(ratatui::layout::Alignment::Center),
+        Paragraph::new(segment_spans(editor, theme)).alignment(ratatui::layout::Alignment::Center),
         date_area,
     );
 
@@ -371,8 +378,13 @@ pub(super) fn draw(frame: &mut Frame, editor: &DateEditor) {
     let preview_height = inner.height.saturating_sub(DATE_ROWS.saturating_add(GAP));
     if preview_height > 0 {
         let preview = Rect::new(inner.x, preview_top, inner.width, preview_height);
-        frame.render_widget(preview_paragraph(editor.date, &theme), preview);
+        frame.render_widget(preview_paragraph(editor.date, theme), preview);
     }
+}
+
+pub(super) fn draw(frame: &mut Frame, editor: &DateEditor) {
+    let theme = theme::load(&Config::default().theme);
+    draw_panel(frame, frame.area(), editor, &theme);
 }
 
 pub(super) fn run(term: &mut DefaultTerminal, today: NaiveDate) -> io::Result<()> {

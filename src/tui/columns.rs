@@ -123,7 +123,7 @@ impl App {
             Interaction::Editing(Edit {
                 target: EditTarget::Existing { .. },
                 ..
-            })
+            }) | Interaction::DateEdit(_)
         ) {
             self.interaction = Interaction::Idle;
             self.error = Some("the task being edited disappeared; the edit was not saved".into());
