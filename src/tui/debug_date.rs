@@ -17,8 +17,12 @@ use crate::config::Config;
 use crate::theme::{self, Theme};
 
 const TICK: std::time::Duration = std::time::Duration::from_millis(100);
-const PANEL_WIDTH: u16 = 28;
-const PANEL_HEIGHT: u16 = 5;
+/// Matches `cal`: seven two-digit day columns with single spaces.
+const CAL_WIDTH: usize = 20;
+const PANEL_WIDTH: u16 = 22;
+const PICKER_HEIGHT: u16 = 3;
+const GAP: u16 = 1;
+const PREVIEW_CHROME: u16 = 4; // borders + month title + weekday header
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Segment {
@@ -214,16 +218,65 @@ fn clamp_ymd(year: i32, month: u32, day: u32) -> Option<NaiveDate> {
     })
 }
 
-/// Centered floating panel inside the viewport.
-pub(super) fn panel_rect(area: Rect) -> Rect {
+fn center_text(text: &str, width: usize) -> String {
+    let pad = width.saturating_sub(text.chars().count());
+    let left = pad / 2;
+    let right = pad - left;
+    format!("{}{}{}", " ".repeat(left), text, " ".repeat(right))
+}
+
+/// `cal`-style month grid for `date`, without the year in the title.
+pub(super) fn month_preview_lines(date: NaiveDate) -> Vec<String> {
+    let title = center_text(&date.format("%B").to_string(), CAL_WIDTH);
+    let mut lines = vec![title, "Su Mo Tu We Th Fr Sa".into()];
+    let first = NaiveDate::from_ymd_opt(date.year(), date.month(), 1)
+        .expect("date picker month always has a first day");
+    let mut day = 1u32;
+    let last = days_in_month(date.year(), date.month()).unwrap_or(28);
+    let mut week = vec!["  ".to_string(); first.weekday().num_days_from_sunday() as usize];
+    while day <= last {
+        week.push(format!("{day:2}"));
+        if week.len() == 7 {
+            lines.push(week.join(" "));
+            week.clear();
+        }
+        day += 1;
+    }
+    if !week.is_empty() {
+        lines.push(week.join(" "));
+    }
+    lines
+}
+
+fn week_count(date: NaiveDate) -> u16 {
+    month_preview_lines(date).len().saturating_sub(2) as u16
+}
+
+/// Centered stack: date picker on top, month preview beneath.
+pub(super) fn stack_rects(area: Rect, date: NaiveDate) -> (Rect, Rect) {
     let width = area.width.min(PANEL_WIDTH);
-    let height = area.height.min(PANEL_HEIGHT);
-    Rect::new(
+    let preview_height = PREVIEW_CHROME + week_count(date);
+    let total_height = PICKER_HEIGHT + GAP + preview_height;
+    let height = area.height.min(total_height);
+    let stack = Rect::new(
         area.x + area.width.saturating_sub(width) / 2,
         area.y + area.height.saturating_sub(height) / 2,
         width,
         height,
-    )
+    );
+    let picker_height = stack.height.min(PICKER_HEIGHT);
+    let picker = Rect::new(stack.x, stack.y, stack.width, picker_height);
+    let preview_top = stack.y.saturating_add(picker_height).saturating_add(GAP);
+    let preview_height = stack
+        .height
+        .saturating_sub(picker_height.saturating_add(GAP));
+    let preview = Rect::new(
+        stack.x,
+        preview_top.min(stack.y + stack.height),
+        stack.width,
+        preview_height,
+    );
+    (picker, preview)
 }
 
 fn segment_spans(editor: &DateEditor, theme: &Theme) -> Line<'static> {
@@ -258,22 +311,69 @@ fn segment_span(text: &str, focused: bool, theme: &Theme) -> Span<'static> {
     Span::styled(text.to_string(), style)
 }
 
+fn preview_paragraph(date: NaiveDate, theme: &Theme) -> Paragraph<'static> {
+    let selected = date.day();
+    let lines: Vec<Line<'static>> = month_preview_lines(date)
+        .into_iter()
+        .enumerate()
+        .map(|(index, line)| {
+            if index < 2 {
+                return Line::styled(line, Style::default().fg(theme.fg));
+            }
+            // Week rows: " 1  2  3 ..." — highlight the selected day cell.
+            let mut spans = Vec::new();
+            for (cell_index, cell) in line.split(' ').enumerate() {
+                if cell_index > 0 {
+                    spans.push(Span::raw(" "));
+                }
+                let day = cell.trim().parse::<u32>().ok();
+                let style = if day == Some(selected) {
+                    theme.selection().add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(theme.fg)
+                };
+                spans.push(Span::styled(cell.to_string(), style));
+            }
+            Line::from(spans)
+        })
+        .collect();
+    Paragraph::new(lines).alignment(ratatui::layout::Alignment::Center)
+}
+
 pub(super) fn draw(frame: &mut Frame, editor: &DateEditor) {
     let area = frame.area();
     let theme = theme::load(&Config::default().theme);
-    let panel = panel_rect(area);
-    frame.render_widget(Clear, panel);
-    let block = Block::bordered()
+    let (picker, preview) = stack_rects(area, editor.date);
+    let stack = Rect::new(
+        picker.x,
+        picker.y,
+        picker.width,
+        preview.y + preview.height - picker.y,
+    );
+    frame.render_widget(Clear, stack);
+
+    let picker_block = Block::bordered()
         .border_type(BorderType::Rounded)
         .title(" date ")
         .border_style(Style::default().fg(theme.muted))
         .style(Style::default().fg(theme.fg).bg(theme.bg));
-    let inner = block.inner(panel);
-    frame.render_widget(block, panel);
+    let picker_inner = picker_block.inner(picker);
+    frame.render_widget(picker_block, picker);
     frame.render_widget(
         Paragraph::new(segment_spans(editor, &theme)).alignment(ratatui::layout::Alignment::Center),
-        inner,
+        picker_inner,
     );
+
+    if preview.height >= 3 {
+        let preview_block = Block::bordered()
+            .border_type(BorderType::Rounded)
+            .title(" preview ")
+            .border_style(Style::default().fg(theme.muted))
+            .style(Style::default().fg(theme.fg).bg(theme.bg));
+        let preview_inner = preview_block.inner(preview);
+        frame.render_widget(preview_block, preview);
+        frame.render_widget(preview_paragraph(editor.date, &theme), preview_inner);
+    }
 }
 
 pub(super) fn run(term: &mut DefaultTerminal, today: NaiveDate) -> io::Result<()> {
@@ -422,28 +522,57 @@ mod tests {
     }
 
     #[test]
-    fn panel_sits_in_the_center_of_the_viewport() {
-        let area = Rect::new(0, 0, 80, 24);
-        let panel = panel_rect(area);
-        assert_eq!(panel.width, PANEL_WIDTH);
-        assert_eq!(panel.height, PANEL_HEIGHT);
-        assert_eq!(panel.x, (80 - PANEL_WIDTH) / 2);
-        assert_eq!(panel.y, (24 - PANEL_HEIGHT) / 2);
+    fn month_preview_matches_cal_without_the_year() {
+        assert_eq!(
+            month_preview_lines(date(2026, 11, 2)),
+            [
+                "      November      ",
+                "Su Mo Tu We Th Fr Sa",
+                " 1  2  3  4  5  6  7",
+                " 8  9 10 11 12 13 14",
+                "15 16 17 18 19 20 21",
+                "22 23 24 25 26 27 28",
+                "29 30",
+            ]
+        );
+        assert_eq!(
+            month_preview_lines(date(2026, 2, 14))[0],
+            "      February      "
+        );
+        assert_eq!(
+            month_preview_lines(date(2026, 2, 14))[2],
+            " 1  2  3  4  5  6  7"
+        );
     }
 
     #[test]
-    fn draw_highlights_the_focused_segment() {
+    fn stack_sits_in_the_center_of_the_viewport() {
+        let area = Rect::new(0, 0, 80, 24);
+        let (picker, preview) = stack_rects(area, date(2026, 11, 2));
+        assert_eq!(picker.width, PANEL_WIDTH);
+        assert_eq!(picker.height, PICKER_HEIGHT);
+        assert_eq!(picker.x, (80 - PANEL_WIDTH) / 2);
+        assert!(preview.y >= picker.y + picker.height);
+        assert_eq!(preview.x, picker.x);
+        assert_eq!(preview.width, picker.width);
+    }
+
+    #[test]
+    fn draw_shows_the_date_picker_and_month_preview() {
         let editor = DateEditor {
             date: date(2026, 3, 9),
             focus: Segment::Month,
             draft: None,
         };
-        let mut terminal = Terminal::new(TestBackend::new(40, 12)).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(40, 20)).unwrap();
         terminal.draw(|frame| draw(frame, &editor)).unwrap();
         let screen = format!("{:?}", terminal.backend().buffer());
         assert!(screen.contains("2026"), "{screen}");
         assert!(screen.contains("03"), "{screen}");
         assert!(screen.contains("09"), "{screen}");
         assert!(screen.contains("date"), "{screen}");
+        assert!(screen.contains("preview"), "{screen}");
+        assert!(screen.contains("March"), "{screen}");
+        assert!(screen.contains("Su Mo Tu We Th Fr Sa"), "{screen}");
     }
 }

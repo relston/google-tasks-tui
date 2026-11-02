@@ -8,10 +8,10 @@ releases yet; entries are grouped by date. Open work is tracked in
 
 ### Added
 
-- `--debug-date-time` opens a blank TUI with a centered date panel (`YYYY MM
-  DD`). Year starts selected; Tab / Shift+Tab cycle segments; `n` / `p` bump
-  the focused segment; digits replace that segment and advance when full
-  (`q` / Esc to quit). Scratch surface for task 5.
+- `--debug-date-time` opens a blank TUI with a centered date picker (`YYYY MM
+  DD`) and a `cal`-style month preview beneath it (month name, no year; the
+  selected day is highlighted). Tab / Shift+Tab / `n` / `p` / digits edit
+  segments (`q` / Esc to quit). Scratch surface for task 5.
 - CLI `move` exposes the same reorder, reparent, and cross-list moves as the
   TUI: `--up` / `--down` / `--first` / `--after`, `--parent` / `--top-level`,
   and `--to-list`. Partial cross-list moves exit 1 with a count; shared board
