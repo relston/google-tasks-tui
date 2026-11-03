@@ -59,6 +59,10 @@ impl Board {
         self.lists.get(list_id)
     }
 
+    pub fn list_mut(&mut self, list_id: &str) -> Option<&mut TaskList> {
+        self.lists.get_mut(list_id)
+    }
+
     pub fn task(&self, list_id: &str, task_id: &str) -> Option<&Task> {
         self.tasks.get(list_id)?.get(task_id)
     }
@@ -135,6 +139,40 @@ impl Board {
         self.lists.remove(list_id);
         self.task_order.remove(list_id);
         self.tasks.remove(list_id);
+    }
+
+    /// Swap a list one place left (`left`) or right among `list_order`.
+    /// Google has no tasklist move API, so this is display order only.
+    pub fn move_list(&mut self, list_id: &str, left: bool) -> Result<(), &'static str> {
+        let Some(index) = self.list_order.iter().position(|id| id == list_id) else {
+            return Err("list not found");
+        };
+        let target = if left {
+            index.checked_sub(1).ok_or("list is already first")?
+        } else {
+            let next = index + 1;
+            if next >= self.list_order.len() {
+                return Err("list is already last");
+            }
+            next
+        };
+        self.list_order.swap(index, target);
+        Ok(())
+    }
+
+    pub fn list_ids(&self) -> &[String] {
+        &self.list_order
+    }
+
+    /// Put a list back after a failed delete, at its former index.
+    pub fn restore_list(&mut self, index: usize, list: TaskList, tasks: Vec<Task>) {
+        let id = list.id.clone();
+        if !self.lists.contains_key(&id) {
+            let index = index.min(self.list_order.len());
+            self.list_order.insert(index, id.clone());
+        }
+        self.lists.insert(id.clone(), list);
+        self.replace_tasks(&id, tasks);
     }
 
     pub fn replace_tasks(&mut self, list_id: &str, tasks: Vec<Task>) {
@@ -569,6 +607,34 @@ mod tests {
             got,
             [("a", 0), ("a1", 1), ("b", 0), ("orphan", 0), ("done", 0)]
         );
+    }
+
+    #[test]
+    fn move_list_swaps_neighbors_and_rejects_edges() {
+        let mut board = Board::default();
+        board.replace_lists(vec![
+            TaskList {
+                id: "a".into(),
+                title: "A".into(),
+                ..Default::default()
+            },
+            TaskList {
+                id: "b".into(),
+                title: "B".into(),
+                ..Default::default()
+            },
+            TaskList {
+                id: "c".into(),
+                title: "C".into(),
+                ..Default::default()
+            },
+        ]);
+        assert_eq!(board.move_list("a", true), Err("list is already first"));
+        assert_eq!(board.move_list("c", false), Err("list is already last"));
+        board.move_list("b", true).unwrap();
+        assert_eq!(board.list_ids(), ["b", "a", "c"]);
+        board.move_list("a", false).unwrap();
+        assert_eq!(board.list_ids(), ["b", "c", "a"]);
     }
 
     #[test]

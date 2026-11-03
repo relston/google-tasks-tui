@@ -22,6 +22,42 @@ fn date_edit_key(app: &mut App, k: KeyEvent) {
     }
 }
 
+fn list_edit_key(app: &mut App, k: KeyEvent) {
+    match app.keymap.resolve(BindingContext::ListEdit, &k) {
+        Some(Action::CancelEdit) => {
+            app.interaction = Interaction::Idle;
+        }
+        Some(Action::SaveEdit) => app.commit_list_rename(),
+        Some(Action::CursorLeft) => {
+            if let Interaction::ListEdit(edit) = &mut app.interaction {
+                edit.left();
+            }
+        }
+        Some(Action::CursorRight) => {
+            if let Interaction::ListEdit(edit) = &mut app.interaction {
+                edit.right();
+            }
+        }
+        Some(Action::EditorBackspace) => {
+            if let Interaction::ListEdit(edit) = &mut app.interaction {
+                edit.backspace();
+            }
+        }
+        Some(Action::EditorDelete) => {
+            if let Interaction::ListEdit(edit) = &mut app.interaction {
+                edit.delete();
+            }
+        }
+        _ if typed(k.modifiers) => {
+            if let (KeyCode::Char(c), Interaction::ListEdit(edit)) = (k.code, &mut app.interaction)
+            {
+                edit.insert(c);
+            }
+        }
+        _ => {}
+    }
+}
+
 pub(super) fn no_modifiers(modifiers: KeyModifiers) -> bool {
     modifiers.is_empty()
 }
@@ -41,6 +77,13 @@ impl App {
     pub(super) fn on_paste(&mut self, text: String) {
         self.notice = None;
         if self.quit != QuitState::Running {
+            return;
+        }
+        if matches!(self.interaction, Interaction::ListEdit(_)) {
+            if let Interaction::ListEdit(edit) = &mut self.interaction {
+                edit.paste(&text);
+            }
+            self.settle();
             return;
         }
         if !matches!(self.interaction, Interaction::Editing(_)) {
@@ -75,6 +118,10 @@ impl App {
         }
         if matches!(self.interaction, Interaction::DateEdit(_)) {
             date_edit_key(self, k);
+            return;
+        }
+        if matches!(self.interaction, Interaction::ListEdit(_)) {
+            list_edit_key(self, k);
             return;
         }
         if matches!(self.interaction, Interaction::ConfirmDelete(_)) {
@@ -146,6 +193,10 @@ impl App {
             Action::ToggleDone => self.toggle_done(),
             Action::ToggleCompleted => self.toggle_completed(),
             Action::DeleteTask => self.ask_delete(),
+            Action::DeleteList => self.ask_delete_list(),
+            Action::RenameList => self.start_rename_list(),
+            Action::ReorderListLeft => self.reorder_list(false),
+            Action::ReorderListRight => self.reorder_list(true),
             Action::CreateTask => self.start_create(false),
             Action::CreateSubtask => self.start_create(true),
             Action::Refresh => self.refresh(),

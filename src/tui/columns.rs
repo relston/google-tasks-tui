@@ -114,6 +114,17 @@ impl App {
     /// Runs after every key and worker message, so drawing never has to.
     pub(super) fn settle(&mut self) {
         self.focus = self.focus.min(self.columns.len().saturating_sub(1));
+        if let Interaction::ListEdit(edit) = &self.interaction {
+            let still_there = self
+                .columns
+                .iter()
+                .any(|column| column.list.id == edit.list_id);
+            if !still_there {
+                self.interaction = Interaction::Idle;
+                self.error =
+                    Some("the list being edited disappeared; the rename was not saved".into());
+            }
+        }
         if self.selected_task().is_some() || self.is_creating() {
             return;
         }

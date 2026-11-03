@@ -14,17 +14,28 @@ use crate::model::{normalize_title, urls_in, Status, Task, TaskList};
 use super::app::{App, Interaction, QuitState, Shelf};
 use super::debug_date::{DateEdit, DateEditor};
 use super::editor::{Edit, EditTarget, FieldId};
+use super::list_edit::ListEdit;
 use super::mutation::Reorder;
 use super::picker::{Picker, PickerRow};
 use super::sync::{SyncState, READ_ONLY};
 use super::view::text::{clean, title_of};
 use super::worker::Op;
 
+/// What a y/n confirmation will delete.
+pub(super) enum PendingTarget {
+    Task {
+        list_id: String,
+        task_id: String,
+        etag: String,
+    },
+    List {
+        list_id: String,
+    },
+}
+
 /// A delete waiting on a y/n answer in the status bar.
 pub(super) struct Pending {
-    list_id: String,
-    task_id: String,
-    etag: String,
+    pub(super) target: PendingTarget,
     pub(super) prompt: String,
 }
 
@@ -384,12 +395,40 @@ impl App {
             ""
         };
         self.interaction = Interaction::ConfirmDelete(Pending {
-            list_id: col.list.id.clone(),
-            task_id: row.task.id.clone(),
-            etag: row.task.etag.clone(),
+            target: PendingTarget::Task {
+                list_id: col.list.id.clone(),
+                task_id: row.task.id.clone(),
+                etag: row.task.etag.clone(),
+            },
             prompt: format!(
                 "Delete \"{}\"{also}?{assigned}  {confirm} confirms · any other key cancels",
                 title_of(&row.task)
+            ),
+        });
+    }
+
+    /// Ask before deleting the focused list; Google removes every task in it.
+    pub(super) fn ask_delete_list(&mut self) {
+        if !self.writable() {
+            return;
+        }
+        let confirm = self.keymap.labels_for(Action::ConfirmDelete).join("/");
+        let Some(col) = self.columns.get(self.focus) else {
+            return;
+        };
+        let count = col.rows.len();
+        let tasks = match count {
+            0 => " (empty)".into(),
+            1 => " and its 1 task".into(),
+            n => format!(" and its {n} tasks"),
+        };
+        let title = clean(&col.list.title).into_owned();
+        self.interaction = Interaction::ConfirmDelete(Pending {
+            target: PendingTarget::List {
+                list_id: col.list.id.clone(),
+            },
+            prompt: format!(
+                "Delete list \"{title}\"{tasks}?  {confirm} confirms · any other key cancels"
             ),
         });
     }
@@ -401,21 +440,111 @@ impl App {
             return;
         };
         self.error = None;
-        let Pending {
-            list_id,
-            task_id,
-            etag,
-            ..
-        } = pending;
-        let op = Op::Delete {
+        match pending.target {
+            PendingTarget::Task {
+                list_id,
+                task_id,
+                etag,
+            } => {
+                let op = Op::Delete {
+                    list: list_id.clone(),
+                    task: task_id.clone(),
+                    etag,
+                };
+                // Drop the task and its subtasks locally; Google cascades the same way.
+                self.submit("delete", op, &[&list_id], |board| {
+                    board.remove_tree(&list_id, &task_id);
+                });
+            }
+            PendingTarget::List { list_id } => {
+                let Some(index) = self.board.list_ids().iter().position(|id| id == &list_id) else {
+                    return;
+                };
+                let Some(list) = self.board.list(&list_id).cloned() else {
+                    return;
+                };
+                let tasks = self.board.tasks(&list_id);
+                let backup = super::mutation::ListBackup { index, list, tasks };
+                let op = Op::DeleteList {
+                    list: list_id.clone(),
+                };
+                self.submit_list_delete("delete list", op, backup, |board| {
+                    board.remove_list(&list_id);
+                });
+            }
+        }
+    }
+
+    /// Open the floating list-title editor for the focused list.
+    pub(super) fn start_rename_list(&mut self) {
+        if !self.writable() {
+            return;
+        }
+        let Some(col) = self.columns.get(self.focus) else {
+            return;
+        };
+        self.interaction = Interaction::ListEdit(ListEdit::new(
+            col.list.id.clone(),
+            col.list.etag.clone(),
+            col.list.title.clone(),
+        ));
+    }
+
+    /// Apply the list-title editor via `tasklists.patch`.
+    pub(super) fn commit_list_rename(&mut self) {
+        if !self.writable() {
+            return;
+        }
+        let interaction = std::mem::replace(&mut self.interaction, Interaction::Idle);
+        let Interaction::ListEdit(edit) = interaction else {
+            self.interaction = interaction;
+            return;
+        };
+        let title = match normalize_title(&edit.buf) {
+            Ok(title) => title,
+            Err(_) => {
+                self.error = Some("a list needs a title".into());
+                self.interaction = Interaction::ListEdit(edit);
+                return;
+            }
+        };
+        let Some(before) = self.board.list(&edit.list_id).cloned() else {
+            self.recover("edited list disappeared".into());
+            return;
+        };
+        let list_id = edit.list_id;
+        let etag = edit.etag;
+        self.error = None;
+        let op = Op::PatchList {
             list: list_id.clone(),
-            task: task_id.clone(),
+            title: title.clone(),
             etag,
         };
-        // Drop the task and its subtasks locally; Google cascades the same way.
-        self.submit("delete", op, &[&list_id], |board| {
-            board.remove_tree(&list_id, &task_id);
+        self.submit_list_rename("rename list", op, before, |board| {
+            if let Some(list) = board.list_mut(&list_id) {
+                list.title = title;
+            }
         });
+    }
+
+    /// Move the focused list one place left or right in the local display order.
+    /// Google has no tasklist move API, so this does not call the network.
+    pub(super) fn reorder_list(&mut self, right: bool) {
+        if !self.writable() {
+            return;
+        }
+        let Some(list_id) = self.columns.get(self.focus).map(|c| c.list.id.clone()) else {
+            return;
+        };
+        match self.board.move_list(&list_id, !right) {
+            Ok(()) => {
+                self.error = None;
+                self.rebuild_columns_from_board(Some(&list_id));
+            }
+            Err(message) => {
+                self.error = Some(message.into());
+            }
+        }
     }
 
     /// Copy the selected task as markdown, ready to paste into a note.
@@ -817,6 +946,117 @@ mod tests {
         assert_eq!(list, "a");
         assert_eq!(task, "a-one");
         assert_eq!(patch.due, NaiveDate::from_ymd_opt(2026, 3, 10));
+    }
+
+    #[test]
+    fn shift_x_confirms_and_deletes_the_focused_list() {
+        let (mut app, commands) = app_with_lists(&["a", "b"]);
+        let _ = commands.recv().unwrap();
+        app.sync = SyncState::Ready;
+        set_tasks(
+            &mut app,
+            "a",
+            vec![task("a-one", None, "1", false)],
+            "a-one",
+        );
+
+        app.on_key(KeyEvent::new(KeyCode::Char('X'), KeyModifiers::SHIFT));
+        let Interaction::ConfirmDelete(pending) = &app.interaction else {
+            panic!("expected list delete confirm");
+        };
+        assert!(pending.prompt.contains("Delete list"));
+        assert!(matches!(
+            &pending.target,
+            PendingTarget::List { list_id } if list_id == "a"
+        ));
+
+        app.on_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+        assert!(app.board.list("a").is_none());
+        assert_eq!(
+            app.columns
+                .iter()
+                .map(|column| column.list.id.as_str())
+                .collect::<Vec<_>>(),
+            ["b"]
+        );
+        let (_, Op::DeleteList { list }) = sent(&commands) else {
+            panic!("expected DeleteList");
+        };
+        assert_eq!(list, "a");
+    }
+
+    #[test]
+    fn shift_i_renames_the_focused_list() {
+        let (mut app, commands) = app_with_lists(&["a"]);
+        let _ = commands.recv().unwrap();
+        app.sync = SyncState::Ready;
+
+        app.on_key(KeyEvent::new(KeyCode::Char('I'), KeyModifiers::SHIFT));
+        let Interaction::ListEdit(edit) = &app.interaction else {
+            panic!("expected list title editor");
+        };
+        assert_eq!(edit.buf, "List a");
+
+        app.on_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE));
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(app.interaction, Interaction::Idle));
+        assert_eq!(
+            app.board.list("a").map(|list| list.title.as_str()),
+            Some("List au")
+        );
+        let (_, Op::PatchList { list, title, .. }) = sent(&commands) else {
+            panic!("expected PatchList");
+        };
+        assert_eq!(list, "a");
+        assert_eq!(title, "List au");
+    }
+
+    #[test]
+    fn shift_h_and_l_reorder_lists_locally() {
+        let (mut app, commands) = app_with_lists(&["a", "b", "c"]);
+        let _ = commands.recv().unwrap();
+        app.sync = SyncState::Ready;
+        app.focus = 1; // list b
+
+        app.on_key(KeyEvent::new(KeyCode::Char('H'), KeyModifiers::SHIFT));
+        assert_eq!(
+            app.board.list_ids(),
+            &["b".to_string(), "a".into(), "c".into()]
+        );
+        assert_eq!(app.columns[0].list.id, "b");
+        assert!(commands.try_recv().is_err(), "list reorder must stay local");
+
+        app.on_key(KeyEvent::new(KeyCode::Char('L'), KeyModifiers::SHIFT));
+        assert_eq!(
+            app.board.list_ids(),
+            &["a".to_string(), "b".into(), "c".into()]
+        );
+        assert_eq!(app.columns[app.focus].list.id, "b");
+    }
+
+    #[test]
+    fn failed_list_delete_restores_the_list() {
+        let (mut app, commands) = app_with_lists(&["a", "b"]);
+        let _ = commands.recv().unwrap();
+        app.sync = SyncState::Ready;
+        set_tasks(
+            &mut app,
+            "a",
+            vec![task("a-one", None, "1", false)],
+            "a-one",
+        );
+
+        app.on_key(KeyEvent::new(KeyCode::Char('X'), KeyModifiers::SHIFT));
+        app.on_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+        let (operation, _) = sent(&commands);
+        app.on_msg(refused(operation));
+
+        assert!(app.board.list("a").is_some());
+        assert!(app.columns.iter().any(|column| column.list.id == "a"));
+        assert!(app
+            .error
+            .as_deref()
+            .is_some_and(|m| m.contains("delete list")));
     }
 
     #[test]

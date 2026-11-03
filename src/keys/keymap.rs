@@ -104,6 +104,7 @@ impl Keymap {
                             BindingContext::Editor
                                 | BindingContext::Filter
                                 | BindingContext::DateEdit
+                                | BindingContext::ListEdit
                         ) && matches!(
                             binding.combo,
                             (KeyCode::Char(_), modifiers) if modifiers.is_empty()

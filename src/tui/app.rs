@@ -16,6 +16,7 @@ use super::columns::{visible_rows, Column};
 use super::commands::{ParentPick, Pending};
 use super::debug_date::DateEdit;
 use super::editor::{Edit, FieldId};
+use super::list_edit::ListEdit;
 use super::mutation::PendingOperation;
 use super::picker::Picker;
 use super::sync::{LoadState, SyncState};
@@ -52,6 +53,7 @@ pub(super) enum Interaction {
     Idle,
     Editing(Edit),
     DateEdit(DateEdit),
+    ListEdit(ListEdit),
     ConfirmDelete(Pending),
     Browse(Picker),
     Move(Picker),

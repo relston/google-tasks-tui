@@ -47,6 +47,13 @@ same CRUD is available as subcommands for scripts and agents
 - `x` deletes the selected task after a y/n confirmation in the status bar.
   The prompt names the task and counts the subtasks that go with it, since
   Google deletes those too.
+- `X` (`Shift+x`) deletes the focused list after the same kind of y/n
+  confirmation. Google removes every task in that list.
+- `I` (`Shift+i`) opens a floating editor for the focused list's title;
+  Enter saves, Esc cancels.
+- `H` / `L` (`Shift+h` / `Shift+l`) move the focused list one column left or
+  right in the board. That order is local until the next refresh; Google has
+  no list-reorder API.
 - `y` copies the selected task to the system clipboard as markdown, ready to
   paste into a note: the title as a heading, the due date, the notes, and the
   links Google hung off the task, such as the Gmail thread it was made from. No
@@ -286,7 +293,7 @@ requires `--yes` because Google removes every task in that list.
 | Edit notes | Yes | Yes | Assigned Docs/Chat tasks are rejected |
 | Edit due date/status directly | Due via `d`; status via `Space` | Yes | Same `tasks.patch` path |
 | Move tasks between lists | Yes | `move --to-list` | Task plus subtasks; partial moves report a count |
-| Task-list create/rename/delete | No | Yes | TUI list management remains deferred |
+| Task-list create/rename/delete | Rename `I`, delete `X`; create No | Yes | Column reorder `H`/`L` is local only |
 | Browse/copy task links | Yes | No | Terminal-interactive behavior |
 
 ## Keys
@@ -312,6 +319,9 @@ requires `--yes` because Google removes every task in that list.
 | `i`            | Edit the focused shelf field    |
 | `d`            | Edit the task's due date         |
 | `x`            | Delete the task (asks y/n)      |
+| `X`            | Delete the focused list (asks y/n) |
+| `I`            | Rename the focused list         |
+| `H` / `L`      | Move list left / right (local)  |
 | `r`            | Refresh from Google             |
 | `t`            | Toggle transparent background   |
 | `?`            | List the keyboard commands      |

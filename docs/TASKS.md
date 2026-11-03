@@ -12,7 +12,6 @@ tasks take the next unused number, and numbers are never reused.
 
 ## Features
 
-- **6.** Manage task lists in the TUI.
 - **8.** Search tasks across all lists. A key opens a picker that filters
   every task by title and notes (case-insensitive substring, like the
   existing `/` filter), shows each match's list as its subtitle, and on Enter

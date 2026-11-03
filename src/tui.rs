@@ -28,6 +28,7 @@ mod commands;
 mod debug_date;
 mod editor;
 mod input;
+mod list_edit;
 mod mutation;
 mod picker;
 mod sync;

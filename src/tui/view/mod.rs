@@ -70,6 +70,7 @@ impl App {
         self.draw_board(f, body, t, view);
         self.draw_picker(f, body, t, view);
         self.draw_date_edit(f, body, t);
+        self.draw_list_edit(f, body, t);
 
         self.draw_status(f, status, t);
     }
@@ -511,6 +512,12 @@ mod tests {
         let screen = render_app(&due, 50, 20);
         assert!(screen.contains("date"), "{screen}");
         assert!(screen.contains("Su Mo Tu We Th Fr Sa"), "{screen}");
+
+        let mut rename = one_list_app();
+        rename.sync = SyncState::Ready;
+        rename.on_key(KeyEvent::new(KeyCode::Char('I'), KeyModifiers::SHIFT));
+        let screen = render_app(&rename, 50, 14);
+        assert!(screen.contains("rename list"), "{screen}");
     }
 
     #[test]

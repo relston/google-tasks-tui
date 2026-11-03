@@ -4,11 +4,12 @@
 
 use crate::board::{previous_sibling, Board};
 use crate::google::Error;
-use crate::model::Task;
+use crate::model::{Task, TaskList};
 
 use super::app::{App, Interaction, QuitState, Shelf};
+use super::columns::{visible_rows, Column};
 use super::editor::{Edit, EditTarget, FieldId};
-use super::sync::SyncState;
+use super::sync::{LoadState, SyncState};
 use super::worker::{Cmd, Op, Outcome, Warning};
 
 /// A reorder in flight, so more presses on the same task can wait for it.
@@ -19,12 +20,23 @@ pub(super) struct Reorder {
     pub(super) queued: bool,
 }
 
+/// A deleted list and its tasks, so a failed delete can put them back.
+pub(super) struct ListBackup {
+    pub(super) index: usize,
+    pub(super) list: TaskList,
+    pub(super) tasks: Vec<Task>,
+}
+
 pub(super) struct PendingOperation {
     pub(super) id: u64,
     /// Names the operation in messages, as in "save failed: …".
     label: &'static str,
     /// The affected lists as they were before the change on screen.
     before: Vec<(String, Vec<Task>)>,
+    /// List metadata before a rename (title / etag).
+    list_meta_before: Option<TaskList>,
+    /// A deleted list restored on failure.
+    removed_list: Option<ListBackup>,
     /// A new-task draft, reopened if Google refuses it.
     draft: Option<Edit>,
     pub(super) reorder: Option<Reorder>,
@@ -37,6 +49,8 @@ impl PendingOperation {
             id,
             label: "save",
             before: Vec::new(),
+            list_meta_before: None,
+            removed_list: None,
             draft: None,
             reorder: None,
         }
@@ -69,6 +83,73 @@ impl App {
                 id: 0,
                 label,
                 before,
+                list_meta_before: None,
+                removed_list: None,
+                draft: None,
+                reorder: None,
+            },
+            op,
+        )
+    }
+
+    /// Rename a list on screen and send the patch.
+    pub(super) fn submit_list_rename(
+        &mut self,
+        label: &'static str,
+        op: Op,
+        before: TaskList,
+        change: impl FnOnce(&mut Board),
+    ) -> bool {
+        if self.pending_operation.is_some() {
+            self.error = Some("wait for the current save to finish".into());
+            return false;
+        }
+        change(&mut self.board);
+        if let Some(list) = self.board.list(&before.id).cloned() {
+            if let Some(column) = self
+                .columns
+                .iter_mut()
+                .find(|column| column.list.id == before.id)
+            {
+                column.list = list;
+            }
+        }
+        self.send(
+            PendingOperation {
+                id: 0,
+                label,
+                before: Vec::new(),
+                list_meta_before: Some(before),
+                removed_list: None,
+                draft: None,
+                reorder: None,
+            },
+            op,
+        )
+    }
+
+    /// Delete a list on screen and send the delete.
+    pub(super) fn submit_list_delete(
+        &mut self,
+        label: &'static str,
+        op: Op,
+        backup: ListBackup,
+        change: impl FnOnce(&mut Board),
+    ) -> bool {
+        if self.pending_operation.is_some() {
+            self.error = Some("wait for the current save to finish".into());
+            return false;
+        }
+        let focused = self.columns.get(self.focus).map(|c| c.list.id.clone());
+        change(&mut self.board);
+        self.rebuild_columns_from_board(focused.as_deref());
+        self.send(
+            PendingOperation {
+                id: 0,
+                label,
+                before: Vec::new(),
+                list_meta_before: None,
+                removed_list: Some(backup),
                 draft: None,
                 reorder: None,
             },
@@ -88,6 +169,8 @@ impl App {
                 id: 0,
                 label: "create",
                 before: Vec::new(),
+                list_meta_before: None,
+                removed_list: None,
                 draft: Some(draft),
                 reorder: None,
             },
@@ -162,6 +245,13 @@ impl App {
                 self.follow_created(draft, &list_id, task_id);
             }
         }
+        for list in outcome.upserted_lists {
+            let id = list.id.clone();
+            self.board.upsert_list(list.clone());
+            if let Some(column) = self.columns.iter_mut().find(|column| column.list.id == id) {
+                column.list = list;
+            }
+        }
         if outcome.warnings.is_empty() {
             if let Some((list_id, task_id, previous)) = queued {
                 self.send_queued_reorder(list_id, task_id, previous);
@@ -205,6 +295,18 @@ impl App {
             self.board.replace_tasks(&list_id, tasks);
             self.rebuild_column(&list_id);
         }
+        if let Some(list) = pending.list_meta_before {
+            let id = list.id.clone();
+            self.board.upsert_list(list.clone());
+            if let Some(column) = self.columns.iter_mut().find(|column| column.list.id == id) {
+                column.list = list;
+            }
+        }
+        if let Some(ListBackup { index, list, tasks }) = pending.removed_list {
+            let focused = list.id.clone();
+            self.board.restore_list(index, list, tasks);
+            self.rebuild_columns_from_board(Some(&focused));
+        }
         if let Some(draft) = pending.draft {
             if let EditTarget::New { list_id, .. } = &draft.target {
                 if let Some(index) = self
@@ -218,6 +320,37 @@ impl App {
             self.shelf = Shelf::Open(FieldId::Title);
             self.interaction = Interaction::Editing(draft);
         }
+    }
+
+    /// Rebuild columns from `board.list_order`, keeping selection and load state.
+    pub(super) fn rebuild_columns_from_board(&mut self, prefer_focus: Option<&str>) {
+        let focused = prefer_focus
+            .map(str::to_string)
+            .or_else(|| self.columns.get(self.focus).map(|c| c.list.id.clone()));
+        let mut old = std::mem::take(&mut self.columns);
+        self.columns = self
+            .board
+            .list_ids()
+            .iter()
+            .filter_map(|id| {
+                let list = self.board.list(id)?.clone();
+                let rows = visible_rows(&self.board, id, self.show_completed);
+                let mut column = match old.iter().position(|column| column.list.id == *id) {
+                    Some(index) => old.swap_remove(index),
+                    None => Column::new(list.clone(), rows.clone(), LoadState::Loaded),
+                };
+                let selected = column.selected_id.clone();
+                column.list = list;
+                column.rows = rows;
+                column.select_id(
+                    selected.or_else(|| column.rows.first().map(|row| row.task.id.clone())),
+                );
+                Some(column)
+            })
+            .collect();
+        self.focus = focused
+            .and_then(|id| self.columns.iter().position(|c| c.list.id == id))
+            .unwrap_or(0);
     }
 
     pub(super) fn worker_disconnected(&mut self) {
@@ -347,7 +480,7 @@ mod tests {
                         ..task("a-cached", None, "0", false)
                     },
                 )],
-                warnings: Vec::new(),
+                ..Outcome::default()
             }),
         });
 
@@ -407,7 +540,6 @@ mod tests {
         app.on_msg(Msg::Finished {
             id,
             result: Ok(Outcome {
-                replaced: Vec::new(),
                 upserted: vec![(
                     "a".into(),
                     Task {
@@ -416,6 +548,7 @@ mod tests {
                     },
                 )],
                 warnings: vec![Warning::ReloadFailed(Error::Timeout)],
+                ..Outcome::default()
             }),
         });
 
@@ -718,12 +851,12 @@ mod tests {
                     ("a".into(), vec![child]),
                     ("b".into(), vec![there, moved_parent]),
                 ],
-                upserted: Vec::new(),
                 warnings: vec![Warning::PartialMove {
                     moved: 1,
                     failed: "child".into(),
                     error: Error::Transport("cannot move assigned task".into()),
                 }],
+                ..Outcome::default()
             }),
         });
 

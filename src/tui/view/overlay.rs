@@ -14,6 +14,7 @@ use crate::theme::Theme;
 
 use super::super::app::{App, Interaction};
 use super::super::debug_date;
+use super::super::list_edit;
 use super::super::picker::{Picker, PickerStyle};
 use super::text::{ellipsize, wrap};
 use super::ViewState;
@@ -26,6 +27,15 @@ impl App {
         };
         dim_backdrop(f.buffer_mut(), area);
         debug_date::draw_panel(f, area, &edit.editor, t);
+    }
+
+    /// Floating list-title editor over a dimmed board.
+    pub(super) fn draw_list_edit(&self, f: &mut Frame, area: Rect, t: &Theme) {
+        let Interaction::ListEdit(edit) = &self.interaction else {
+            return;
+        };
+        dim_backdrop(f.buffer_mut(), area);
+        list_edit::draw_panel(f, area, edit, t);
     }
 
     /// Every modal list draws through here, over a dimmed board. Browse and

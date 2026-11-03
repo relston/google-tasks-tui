@@ -78,6 +78,11 @@ impl App {
                 ])
                 .trim_end()
             )
+        } else if matches!(self.interaction, Interaction::ListEdit(_)) {
+            self.hints(&[
+                (Action::SaveEdit, "rename list"),
+                (Action::CancelEdit, "cancel"),
+            ])
         } else if self.is_creating() {
             self.hints(&[(Action::SaveEdit, "create"), (Action::CancelEdit, "cancel")])
         } else if self.edit().is_some_and(|e| e.field() == FieldId::Notes) {

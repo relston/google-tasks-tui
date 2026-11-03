@@ -10,6 +10,7 @@ pub enum BindingContext {
     Filter,
     Editor,
     DateEdit,
+    ListEdit,
     Confirm,
 }
 
@@ -22,6 +23,7 @@ impl BindingContext {
             Self::Filter => "Picker filter input",
             Self::Editor => "Task editor",
             Self::DateEdit => "Due date editor",
+            Self::ListEdit => "List title editor",
             Self::Confirm => "Confirmation",
         }
     }
@@ -91,7 +93,9 @@ actions! {
     ToggleDone        = "toggle_done",         [Board],         ["space"],                              "tick / untick";
     ToggleCompleted   = "toggle_completed",    [Board],         ["v"],                                  "show / hide completed";
     DeleteTask        = "delete_task",         [Board],         ["x"],                                  "delete task";
+    DeleteList        = "delete_list",         [Board],         ["shift+x"],                            "delete list";
     EditDue           = "edit_due",            [Board],         ["d"],                                  "edit due date";
+    RenameList        = "rename_list",         [Board],         ["shift+i"],                            "rename list";
     CreateTask        = "create_task",         [Board],         ["c"],                                  "new task";
     CreateSubtask     = "create_subtask",      [Board],         ["shift+c"],                            "new subtask";
     Refresh           = "refresh",             [Board],         ["r"],                                  "refresh from Google";
@@ -101,6 +105,8 @@ actions! {
     MoveTask          = "move_task",           [Board],         ["m"],                                  "move to another list";
     ReorderUp         = "reorder_up",          [Board],         ["alt+k", "alt+up"],                    "move task up one place";
     ReorderDown       = "reorder_down",        [Board],         ["alt+j", "alt+down"],                  "move task down one place";
+    ReorderListLeft   = "reorder_list_left",   [Board],         ["shift+h"],                            "move list left one place";
+    ReorderListRight  = "reorder_list_right",  [Board],         ["shift+l"],                            "move list right one place";
     UnparentTask      = "unparent_task",       [Board],         ["shift+comma"],                        "unparent subtask";
     ChooseParent      = "choose_parent",       [Board],         ["shift+period"],                       "choose parent";
     Help              = "help",                [Board, Picker], ["shift+slash"],                        "keyboard commands";
@@ -116,19 +122,19 @@ actions! {
     FilterAccept      = "filter_accept",       [Filter],        ["enter"],                              "choose filtered item";
     FilterAcceptAll   = "filter_accept_all",   [Filter],        ["shift+enter"],                        "choose all filtered items";
     FilterBackspace   = "filter_backspace",    [Filter],        ["backspace"],                          "delete filter character";
-    CancelEdit        = "cancel_edit",         [Editor, DateEdit], ["esc"],                             "cancel edit";
-    SaveEdit          = "save_edit",           [Editor, DateEdit], ["enter"],                           "save edit";
+    CancelEdit        = "cancel_edit",         [Editor, DateEdit, ListEdit], ["esc"],                   "cancel edit";
+    SaveEdit          = "save_edit",           [Editor, DateEdit, ListEdit], ["enter"],                 "save edit";
     InsertNewline     = "insert_newline",      [Editor],        ["shift+enter", "alt+enter", "ctrl+j"], "insert notes newline";
     DeleteWord        = "delete_word",         [Editor],        ["ctrl+w"],                             "delete previous word";
     ClearToLineStart  = "clear_to_line_start", [Editor],        ["ctrl+u"],                             "clear to line start";
     CursorLineStart   = "cursor_line_start",   [Editor],        ["ctrl+a", "home"],                     "move to line start";
     CursorLineEnd     = "cursor_line_end",     [Editor],        ["ctrl+e", "end"],                      "move to line end";
-    CursorLeft        = "cursor_left",         [Editor],        ["left"],                               "move cursor left";
-    CursorRight       = "cursor_right",        [Editor],        ["right"],                              "move cursor right";
+    CursorLeft        = "cursor_left",         [Editor, ListEdit], ["left"],                            "move cursor left";
+    CursorRight       = "cursor_right",        [Editor, ListEdit], ["right"],                           "move cursor right";
     CursorUp          = "cursor_up",           [Editor],        ["up"],                                 "move cursor up";
     CursorDown        = "cursor_down",         [Editor],        ["down"],                               "move cursor down";
-    EditorBackspace   = "editor_backspace",    [Editor],        ["backspace"],                          "delete previous character";
-    EditorDelete      = "editor_delete",       [Editor],        ["delete"],                             "delete next character";
+    EditorBackspace   = "editor_backspace",    [Editor, ListEdit], ["backspace"],                       "delete previous character";
+    EditorDelete      = "editor_delete",       [Editor, ListEdit], ["delete"],                          "delete next character";
     ConfirmDelete     = "confirm_delete",      [Confirm],       ["y"],                                  "confirm deletion";
 }
 
@@ -180,8 +186,14 @@ mod tests {
             (BindingContext::Editor, "home", Action::CursorLineStart),
             (BindingContext::DateEdit, "enter", Action::SaveEdit),
             (BindingContext::DateEdit, "esc", Action::CancelEdit),
+            (BindingContext::ListEdit, "enter", Action::SaveEdit),
+            (BindingContext::ListEdit, "esc", Action::CancelEdit),
             (BindingContext::Board, "d", Action::EditDue),
             (BindingContext::Board, "x", Action::DeleteTask),
+            (BindingContext::Board, "shift+x", Action::DeleteList),
+            (BindingContext::Board, "shift+i", Action::RenameList),
+            (BindingContext::Board, "shift+h", Action::ReorderListLeft),
+            (BindingContext::Board, "shift+l", Action::ReorderListRight),
             (BindingContext::Confirm, "y", Action::ConfirmDelete),
         ];
 

@@ -3,7 +3,7 @@
 
 use std::sync::mpsc::{Receiver, Sender};
 
-use crate::google::{CreateTask, Error, MoveTask, TaskPatch, TasksApi};
+use crate::google::{CreateTask, Error, ListPatch, MoveTask, TaskPatch, TasksApi};
 use crate::model::{Task, TaskList};
 
 /// A change to make in Google.
@@ -38,6 +38,14 @@ pub(super) enum Op {
         parent: Option<String>,
         previous: Option<String>,
     },
+    PatchList {
+        list: String,
+        title: String,
+        etag: String,
+    },
+    DeleteList {
+        list: String,
+    },
 }
 
 /// What Google says is true after an operation.
@@ -47,6 +55,8 @@ pub(super) struct Outcome {
     pub replaced: Vec<(String, Vec<Task>)>,
     /// Single tasks Google returned.
     pub upserted: Vec<(String, Task)>,
+    /// Task lists Google returned (rename / create).
+    pub upserted_lists: Vec<TaskList>,
     /// Part of the operation landed, but the board needs a refresh.
     pub warnings: Vec<Warning>,
 }
@@ -146,6 +156,7 @@ fn execute<A: TasksApi>(client: &mut A, op: Op) -> Result<Outcome, Error> {
             Ok(Outcome {
                 replaced,
                 upserted: Vec::new(),
+                upserted_lists: Vec::new(),
                 warnings,
             })
         }
@@ -175,6 +186,17 @@ fn execute<A: TasksApi>(client: &mut A, op: Op) -> Result<Outcome, Error> {
                     ..Outcome::default()
                 },
             })
+        }
+        Op::PatchList { list, title, etag } => {
+            let list = client.patch_list(&list, &ListPatch { title }, Some(&etag))?;
+            Ok(Outcome {
+                upserted_lists: vec![list],
+                ..Outcome::default()
+            })
+        }
+        Op::DeleteList { list } => {
+            client.delete_list(&list)?;
+            Ok(Outcome::default())
         }
     }
 }

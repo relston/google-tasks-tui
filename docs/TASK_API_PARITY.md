@@ -13,9 +13,9 @@ Service endpoint: `https://tasks.googleapis.com`
 | `tasklists.list` | List every task list for the signed-in user. | ✓ | ✓ |
 | `tasklists.get` | Fetch one task list by id. | — | — |
 | `tasklists.insert` | Create a new task list. | — | ✓ |
-| `tasklists.patch` | Partially update a task list (title). | — | ✓ |
+| `tasklists.patch` | Partially update a task list (title). | ✓ | ✓ |
 | `tasklists.update` | Fully replace a task list. | — | — |
-| `tasklists.delete` | Delete a task list and all of its tasks. | — | ✓ |
+| `tasklists.delete` | Delete a task list and all of its tasks. | ✓ | ✓ |
 | `tasks.list` | List every task in a task list. | ✓ | ✓ |
 | `tasks.get` | Fetch one task by id. | — | — |
 | `tasks.insert` | Create a task (optionally under a parent). | ✓ | ✓ |
@@ -36,8 +36,9 @@ Service endpoint: `https://tasks.googleapis.com`
 - **`tasks.move`:** Both interfaces reorder, reparent, and move across lists.
   The CLI uses `move` with mutually exclusive flags (`--up` / `--down` /
   `--first` / `--after`, `--parent` / `--top-level`, `--to-list`).
-- **List management:** Create, rename, and delete lists are CLI-only today
-  (task 6 for the TUI).
+- **List management:** The TUI renames (`Shift+i`) and deletes (`Shift+x`)
+  lists; create remains CLI-only. Reordering columns with `Shift+h` /
+  `Shift+l` is local display order only — Google has no `tasklists.move`.
 - **`tasks.clear`:** Unsupported in both interfaces. Hiding completed tasks
   in the TUI is local display only and does not clear them in Google.
 - **Due time and recurrence:** The Task resource exposes `due` as a date
