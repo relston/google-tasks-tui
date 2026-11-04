@@ -94,6 +94,9 @@ pub trait TasksApi {
     fn create(&mut self, list_id: &str, task: &CreateTask, parent: Option<&str>) -> Result<Task>;
     /// Delete a task. Google deletes its subtasks along with it.
     fn delete(&mut self, list_id: &str, task_id: &str, etag: Option<&str>) -> Result<()>;
+    /// Clear every completed task in a list (`tasks.clear`). Google marks them
+    /// hidden; a following `tasks` reload is left to the caller.
+    fn clear_completed(&mut self, list_id: &str) -> Result<()>;
     /// Move a task within its list or into another one.
     fn move_task(&mut self, list_id: &str, task_id: &str, movement: &MoveTask) -> Result<Task>;
     fn create_list(&mut self, title: &str) -> Result<TaskList>;

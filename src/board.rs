@@ -195,6 +195,35 @@ impl Board {
         true
     }
 
+    /// Drop every completed task in a list. Open children of cleared parents
+    /// become top-level so they are not deleted with the parent.
+    pub fn clear_completed(&mut self, list_id: &str) {
+        let Some(tasks) = self.tasks.get_mut(list_id) else {
+            return;
+        };
+        let completed: std::collections::HashSet<String> = tasks
+            .values()
+            .filter(|task| task.is_done())
+            .map(|task| task.id.clone())
+            .collect();
+        if completed.is_empty() {
+            return;
+        }
+        for task in tasks.values_mut() {
+            if task
+                .parent
+                .as_ref()
+                .is_some_and(|parent| completed.contains(parent))
+            {
+                task.parent = None;
+            }
+        }
+        tasks.retain(|id, _| !completed.contains(id));
+        if let Some(order) = self.task_order.get_mut(list_id) {
+            order.retain(|id| !completed.contains(id));
+        }
+    }
+
     pub fn remove_tree(&mut self, list_id: &str, task_id: &str) -> Vec<Task> {
         let source_order = self.task_order.get(list_id).cloned().unwrap_or_default();
         let Some(tasks) = self.tasks.get_mut(list_id) else {
@@ -252,8 +281,14 @@ impl Board {
     }
 }
 
+fn keep_task(task: &Task) -> bool {
+    // Google's tasks.clear marks completed tasks hidden; with showHidden they
+    // would otherwise reappear after a clear or refresh.
+    !task.deleted && !(task.hidden && task.is_done())
+}
+
 fn keyed(tasks: Vec<Task>) -> (Vec<String>, HashMap<String, Task>) {
-    let tasks: Vec<Task> = tasks.into_iter().filter(|task| !task.deleted).collect();
+    let tasks: Vec<Task> = tasks.into_iter().filter(keep_task).collect();
     let order = tasks.iter().map(|task| task.id.clone()).collect();
     let tasks = tasks
         .into_iter()
@@ -263,7 +298,7 @@ fn keyed(tasks: Vec<Task>) -> (Vec<String>, HashMap<String, Task>) {
 }
 
 pub fn ordered(tasks: Vec<Task>) -> Vec<Row> {
-    let mut tasks: Vec<Task> = tasks.into_iter().filter(|task| !task.deleted).collect();
+    let mut tasks: Vec<Task> = tasks.into_iter().filter(keep_task).collect();
     tasks.sort_by(|a, b| {
         a.is_done().cmp(&b.is_done()).then_with(|| {
             if a.is_done() {
@@ -651,14 +686,10 @@ mod tests {
 
     #[test]
     fn subtask_block_covers_parent_children_assignment_and_hidden() {
-        let rows = ordered(vec![
+        let mut rows = ordered(vec![
             task("top", None, "1", false),
             task("child", Some("top"), "1", false),
             task("available", None, "2", false),
-            Task {
-                hidden: true,
-                ..task("hidden-done", None, "3", true)
-            },
             Task {
                 assignment_info: Some(crate::model::AssignmentInfo {
                     link_to_task: "https://example".into(),
@@ -667,6 +698,14 @@ mod tests {
                 ..task("assigned", None, "4", false)
             },
         ]);
+        // Hidden completed tasks are dropped by `ordered`; keep the guard tested.
+        rows.push(Row {
+            task: Task {
+                hidden: true,
+                ..task("hidden-done", None, "3", true)
+            },
+            depth: 0,
+        });
         assert_eq!(
             subtask_block(&rows, "child"),
             Some("unparent this task before choosing a new parent")
@@ -684,6 +723,56 @@ mod tests {
             Some("a completed hidden task cannot become a subtask")
         );
         assert_eq!(subtask_block(&rows, "available"), None);
+    }
+
+    #[test]
+    fn clear_completed_drops_done_tasks_and_promotes_open_children() {
+        let mut board = Board::from_cache(cache::Cache {
+            lists: vec![cache::CachedList {
+                list: TaskList {
+                    id: "list".into(),
+                    title: "Inbox".into(),
+                    ..Default::default()
+                },
+                tasks: vec![
+                    task("open", None, "1", false),
+                    task("done-parent", None, "2", true),
+                    task("open-child", Some("done-parent"), "1", false),
+                    task("done-child", Some("done-parent"), "2", true),
+                    task("done", None, "3", true),
+                ],
+            }],
+        });
+
+        board.clear_completed("list");
+        let got: Vec<(String, Option<String>)> = board
+            .tasks("list")
+            .into_iter()
+            .map(|task| (task.id, task.parent))
+            .collect();
+        assert_eq!(got, [("open".into(), None), ("open-child".into(), None),]);
+    }
+
+    #[test]
+    fn hidden_completed_tasks_are_dropped_when_loading() {
+        let board = Board::from_cache(cache::Cache {
+            lists: vec![cache::CachedList {
+                list: TaskList {
+                    id: "list".into(),
+                    title: "Inbox".into(),
+                    ..Default::default()
+                },
+                tasks: vec![
+                    task("open", None, "1", false),
+                    Task {
+                        hidden: true,
+                        ..task("cleared", None, "2", true)
+                    },
+                ],
+            }],
+        });
+        let ids: Vec<String> = board.tasks("list").into_iter().map(|t| t.id).collect();
+        assert_eq!(ids, ["open".to_string()]);
     }
 
     #[test]

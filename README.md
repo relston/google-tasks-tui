@@ -47,6 +47,9 @@ same CRUD is available as subcommands for scripts and agents
 - `x` deletes the selected task after a y/n confirmation in the status bar.
   The prompt names the task and counts the subtasks that go with it, since
   Google deletes those too.
+- `D` (`Shift+d`) clears every completed task from the focused list after a
+  y/n confirmation (`tasks.clear`). Open subtasks of cleared parents stay and
+  become top-level.
 - `X` (`Shift+x`) deletes the focused list after the same kind of y/n
   confirmation. Google removes every task in that list.
 - `T` (`Shift+t`) opens a floating panel to name a new list; Enter creates it

@@ -49,6 +49,10 @@ pub(super) enum Op {
     DeleteList {
         list: String,
     },
+    /// Clear completed tasks in a list, then reload it.
+    ClearCompleted {
+        list: String,
+    },
 }
 
 /// What Google says is true after an operation.
@@ -208,6 +212,19 @@ fn execute<A: TasksApi>(client: &mut A, op: Op) -> Result<Outcome, Error> {
             client.delete_list(&list)?;
             Ok(Outcome::default())
         }
+        Op::ClearCompleted { list } => {
+            client.clear_completed(&list)?;
+            Ok(match client.tasks(&list) {
+                Ok(tasks) => Outcome {
+                    replaced: vec![(list, tasks)],
+                    ..Outcome::default()
+                },
+                Err(error) => Outcome {
+                    warnings: vec![Warning::ReloadFailed(error)],
+                    ..Outcome::default()
+                },
+            })
+        }
     }
 }
 
@@ -292,6 +309,11 @@ mod tests {
 
         fn delete(&mut self, list_id: &str, task_id: &str, etag: Option<&str>) -> Result<()> {
             self.record(format!("delete:{list_id}:{task_id}:{}", etag.unwrap_or("")));
+            Ok(())
+        }
+
+        fn clear_completed(&mut self, list_id: &str) -> Result<()> {
+            self.record(format!("clear:{list_id}"));
             Ok(())
         }
 
@@ -482,6 +504,42 @@ mod tests {
 
         assert_eq!(fake.calls(), ["move:list:two::parent:", "tasks:list"]);
         assert_eq!(list_ids(&result.unwrap()), ["list"]);
+    }
+
+    #[test]
+    fn clearing_completed_clears_then_reloads_the_list() {
+        let fake = Fake::default();
+        let (_, result) = run(
+            fake.clone(),
+            Op::ClearCompleted {
+                list: "list".into(),
+            },
+        );
+
+        assert_eq!(fake.calls(), ["clear:list", "tasks:list"]);
+        assert_eq!(list_ids(&result.unwrap()), ["list"]);
+    }
+
+    #[test]
+    fn a_failed_reload_after_clear_keeps_the_clear_and_warns() {
+        let fake = Fake {
+            fail_tasks: true,
+            ..Fake::default()
+        };
+        let (_, result) = run(
+            fake.clone(),
+            Op::ClearCompleted {
+                list: "list".into(),
+            },
+        );
+
+        assert_eq!(fake.calls(), ["clear:list", "tasks:list"]);
+        let outcome = result.unwrap();
+        assert!(outcome.replaced.is_empty());
+        assert!(matches!(
+            outcome.warnings.as_slice(),
+            [Warning::ReloadFailed(Error::Timeout)]
+        ));
     }
 
     #[test]

@@ -242,6 +242,17 @@ impl TasksApi for Client {
         Ok(())
     }
 
+    fn clear_completed(&mut self, list_id: &str) -> Result<()> {
+        let url = format!("{}/lists/{}/clear", self.base_url, pct(list_id));
+        self.request(false, |agent, token| {
+            agent
+                .post(&url)
+                .header("Authorization", format!("Bearer {token}"))
+                .send_empty()
+        })?;
+        Ok(())
+    }
+
     fn move_task(&mut self, list_id: &str, task_id: &str, movement: &MoveTask) -> Result<Task> {
         let url = format!(
             "{}/lists/{}/tasks/{}/move",
@@ -610,6 +621,24 @@ mod tests {
         let query: HashMap<_, _> = url.query_pairs().into_owned().collect();
         assert_eq!(query.get("parent").map(String::as_str), Some("parent"));
         assert!(!query.contains_key("destinationTasklist"));
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn clear_completed_posts_to_the_list_clear_endpoint() {
+        let (base, requests, server) = scripted(vec![Reply {
+            status: 204,
+            headers: vec![],
+            body: "",
+        }]);
+        let mut client = test_client(&base, agent());
+
+        client.clear_completed("list /é").unwrap();
+
+        let request = requests.recv().unwrap();
+        assert_eq!(request.method, "POST");
+        assert_eq!(request.target, "/lists/list%20%2F%C3%A9/clear");
+        assert!(request.body.is_empty());
         server.join().unwrap();
     }
 

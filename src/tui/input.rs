@@ -194,6 +194,7 @@ impl App {
             Action::ToggleCompleted => self.toggle_completed(),
             Action::DeleteTask => self.ask_delete(),
             Action::DeleteList => self.ask_delete_list(),
+            Action::ClearCompleted => self.ask_clear_completed(),
             Action::RenameList => self.start_rename_list(),
             Action::CreateList => self.start_create_list(),
             Action::ReorderListLeft => self.reorder_list(false),

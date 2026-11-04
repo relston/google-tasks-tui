@@ -21,7 +21,7 @@ use super::sync::{SyncState, READ_ONLY};
 use super::view::text::{clean, title_of};
 use super::worker::Op;
 
-/// What a y/n confirmation will delete.
+/// What a y/n confirmation will delete or clear.
 pub(super) enum PendingTarget {
     Task {
         list_id: String,
@@ -29,6 +29,9 @@ pub(super) enum PendingTarget {
         etag: String,
     },
     List {
+        list_id: String,
+    },
+    ClearCompleted {
         list_id: String,
     },
 }
@@ -433,6 +436,40 @@ impl App {
         });
     }
 
+    /// Ask before clearing completed tasks from the focused list.
+    pub(super) fn ask_clear_completed(&mut self) {
+        if !self.writable() {
+            return;
+        }
+        let Some(col) = self.columns.get(self.focus) else {
+            return;
+        };
+        let count = self
+            .board
+            .tasks(&col.list.id)
+            .iter()
+            .filter(|task| task.is_done())
+            .count();
+        if count == 0 {
+            self.error = Some("no completed tasks to clear".into());
+            return;
+        }
+        let confirm = self.keymap.labels_for(Action::ConfirmDelete).join("/");
+        let title = clean(&col.list.title).into_owned();
+        let tasks = match count {
+            1 => "1 completed task".into(),
+            n => format!("{n} completed tasks"),
+        };
+        self.interaction = Interaction::ConfirmDelete(Pending {
+            target: PendingTarget::ClearCompleted {
+                list_id: col.list.id.clone(),
+            },
+            prompt: format!(
+                "Clear {tasks} from \"{title}\"?  {confirm} confirms · any other key cancels"
+            ),
+        });
+    }
+
     pub(super) fn confirm_delete(&mut self) {
         let interaction = std::mem::replace(&mut self.interaction, Interaction::Idle);
         let Interaction::ConfirmDelete(pending) = interaction else {
@@ -470,6 +507,14 @@ impl App {
                 };
                 self.submit_list_delete("delete list", op, backup, |board| {
                     board.remove_list(&list_id);
+                });
+            }
+            PendingTarget::ClearCompleted { list_id } => {
+                let op = Op::ClearCompleted {
+                    list: list_id.clone(),
+                };
+                self.submit("clear completed", op, &[&list_id], |board| {
+                    board.clear_completed(&list_id);
                 });
             }
         }
@@ -961,6 +1006,115 @@ mod tests {
         assert_eq!(list, "a");
         assert_eq!(task, "a-one");
         assert_eq!(patch.due, NaiveDate::from_ymd_opt(2026, 3, 10));
+    }
+
+    #[test]
+    fn shift_d_confirms_and_clears_completed_tasks() {
+        let (mut app, commands) = app_with_lists(&["a"]);
+        let _ = commands.recv().unwrap();
+        app.sync = SyncState::Ready;
+        set_tasks(
+            &mut app,
+            "a",
+            vec![
+                task("open", None, "1", false),
+                task("done-parent", None, "2", true),
+                task("open-child", Some("done-parent"), "1", false),
+                task("done", None, "3", true),
+            ],
+            "open",
+        );
+
+        app.on_key(KeyEvent::new(KeyCode::Char('D'), KeyModifiers::SHIFT));
+        let Interaction::ConfirmDelete(pending) = &app.interaction else {
+            panic!("expected clear confirm");
+        };
+        assert!(pending.prompt.contains("2 completed"));
+        assert!(matches!(
+            &pending.target,
+            PendingTarget::ClearCompleted { list_id } if list_id == "a"
+        ));
+
+        app.on_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+        let ids: Vec<String> = app
+            .board
+            .tasks("a")
+            .into_iter()
+            .map(|task| task.id)
+            .collect();
+        assert_eq!(ids, ["open".to_string(), "open-child".to_string()]);
+        assert!(app
+            .board
+            .task("a", "open-child")
+            .is_some_and(|task| task.parent.is_none()));
+        let (operation, Op::ClearCompleted { list }) = sent(&commands) else {
+            panic!("expected ClearCompleted");
+        };
+        assert_eq!(list, "a");
+
+        app.on_msg(finished(
+            operation,
+            vec![(
+                "a",
+                vec![
+                    task("open", None, "1", false),
+                    task("open-child", None, "2", false),
+                ],
+            )],
+        ));
+        let ids: Vec<&str> = app
+            .columns
+            .iter()
+            .find(|column| column.list.id == "a")
+            .unwrap()
+            .rows
+            .iter()
+            .map(|row| row.task.id.as_str())
+            .collect();
+        assert_eq!(ids, ["open", "open-child"]);
+    }
+
+    #[test]
+    fn shift_d_with_nothing_completed_reports_and_sends_nothing() {
+        let (mut app, commands) = app_with_lists(&["a"]);
+        let _ = commands.recv().unwrap();
+        app.sync = SyncState::Ready;
+        set_tasks(&mut app, "a", vec![task("open", None, "1", false)], "open");
+
+        app.on_key(KeyEvent::new(KeyCode::Char('D'), KeyModifiers::SHIFT));
+        assert!(matches!(app.interaction, Interaction::Idle));
+        assert!(app
+            .error
+            .as_deref()
+            .is_some_and(|message| message.contains("no completed")));
+        assert!(commands.try_recv().is_err());
+    }
+
+    #[test]
+    fn failed_clear_completed_restores_the_list() {
+        let (mut app, commands) = app_with_lists(&["a"]);
+        let _ = commands.recv().unwrap();
+        app.sync = SyncState::Ready;
+        set_tasks(
+            &mut app,
+            "a",
+            vec![
+                task("open", None, "1", false),
+                task("done", None, "2", true),
+            ],
+            "open",
+        );
+
+        app.on_key(KeyEvent::new(KeyCode::Char('D'), KeyModifiers::SHIFT));
+        app.on_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE));
+        let (operation, _) = sent(&commands);
+        app.on_msg(refused(operation));
+
+        assert!(app.board.task("a", "done").is_some());
+        assert!(app
+            .error
+            .as_deref()
+            .is_some_and(|message| message.contains("clear completed")));
     }
 
     #[test]
@@ -1889,33 +2043,34 @@ mod tests {
     }
 
     #[test]
-    fn tasks_with_children_or_completed_hidden_tasks_cannot_become_subtasks() {
-        for selected in ["has-children", "completed-hidden"] {
-            let (mut app, _commands) = app_with_lists(&["a"]);
-            app.sync = SyncState::Ready;
-            set_tasks(
-                &mut app,
-                "a",
-                vec![
-                    task("has-children", None, "1", false),
-                    task("child", Some("has-children"), "2", false),
-                    Task {
-                        hidden: true,
-                        ..task("completed-hidden", None, "3", true)
-                    },
-                    task("available", None, "4", false),
-                ],
-                selected,
-            );
+    fn tasks_with_children_cannot_become_subtasks() {
+        let (mut app, _commands) = app_with_lists(&["a"]);
+        app.sync = SyncState::Ready;
+        set_tasks(
+            &mut app,
+            "a",
+            vec![
+                task("has-children", None, "1", false),
+                task("child", Some("has-children"), "2", false),
+                // Cleared/hidden completed tasks are dropped on load; the
+                // board-level guard for them is covered in board tests.
+                Task {
+                    hidden: true,
+                    ..task("completed-hidden", None, "3", true)
+                },
+                task("available", None, "4", false),
+            ],
+            "has-children",
+        );
+        assert!(app.board.task("a", "completed-hidden").is_none());
 
-            app.start_parent_pick();
+        app.start_parent_pick();
 
-            assert!(matches!(app.interaction, Interaction::Idle));
-            assert!(app
-                .error
-                .as_deref()
-                .is_some_and(|error| { error.contains("cannot become a subtask") }));
-        }
+        assert!(matches!(app.interaction, Interaction::Idle));
+        assert!(app
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("cannot become a subtask")));
     }
 
     #[test]

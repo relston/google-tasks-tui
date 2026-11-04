@@ -983,6 +983,13 @@ mod tests {
             Ok(())
         }
 
+        fn clear_completed(&mut self, list_id: &str) -> crate::google::Result<()> {
+            if let Some(tasks) = self.tasks.get_mut(list_id) {
+                tasks.retain(|task| !task.is_done());
+            }
+            Ok(())
+        }
+
         fn move_task(
             &mut self,
             list_id: &str,

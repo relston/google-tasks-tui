@@ -94,6 +94,7 @@ actions! {
     ToggleCompleted   = "toggle_completed",    [Board],         ["v"],                                  "show / hide completed";
     DeleteTask        = "delete_task",         [Board],         ["x"],                                  "delete task";
     DeleteList        = "delete_list",         [Board],         ["shift+x"],                            "delete list";
+    ClearCompleted    = "clear_completed",     [Board],         ["shift+d"],                            "clear completed tasks";
     EditDue           = "edit_due",            [Board],         ["d"],                                  "edit due date";
     RenameList        = "rename_list",         [Board],         ["shift+i"],                            "rename list";
     CreateList        = "create_list",         [Board],         ["shift+t"],                            "new list";
@@ -190,6 +191,7 @@ mod tests {
             (BindingContext::ListEdit, "enter", Action::SaveEdit),
             (BindingContext::ListEdit, "esc", Action::CancelEdit),
             (BindingContext::Board, "d", Action::EditDue),
+            (BindingContext::Board, "shift+d", Action::ClearCompleted),
             (BindingContext::Board, "x", Action::DeleteTask),
             (BindingContext::Board, "shift+x", Action::DeleteList),
             (BindingContext::Board, "shift+i", Action::RenameList),

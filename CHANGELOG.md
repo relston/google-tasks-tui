@@ -4,6 +4,14 @@ Notable changes to google-tasks-tui, newest first. There are no tagged
 releases yet; entries are grouped by date. Open work is tracked in
 [`docs/TASKS.md`](docs/TASKS.md).
 
+## 2026-11-03
+
+### Added
+
+- TUI `Shift+d` clears completed tasks from the focused list via
+  `tasks.clear` (y/n confirm). Open children of cleared parents become
+  top-level; hidden completed tasks stay out of the board after reload.
+
 ## 2026-11-02
 
 ### Fixed

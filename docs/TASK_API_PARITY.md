@@ -23,7 +23,7 @@ Service endpoint: `https://tasks.googleapis.com`
 | `tasks.update` | Fully replace a task. | — | — |
 | `tasks.delete` | Delete a task and its subtasks. | ✓ | ✓ |
 | `tasks.move` | Reorder, reparent, or move a task across lists. | ✓ | ✓ |
-| `tasks.clear` | Remove all completed tasks from a list. | — | — |
+| `tasks.clear` | Remove all completed tasks from a list. | ✓ | — |
 
 ## Notes
 
@@ -40,8 +40,10 @@ Service endpoint: `https://tasks.googleapis.com`
   deletes (`Shift+x`) lists. Create and rename share the floating title panel.
   Reordering columns with `Shift+h` / `Shift+l` is local display order only —
   Google has no `tasklists.move`.
-- **`tasks.clear`:** Unsupported in both interfaces. Hiding completed tasks
-  in the TUI is local display only and does not clear them in Google.
+- **`tasks.clear`:** The TUI clears completed tasks from the focused list with
+  `Shift+d` (y/n confirm). Google marks them hidden; the board drops hidden
+  completed tasks so a refresh does not bring them back. CLI clear is still
+  unsupported. Hiding completed tasks with `v` remains local display only.
 - **Due time and recurrence:** The Task resource exposes `due` as a date
   only (any time portion is discarded). There is no recurrence field, so
   repeating tasks from the Tasks/Calendar UI cannot be read or written
