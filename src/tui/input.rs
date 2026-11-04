@@ -27,7 +27,7 @@ fn list_edit_key(app: &mut App, k: KeyEvent) {
         Some(Action::CancelEdit) => {
             app.interaction = Interaction::Idle;
         }
-        Some(Action::SaveEdit) => app.commit_list_rename(),
+        Some(Action::SaveEdit) => app.commit_list_edit(),
         Some(Action::CursorLeft) => {
             if let Interaction::ListEdit(edit) = &mut app.interaction {
                 edit.left();
@@ -195,6 +195,7 @@ impl App {
             Action::DeleteTask => self.ask_delete(),
             Action::DeleteList => self.ask_delete_list(),
             Action::RenameList => self.start_rename_list(),
+            Action::CreateList => self.start_create_list(),
             Action::ReorderListLeft => self.reorder_list(false),
             Action::ReorderListRight => self.reorder_list(true),
             Action::CreateTask => self.start_create(false),

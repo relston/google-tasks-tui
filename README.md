@@ -49,7 +49,9 @@ same CRUD is available as subcommands for scripts and agents
   Google deletes those too.
 - `X` (`Shift+x`) deletes the focused list after the same kind of y/n
   confirmation. Google removes every task in that list.
-- `I` (`Shift+i`) opens a floating editor for the focused list's title;
+- `T` (`Shift+t`) opens a floating panel to name a new list; Enter creates it
+  on Google, Esc cancels.
+- `I` (`Shift+i`) opens the same floating editor for the focused list's title;
   Enter saves, Esc cancels.
 - `H` / `L` (`Shift+h` / `Shift+l`) move the focused list one column left or
   right in the board. That order is local until the next refresh; Google has

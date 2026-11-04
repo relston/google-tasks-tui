@@ -483,15 +483,23 @@ impl App {
         let Some(col) = self.columns.get(self.focus) else {
             return;
         };
-        self.interaction = Interaction::ListEdit(ListEdit::new(
+        self.interaction = Interaction::ListEdit(ListEdit::rename(
             col.list.id.clone(),
             col.list.etag.clone(),
             col.list.title.clone(),
         ));
     }
 
-    /// Apply the list-title editor via `tasklists.patch`.
-    pub(super) fn commit_list_rename(&mut self) {
+    /// Open the floating panel to name a new list.
+    pub(super) fn start_create_list(&mut self) {
+        if !self.writable() {
+            return;
+        }
+        self.interaction = Interaction::ListEdit(ListEdit::create());
+    }
+
+    /// Apply the list-title editor via `tasklists.patch` or `tasklists.insert`.
+    pub(super) fn commit_list_edit(&mut self) {
         if !self.writable() {
             return;
         }
@@ -508,13 +516,20 @@ impl App {
                 return;
             }
         };
+        self.error = None;
+        if edit.is_create() {
+            let op = Op::CreateList {
+                title: title.clone(),
+            };
+            self.submit_list_create(edit, op);
+            return;
+        }
         let Some(before) = self.board.list(&edit.list_id).cloned() else {
             self.recover("edited list disappeared".into());
             return;
         };
         let list_id = edit.list_id;
         let etag = edit.etag;
-        self.error = None;
         let op = Op::PatchList {
             list: list_id.clone(),
             title: title.clone(),
@@ -1009,6 +1024,74 @@ mod tests {
         };
         assert_eq!(list, "a");
         assert_eq!(title, "List au");
+    }
+
+    #[test]
+    fn shift_t_creates_a_list_after_google_answers() {
+        let (mut app, commands) = app_with_lists(&["a"]);
+        let _ = commands.recv().unwrap();
+        app.sync = SyncState::Ready;
+
+        app.on_key(KeyEvent::new(KeyCode::Char('T'), KeyModifiers::SHIFT));
+        let Interaction::ListEdit(edit) = &app.interaction else {
+            panic!("expected new-list editor");
+        };
+        assert!(edit.is_create());
+        assert!(edit.buf.is_empty());
+
+        for c in "Inbox".chars() {
+            app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(app.interaction, Interaction::Idle));
+        assert!(
+            app.board.list("new").is_none(),
+            "wait for Google before inserting"
+        );
+        let (operation, Op::CreateList { title }) = sent(&commands) else {
+            panic!("expected CreateList");
+        };
+        assert_eq!(title, "Inbox");
+
+        app.on_msg(Msg::Finished {
+            id: operation,
+            result: Ok(Outcome {
+                upserted_lists: vec![TaskList {
+                    id: "new".into(),
+                    title: "Inbox".into(),
+                    ..Default::default()
+                }],
+                ..Outcome::default()
+            }),
+        });
+        assert!(app.board.list("new").is_some());
+        assert_eq!(app.columns.last().map(|c| c.list.id.as_str()), Some("new"));
+        assert_eq!(app.columns[app.focus].list.id, "new");
+    }
+
+    #[test]
+    fn failed_list_create_reopens_the_draft() {
+        let (mut app, commands) = app_with_lists(&["a"]);
+        let _ = commands.recv().unwrap();
+        app.sync = SyncState::Ready;
+
+        app.on_key(KeyEvent::new(KeyCode::Char('T'), KeyModifiers::SHIFT));
+        for c in "Draft".chars() {
+            app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        let (operation, _) = sent(&commands);
+        app.on_msg(refused(operation));
+
+        let Interaction::ListEdit(edit) = &app.interaction else {
+            panic!("expected draft reopened");
+        };
+        assert!(edit.is_create());
+        assert_eq!(edit.buf, "Draft");
+        assert!(app
+            .error
+            .as_deref()
+            .is_some_and(|m| m.contains("create list")));
     }
 
     #[test]

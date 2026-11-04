@@ -518,6 +518,12 @@ mod tests {
         rename.on_key(KeyEvent::new(KeyCode::Char('I'), KeyModifiers::SHIFT));
         let screen = render_app(&rename, 50, 14);
         assert!(screen.contains("rename list"), "{screen}");
+
+        let mut create = one_list_app();
+        create.sync = SyncState::Ready;
+        create.on_key(KeyEvent::new(KeyCode::Char('T'), KeyModifiers::SHIFT));
+        let screen = render_app(&create, 50, 14);
+        assert!(screen.contains("new list"), "{screen}");
     }
 
     #[test]

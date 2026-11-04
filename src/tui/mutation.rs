@@ -9,6 +9,7 @@ use crate::model::{Task, TaskList};
 use super::app::{App, Interaction, QuitState, Shelf};
 use super::columns::{visible_rows, Column};
 use super::editor::{Edit, EditTarget, FieldId};
+use super::list_edit::ListEdit;
 use super::sync::{LoadState, SyncState};
 use super::worker::{Cmd, Op, Outcome, Warning};
 
@@ -39,6 +40,8 @@ pub(super) struct PendingOperation {
     removed_list: Option<ListBackup>,
     /// A new-task draft, reopened if Google refuses it.
     draft: Option<Edit>,
+    /// A new-list draft, reopened if Google refuses it.
+    list_draft: Option<ListEdit>,
     pub(super) reorder: Option<Reorder>,
 }
 
@@ -52,6 +55,7 @@ impl PendingOperation {
             list_meta_before: None,
             removed_list: None,
             draft: None,
+            list_draft: None,
             reorder: None,
         }
     }
@@ -86,6 +90,7 @@ impl App {
                 list_meta_before: None,
                 removed_list: None,
                 draft: None,
+                list_draft: None,
                 reorder: None,
             },
             op,
@@ -122,6 +127,7 @@ impl App {
                 list_meta_before: Some(before),
                 removed_list: None,
                 draft: None,
+                list_draft: None,
                 reorder: None,
             },
             op,
@@ -151,6 +157,7 @@ impl App {
                 list_meta_before: None,
                 removed_list: Some(backup),
                 draft: None,
+                list_draft: None,
                 reorder: None,
             },
             op,
@@ -172,6 +179,29 @@ impl App {
                 list_meta_before: None,
                 removed_list: None,
                 draft: Some(draft),
+                list_draft: None,
+                reorder: None,
+            },
+            op,
+        )
+    }
+
+    /// Send a new list. Nothing changes on screen until Google answers.
+    pub(super) fn submit_list_create(&mut self, draft: ListEdit, op: Op) -> bool {
+        if self.pending_operation.is_some() {
+            self.error = Some("wait for the current save to finish".into());
+            self.interaction = Interaction::ListEdit(draft);
+            return false;
+        }
+        self.send(
+            PendingOperation {
+                id: 0,
+                label: "create list",
+                before: Vec::new(),
+                list_meta_before: None,
+                removed_list: None,
+                draft: None,
+                list_draft: Some(draft),
                 reorder: None,
             },
             op,
@@ -245,12 +275,18 @@ impl App {
                 self.follow_created(draft, &list_id, task_id);
             }
         }
+        let mut created_list: Option<String> = None;
         for list in outcome.upserted_lists {
             let id = list.id.clone();
             self.board.upsert_list(list.clone());
             if let Some(column) = self.columns.iter_mut().find(|column| column.list.id == id) {
                 column.list = list;
+            } else if pending.list_draft.is_some() {
+                created_list = Some(id);
             }
+        }
+        if let Some(id) = created_list {
+            self.rebuild_columns_from_board(Some(&id));
         }
         if outcome.warnings.is_empty() {
             if let Some((list_id, task_id, previous)) = queued {
@@ -319,6 +355,9 @@ impl App {
             }
             self.shelf = Shelf::Open(FieldId::Title);
             self.interaction = Interaction::Editing(draft);
+        }
+        if let Some(draft) = pending.list_draft {
+            self.interaction = Interaction::ListEdit(draft);
         }
     }
 

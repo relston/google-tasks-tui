@@ -14,10 +14,11 @@ releases yet; entries are grouped by date. Open work is tracked in
 
 ### Added
 
-- TUI list management: `Shift+x` deletes the focused list (y/n confirm),
-  `Shift+i` opens a floating title editor (Enter saves, Esc cancels), and
-  `Shift+h` / `Shift+l` move the focused list one column left or right
-  locally (Google has no list-reorder API; refresh restores server order).
+- TUI list management: `Shift+t` creates a list (floating title panel, same as
+  rename), `Shift+x` deletes the focused list (y/n confirm), `Shift+i` renames
+  via that panel (Enter saves, Esc cancels), and `Shift+h` / `Shift+l` move the
+  focused list one column left or right locally (Google has no list-reorder
+  API; refresh restores server order).
 - TUI `d` opens a floating due-date editor for the selected task (same segment
   + calendar panel as `--debug-date-time`). Enter patches the due date; Esc
   cancels. Delete moves to `x`.

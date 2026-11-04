@@ -43,6 +43,9 @@ pub(super) enum Op {
         title: String,
         etag: String,
     },
+    CreateList {
+        title: String,
+    },
     DeleteList {
         list: String,
     },
@@ -189,6 +192,13 @@ fn execute<A: TasksApi>(client: &mut A, op: Op) -> Result<Outcome, Error> {
         }
         Op::PatchList { list, title, etag } => {
             let list = client.patch_list(&list, &ListPatch { title }, Some(&etag))?;
+            Ok(Outcome {
+                upserted_lists: vec![list],
+                ..Outcome::default()
+            })
+        }
+        Op::CreateList { title } => {
+            let list = client.create_list(&title)?;
             Ok(Outcome {
                 upserted_lists: vec![list],
                 ..Outcome::default()

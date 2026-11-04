@@ -1,4 +1,4 @@
-//! Floating list-title editor. Launch with Shift+i on the focused list.
+//! Floating list-title editor. Shift+i renames; Shift+t creates.
 
 use ratatui::{
     layout::Rect,
@@ -16,9 +16,16 @@ use super::view::text::clean;
 const PANEL_WIDTH: u16 = 40;
 const PANEL_HEIGHT: u16 = 3;
 
-/// In-progress rename of a task list.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ListEditKind {
+    Rename,
+    Create,
+}
+
+/// In-progress create or rename of a task list.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct ListEdit {
+    pub(super) kind: ListEditKind,
     pub(super) list_id: String,
     pub(super) etag: String,
     pub(super) buf: String,
@@ -26,13 +33,35 @@ pub(super) struct ListEdit {
 }
 
 impl ListEdit {
-    pub(super) fn new(list_id: String, etag: String, title: String) -> Self {
+    pub(super) fn rename(list_id: String, etag: String, title: String) -> Self {
         let cursor = title.len();
         Self {
+            kind: ListEditKind::Rename,
             list_id,
             etag,
             buf: title,
             cursor,
+        }
+    }
+
+    pub(super) fn create() -> Self {
+        Self {
+            kind: ListEditKind::Create,
+            list_id: String::new(),
+            etag: String::new(),
+            buf: String::new(),
+            cursor: 0,
+        }
+    }
+
+    pub(super) fn is_create(&self) -> bool {
+        self.kind == ListEditKind::Create
+    }
+
+    pub(super) fn panel_title(&self) -> &'static str {
+        match self.kind {
+            ListEditKind::Rename => " rename list ",
+            ListEditKind::Create => " new list ",
         }
     }
 
@@ -103,7 +132,7 @@ pub(super) fn draw_panel(frame: &mut Frame, area: Rect, edit: &ListEdit, theme: 
     frame.render_widget(Clear, panel);
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
-        .title(" rename list ")
+        .title(edit.panel_title())
         .border_style(Style::default().fg(theme.muted))
         .style(Style::default().fg(theme.fg).bg(theme.bg));
     let inner = block.inner(panel);
@@ -127,7 +156,7 @@ mod tests {
 
     #[test]
     fn insert_and_backspace_edit_the_title() {
-        let mut edit = ListEdit::new("l".into(), "e".into(), "Work".into());
+        let mut edit = ListEdit::rename("l".into(), "e".into(), "Work".into());
         assert_eq!(edit.cursor, 4);
         edit.backspace();
         assert_eq!(edit.buf, "Wor");

@@ -96,6 +96,7 @@ actions! {
     DeleteList        = "delete_list",         [Board],         ["shift+x"],                            "delete list";
     EditDue           = "edit_due",            [Board],         ["d"],                                  "edit due date";
     RenameList        = "rename_list",         [Board],         ["shift+i"],                            "rename list";
+    CreateList        = "create_list",         [Board],         ["shift+t"],                            "new list";
     CreateTask        = "create_task",         [Board],         ["c"],                                  "new task";
     CreateSubtask     = "create_subtask",      [Board],         ["shift+c"],                            "new subtask";
     Refresh           = "refresh",             [Board],         ["r"],                                  "refresh from Google";
@@ -192,6 +193,7 @@ mod tests {
             (BindingContext::Board, "x", Action::DeleteTask),
             (BindingContext::Board, "shift+x", Action::DeleteList),
             (BindingContext::Board, "shift+i", Action::RenameList),
+            (BindingContext::Board, "shift+t", Action::CreateList),
             (BindingContext::Board, "shift+h", Action::ReorderListLeft),
             (BindingContext::Board, "shift+l", Action::ReorderListRight),
             (BindingContext::Confirm, "y", Action::ConfirmDelete),
