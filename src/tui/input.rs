@@ -150,6 +150,7 @@ impl App {
                 PickerKey::Close => self.interaction = Interaction::Idle,
                 PickerKey::Accept => match self.interaction {
                     Interaction::Browse(_) => self.open_browse(false),
+                    Interaction::Search(_) => self.confirm_search(),
                     Interaction::Move(_) => self.confirm_move(),
                     Interaction::Parent(_) => self.confirm_parent(),
                     _ => self.interaction = Interaction::Idle,
@@ -205,6 +206,7 @@ impl App {
             Action::ToggleTransparent => self.transparent = !self.transparent,
             Action::CopyTask => self.yank(),
             Action::BrowseLinks => self.start_browse(),
+            Action::SearchTasks => self.start_search(),
             Action::MoveTask => self.start_move(),
             Action::ReorderUp => self.reorder_task(false),
             Action::ReorderDown => self.reorder_task(true),

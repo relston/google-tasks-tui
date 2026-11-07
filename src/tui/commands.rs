@@ -12,6 +12,7 @@ use crate::markdown::md_yank;
 use crate::model::{normalize_title, urls_in, Status, Task, TaskList};
 
 use super::app::{App, Interaction, QuitState, Shelf};
+use super::columns::visible_rows;
 use super::debug_date::{DateEdit, DateEditor};
 use super::editor::{Edit, EditTarget, FieldId};
 use super::list_edit::ListEdit;
@@ -650,6 +651,76 @@ impl App {
             })
             .collect();
         self.interaction = Interaction::Browse(Picker::new(rows));
+    }
+
+    /// Separator between list id and task id in a Search picker's opaque value.
+    const SEARCH_SEP: char = '\x1f';
+
+    /// Open a picker of every task across every list; `/` filter matches title
+    /// and notes, subtitle is the list name, Enter focuses the match.
+    pub(super) fn start_search(&mut self) {
+        let mut rows = Vec::new();
+        for list in self.board.lists() {
+            let list_title = clean(&list.title).into_owned();
+            for row in self.board.rows(&list.id) {
+                let notes = row.task.notes.as_deref().unwrap_or("");
+                let value = format!("{}{}{}", list.id, Self::SEARCH_SEP, row.task.id);
+                rows.push(
+                    PickerRow::new(
+                        title_of(&row.task).into_owned(),
+                        Some(list_title.clone()),
+                        value,
+                    )
+                    .filtering(notes),
+                );
+            }
+        }
+        if rows.is_empty() {
+            self.error = Some("no tasks to search".into());
+            return;
+        }
+        self.error = None;
+        self.interaction = Interaction::Search(Picker::new(rows).with_filter_focus());
+    }
+
+    pub(super) fn confirm_search(&mut self) {
+        let value = {
+            let Interaction::Search(picker) = &self.interaction else {
+                return;
+            };
+            let Some(row) = picker.selected() else {
+                return;
+            };
+            row.value.clone()
+        };
+        self.interaction = Interaction::Idle;
+        let Some((list_id, task_id)) = value.split_once(Self::SEARCH_SEP) else {
+            return;
+        };
+        let Some(index) = self
+            .columns
+            .iter()
+            .position(|column| column.list.id == list_id)
+        else {
+            return;
+        };
+        if self.board.task(list_id, task_id).is_none() {
+            self.error = Some("task disappeared before it could be selected".into());
+            return;
+        }
+        // Reveal completed tasks when the match would otherwise be hidden.
+        if !self.show_completed
+            && !visible_rows(&self.board, list_id, false)
+                .iter()
+                .any(|row| row.task.id == task_id)
+        {
+            self.show_completed = true;
+            for id in self.board.list_ids().to_vec() {
+                self.rebuild_column(&id);
+            }
+        }
+        self.focus = index;
+        self.columns[index].select_id(Some(task_id.into()));
     }
 
     pub(super) fn open_browse(&mut self, all: bool) {
@@ -2074,6 +2145,102 @@ mod tests {
     }
 
     #[test]
+    fn slash_searches_across_lists_and_enter_focuses_the_match() {
+        let (mut app, commands) = app_with_lists(&["a", "b"]);
+        let _ = commands.recv().unwrap();
+        app.sync = SyncState::Ready;
+        set_tasks(
+            &mut app,
+            "a",
+            vec![
+                task("a-one", None, "1", false),
+                Task {
+                    notes: Some("buy milk and eggs".into()),
+                    ..task("a-shop", None, "2", false)
+                },
+            ],
+            "a-one",
+        );
+        set_tasks(
+            &mut app,
+            "b",
+            vec![task("b-write", None, "1", false)],
+            "b-write",
+        );
+        app.focus = 0;
+
+        app.on_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+        let Interaction::Search(picker) = &app.interaction else {
+            panic!("expected search picker");
+        };
+        assert!(picker.typing());
+        assert_eq!(picker.rows().count(), 3);
+
+        for c in "milk".chars() {
+            app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        let Interaction::Search(picker) = &app.interaction else {
+            panic!("expected search picker");
+        };
+        let values: Vec<String> = picker.rows().map(|row| row.value.clone()).collect();
+        assert_eq!(values, [format!("a{}a-shop", App::SEARCH_SEP)]);
+        assert_eq!(
+            picker.selected().and_then(|row| row.subtitle.as_deref()),
+            Some("List a")
+        );
+
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(app.interaction, Interaction::Idle));
+        assert_eq!(app.focus, 0);
+        assert_eq!(app.columns[0].selected_id.as_deref(), Some("a-shop"));
+    }
+
+    #[test]
+    fn search_enter_reveals_a_hidden_completed_match() {
+        let (mut app, commands) = app_with_lists(&["a", "b"]);
+        let _ = commands.recv().unwrap();
+        app.sync = SyncState::Ready;
+        set_tasks(
+            &mut app,
+            "a",
+            vec![Task {
+                title: "open".into(),
+                ..task("open", None, "1", false)
+            }],
+            "open",
+        );
+        set_tasks(
+            &mut app,
+            "b",
+            vec![
+                Task {
+                    title: "still open".into(),
+                    ..task("open-b", None, "1", false)
+                },
+                Task {
+                    title: "finished chore".into(),
+                    ..task("done-b", None, "2", true)
+                },
+            ],
+            "open-b",
+        );
+        app.show_completed = false;
+        app.rebuild_column("a");
+        app.rebuild_column("b");
+        app.focus = 0;
+
+        app.start_search();
+        for c in "finished".chars() {
+            app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert!(app.show_completed);
+        assert_eq!(app.focus, 1);
+        assert_eq!(app.columns[1].selected_id.as_deref(), Some("done-b"));
+    }
+
+    #[test]
     fn help_keys_lists_the_board_commands() {
         let (mut app, _commands) = app_with_lists(&["a"]);
         app.start_help();
@@ -2084,6 +2251,7 @@ mod tests {
             "new task",
             "new subtask",
             "delete task",
+            "search tasks",
             "move to another list",
             "choose parent",
             "show / hide completed",

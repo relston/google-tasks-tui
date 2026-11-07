@@ -12,12 +12,6 @@ tasks take the next unused number, and numbers are never reused.
 
 ## Features
 
-- **8.** Search tasks across all lists. A key opens a picker that filters
-  every task by title and notes (case-insensitive substring, like the
-  existing `/` filter), shows each match's list as its subtitle, and on Enter
-  focuses that list and selects the task. Consider a matching CLI `search`
-  command.
-
 ## Maintenance
 
 - **9.** Reassess `toml` and ratatui upgrades against the chosen MSRV.

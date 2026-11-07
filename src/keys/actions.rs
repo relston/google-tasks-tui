@@ -104,6 +104,7 @@ actions! {
     ToggleTransparent = "toggle_transparent",  [Board],         ["t"],                                  "toggle transparent background";
     CopyTask          = "copy_task",           [Board],         ["y"],                                  "copy task as markdown";
     BrowseLinks       = "browse_links",        [Board],         ["b"],                                  "browse links in notes";
+    SearchTasks       = "search_tasks",        [Board],         ["slash"],                              "search tasks";
     MoveTask          = "move_task",           [Board],         ["m"],                                  "move to another list";
     ReorderUp         = "reorder_up",          [Board],         ["alt+k", "alt+up"],                    "move task up one place";
     ReorderDown       = "reorder_down",        [Board],         ["alt+j", "alt+down"],                  "move task down one place";
@@ -196,6 +197,7 @@ mod tests {
             (BindingContext::Board, "shift+x", Action::DeleteList),
             (BindingContext::Board, "shift+i", Action::RenameList),
             (BindingContext::Board, "shift+t", Action::CreateList),
+            (BindingContext::Board, "slash", Action::SearchTasks),
             (BindingContext::Board, "shift+h", Action::ReorderListLeft),
             (BindingContext::Board, "shift+l", Action::ReorderListRight),
             (BindingContext::Confirm, "y", Action::ConfirmDelete),

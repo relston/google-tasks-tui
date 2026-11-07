@@ -4,6 +4,15 @@ Notable changes to google-tasks-tui, newest first. There are no tagged
 releases yet; entries are grouped by date. Open work is tracked in
 [`docs/TASKS.md`](docs/TASKS.md).
 
+## 2026-11-06
+
+### Added
+
+- TUI `/` opens a Search picker across every list. The filter matches title
+  and notes (case-insensitive); each row shows its list as the subtitle.
+  Enter focuses that list and selects the task, revealing completed tasks
+  when the match would otherwise be hidden.
+
 ## 2026-11-03
 
 ### Added

@@ -56,6 +56,7 @@ pub(super) enum Interaction {
     ListEdit(ListEdit),
     ConfirmDelete(Pending),
     Browse(Picker),
+    Search(Picker),
     Move(Picker),
     Parent(ParentPick),
     Help(Picker),
@@ -64,7 +65,10 @@ pub(super) enum Interaction {
 impl Interaction {
     pub(super) fn picker(&self) -> Option<&Picker> {
         match self {
-            Interaction::Browse(p) | Interaction::Move(p) | Interaction::Help(p) => Some(p),
+            Interaction::Browse(p)
+            | Interaction::Search(p)
+            | Interaction::Move(p)
+            | Interaction::Help(p) => Some(p),
             Interaction::Parent(parent) => Some(&parent.picker),
             _ => None,
         }
@@ -72,7 +76,10 @@ impl Interaction {
 
     pub(super) fn picker_mut(&mut self) -> Option<&mut Picker> {
         match self {
-            Interaction::Browse(p) | Interaction::Move(p) | Interaction::Help(p) => Some(p),
+            Interaction::Browse(p)
+            | Interaction::Search(p)
+            | Interaction::Move(p)
+            | Interaction::Help(p) => Some(p),
             Interaction::Parent(parent) => Some(&mut parent.picker),
             _ => None,
         }
@@ -82,6 +89,7 @@ impl Interaction {
     pub(super) fn picker_title(&self) -> &'static str {
         match self {
             Interaction::Browse(_) => " Browse Link ",
+            Interaction::Search(_) => " Search ",
             Interaction::Move(_) => " Move ",
             Interaction::Parent(_) => " Select Parent ",
             _ => " Keyboard ",

@@ -48,6 +48,14 @@ impl App {
                 (Action::StartFilter, "filter"),
                 (Action::ClosePicker, "close"),
             ])
+        } else if matches!(self.interaction, Interaction::Search(_)) {
+            self.hints(&[
+                (Action::PickerNext, "next"),
+                (Action::PickerPrevious, "previous"),
+                (Action::PickerAccept, "go to task"),
+                (Action::StartFilter, "filter"),
+                (Action::ClosePicker, "close"),
+            ])
         } else if matches!(self.interaction, Interaction::Move(_)) {
             self.hints(&[
                 (Action::PickerNext, "next"),

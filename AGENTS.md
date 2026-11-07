@@ -43,13 +43,15 @@ disk, desktop), and the two front ends. Each file name says what it does.
   `App::settle`, which runs after every key and worker message. Layout that
   input needs, such as the editor width, comes from the same view functions
   drawing uses, applied to the terminal size the event loop records.
-- `Picker` backs every modal list (Browse, Move, Select Parent, Keyboard). Rows carry display
-  text plus an opaque `value`, so one `draw_picker` and one `picker_key` serve
-  all three. `draw_picker` dims the board behind every overlay; the read-only
-  Keyboard card flows into up to three columns, each sized to its entries. `/` filters by case-insensitive substring over title and subtitle;
-  selection resets to the top on every query change so it can never point at a
-  hidden row. Keep presentation out of app state: rows hold `String`s, not
-  `Line`s.
+- `Picker` backs every modal list (Browse, Search, Move, Select Parent,
+  Keyboard). Rows carry display text plus an opaque `value`, so one
+  `draw_picker` and one `picker_key` serve all of them. `draw_picker` dims the
+  board behind every overlay; the read-only Keyboard card flows into up to
+  three columns, each sized to its entries. `/` filters by case-insensitive
+  substring over title and subtitle (Search also matches notes via a hidden
+  haystack); selection resets to the top on every query change so it can never
+  point at a hidden row. Keep presentation out of app state: rows hold
+  `String`s, not `Line`s.
 - [`src/paths.rs`](src/paths.rs) owns path discovery. Build `Paths` once at
   the entry point and inject it; tests use temporary roots and never mutate
   process-wide environment variables.

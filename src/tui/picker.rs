@@ -1,5 +1,5 @@
-//! The filterable modal list behind Browse, Move, Select Parent, and the
-//! Keyboard overlay.
+//! The filterable modal list behind Browse, Search, Move, Select Parent, and
+//! the Keyboard overlay.
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 
@@ -30,6 +30,16 @@ impl PickerRow {
             value,
             filter,
         }
+    }
+
+    /// Append text to the `/` haystack without showing it (task notes, etc.).
+    pub(super) fn filtering(mut self, extra: &str) -> Self {
+        let extra = extra.trim();
+        if !extra.is_empty() {
+            self.filter.push(' ');
+            self.filter.push_str(&extra.to_lowercase());
+        }
+        self
     }
 }
 
@@ -74,6 +84,12 @@ impl Picker {
             selected: None,
             ..Self::new(rows)
         }
+    }
+
+    /// Open with the filter active so the next keys type the query.
+    pub(super) fn with_filter_focus(mut self) -> Self {
+        self.typing = true;
+        self
     }
 
     pub(super) fn rows(&self) -> impl Iterator<Item = &PickerRow> {

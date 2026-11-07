@@ -85,6 +85,12 @@ same CRUD is available as subcommands for scripts and agents
   selected URL and closes the overlay, `Shift+Enter` opens every URL in the
   list (selection does not matter) and closes, `Esc` closes without opening.
   If there are none, the status bar says so.
+- `/` on the board opens a **Search** overlay of every task across every list.
+  The filter is already active so you can type immediately; it matches title
+  and notes (case-insensitive substring). Each row shows its list as the
+  subtitle. `Enter` focuses that list and selects the task, turning on
+  completed-task visibility when the match would otherwise be hidden. `Esc`
+  leaves the filter, then closes the overlay.
 - `m` opens a **Move** overlay of every task list except the current one.
   `j`/`k` choose a list, `Enter` assigns the selected task to it (and its
   subtasks, preserving their order) and closes the overlay. Both lists are
@@ -98,14 +104,15 @@ same CRUD is available as subcommands for scripts and agents
   become a subtask. Promoting a task places it after its former parent.
 - `?` opens a **Keyboard** overlay listing the board commands; `Esc`/`q`/`?`
   close it.
-- Every overlay — Browse Link, Move, Select Parent, Keyboard — filters. Press
-  `/` and type: the list narrows as you go and the query shows in the bottom
-  border. It is a plain case-insensitive substring match on what you can see,
-  so `tin` finds both "Tinker Time" and "Wri**tin**g". While filtering, `↑`/`↓`
-  move and `Enter` picks; letters go to the query, so `q` and `j` type rather
-  than closing or moving. `Esc` leaves the filter and keeps the overlay, `Esc`
-  again closes it. On Browse Link, `Shift+Enter` opens everything still
-  matching rather than everything on the task.
+- Every overlay — Browse Link, Search, Move, Select Parent, Keyboard — filters.
+  Press `/` (or type straight into Search) and the list narrows as you go; the
+  query shows in the bottom border. It is a plain case-insensitive substring
+  match on title and subtitle (Search also matches notes), so `tin` finds both
+  "Tinker Time" and "Wri**tin**g". While filtering, `↑`/`↓` move and `Enter`
+  picks; letters go to the query, so `q` and `j` type rather than closing or
+  moving. `Esc` leaves the filter and keeps the overlay, `Esc` again closes it.
+  On Browse Link, `Shift+Enter` opens everything still matching rather than
+  everything on the task.
 - API calls run on a background thread, so the UI never blocks. Lists fill in
   as they load. One write runs at a time; navigation stays available while
   other mutation keys wait. If you quit while a write is pending, the app
@@ -298,7 +305,8 @@ requires `--yes` because Google removes every task in that list.
 | Edit notes | Yes | Yes | Assigned Docs/Chat tasks are rejected |
 | Edit due date/status directly | Due via `d`; status via `Space` | Yes | Same `tasks.patch` path |
 | Move tasks between lists | Yes | `move --to-list` | Task plus subtasks; partial moves report a count |
-| Task-list create/rename/delete | Rename `I`, delete `X`; create No | Yes | Column reorder `H`/`L` is local only |
+| Task-list create/rename/delete | Create `T`, rename `I`, delete `X` | Yes | Column reorder `H`/`L` is local only |
+| Search tasks across lists | `/` | No | Title and notes; Enter focuses the match |
 | Browse/copy task links | Yes | No | Terminal-interactive behavior |
 
 ## Keys
@@ -314,6 +322,7 @@ requires `--yes` because Google removes every task in that list.
 | `C`            | Create a subtask under this one |
 | `y`            | Copy the task as markdown       |
 | `b`            | Open a link from the notes      |
+| `/`            | Search tasks across lists       |
 | `m`            | Move the task to another list   |
 | `Alt-j` / `Alt-k` | Move the task down / up one place |
 | `<` / `>`      | Unparent / choose a parent      |
@@ -330,7 +339,7 @@ requires `--yes` because Google removes every task in that list.
 | `r`            | Refresh from Google             |
 | `t`            | Toggle transparent background   |
 | `?`            | List the keyboard commands      |
-| `/`            | Filter the open overlay          |
+| `/`            | Search (board) / filter overlay |
 | `Esc`          | Close or cancel the current view |
 | `q`            | Quit                            |
 

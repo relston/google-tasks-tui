@@ -524,6 +524,11 @@ mod tests {
         create.on_key(KeyEvent::new(KeyCode::Char('T'), KeyModifiers::SHIFT));
         let screen = render_app(&create, 50, 14);
         assert!(screen.contains("new list"), "{screen}");
+
+        let mut search = one_list_app();
+        search.on_key(KeyEvent::new(KeyCode::Char('/'), KeyModifiers::NONE));
+        let screen = render_app(&search, 50, 14);
+        assert!(screen.contains("Search"), "{screen}");
     }
 
     #[test]
