@@ -158,7 +158,9 @@ same CRUD is available as subcommands for scripts and agents
 
 You need an OAuth client of type **Desktop app** from a Google Cloud project
 with the Google Tasks API enabled. Download its JSON to
-`~/.gcloud/credentials.json`, or point `GOOGLE_TASKS_CREDENTIALS` at it.
+`~/.gcloud/credentials.json`, or point `GOOGLE_TASKS_CREDENTIALS` at it. If
+that file is missing or not a Desktop client JSON, the app exits with a short
+setup guide (Console links and the expected path) instead of a bare IO error.
 
 On first run the app opens your browser to authorize access, then saves the
 refresh token to `~/.config/google-tasks-tui/token.json` (mode `0600`). Later

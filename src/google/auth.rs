@@ -3,7 +3,8 @@
 //! and caches the refresh token in `$XDG_CONFIG_HOME/google-tasks-tui/token.json`.
 //! On first run it reuses a refresh token from a sibling `token.json` (the
 //! google-auth quickstart format) if it covers the Tasks scope; otherwise it
-//! runs the loopback browser flow.
+//! runs the loopback browser flow. Missing or malformed credentials print a
+//! short setup guide instead of a bare IO/parse error.
 
 use std::{
     collections::HashMap,
@@ -158,11 +159,13 @@ impl Auth {
     /// browser, so call this before the TUI takes over the terminal.
     pub fn sign_in(paths: &Paths) -> Result<Self> {
         let token_path = paths.token();
-        let credentials = paths.credentials.display();
-        let raw = fs::read_to_string(&paths.credentials)
-            .map_err(|e| Error::Credentials(format!("reading {credentials}: {e}")))?;
+        let raw = fs::read_to_string(&paths.credentials).map_err(|error| {
+            Error::Credentials(credentials_read_error(&paths.credentials, error))
+        })?;
         let client = serde_json::from_str::<ClientFile>(&raw)
-            .map_err(|e| Error::Credentials(format!("{credentials}: {e}")))?
+            .map_err(|error| {
+                Error::Credentials(credentials_parse_error(&paths.credentials, error))
+            })?
             .installed;
         let agent = http::agent();
 
@@ -305,6 +308,42 @@ fn borrow_existing(credentials: &std::path::Path, client_id: &str) -> Option<Str
     let raw = fs::read_to_string(credentials.with_file_name("token.json")).ok()?;
     let t: ExistingToken = serde_json::from_str(&raw).ok()?;
     (t.client_id == client_id && t.scopes.iter().any(|s| s == SCOPE)).then_some(t.refresh_token)
+}
+
+fn credentials_read_error(path: &std::path::Path, error: std::io::Error) -> String {
+    let path = path.display();
+    if error.kind() == std::io::ErrorKind::NotFound {
+        return format!(
+            "No OAuth credentials found at:\n  {path}\n\n\
+             Google Tasks needs a Desktop app OAuth client before you can sign in.\n\n\
+             Set one up:\n\
+               1. Open https://console.cloud.google.com/apis/credentials\n\
+               2. Create credentials → OAuth client ID → Application type: Desktop app\n\
+               3. Enable the Google Tasks API for that project\n\
+                  (https://console.cloud.google.com/apis/library/tasks.googleapis.com)\n\
+               4. Download the JSON and save it to the path above\n\
+                  (or set GOOGLE_TASKS_CREDENTIALS to wherever you put it)\n\n\
+             Then run google-tasks-tui again — a browser window will ask you to allow access."
+        );
+    }
+    format!(
+        "Could not read OAuth credentials at:\n  {path}\n\n\
+         {error}\n\n\
+         Fix the file permissions, or point GOOGLE_TASKS_CREDENTIALS at a readable\n\
+         Desktop app OAuth client JSON from Google Cloud Console."
+    )
+}
+
+fn credentials_parse_error(path: &std::path::Path, error: serde_json::Error) -> String {
+    let path = path.display();
+    format!(
+        "The file at:\n  {path}\n\
+         is not a Desktop OAuth client JSON.\n\n\
+         Download an OAuth client of type Desktop app from\n\
+         https://console.cloud.google.com/apis/credentials and replace this file\n\
+         (or set GOOGLE_TASKS_CREDENTIALS to the downloaded JSON).\n\n\
+         Parse detail: {error}"
+    )
 }
 
 fn now() -> u64 {
@@ -467,6 +506,67 @@ mod tests {
             pkce_challenge(verifier),
             "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
         );
+    }
+
+    #[test]
+    fn missing_credentials_explain_how_to_set_up() {
+        let root = test_root("missing-creds");
+        fs::create_dir_all(&root).unwrap();
+        let paths = Paths {
+            credentials: root.join("no-such-credentials.json"),
+            config_dir: root.join("config"),
+        };
+
+        let Err(err) = Auth::sign_in(&paths) else {
+            panic!("expected credentials error");
+        };
+        let message = err.to_string();
+        assert!(matches!(err, Error::Credentials(_)), "{message}");
+        assert!(message.contains("No OAuth credentials found"), "{message}");
+        assert!(
+            message.contains(paths.credentials.to_string_lossy().as_ref()),
+            "{message}"
+        );
+        assert!(message.contains("Desktop app"), "{message}");
+        assert!(message.contains("Tasks API"), "{message}");
+        assert!(message.contains("GOOGLE_TASKS_CREDENTIALS"), "{message}");
+        assert!(
+            message.contains("console.cloud.google.com/apis/credentials"),
+            "{message}"
+        );
+        assert!(
+            !message.starts_with("reading "),
+            "raw IO error should not be the whole message: {message}"
+        );
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn malformed_credentials_explain_the_expected_file() {
+        let root = test_root("bad-creds");
+        fs::create_dir_all(&root).unwrap();
+        let paths = Paths {
+            credentials: root.join("credentials.json"),
+            config_dir: root.join("config"),
+        };
+        fs::write(&paths.credentials, "{not json").unwrap();
+
+        let Err(err) = Auth::sign_in(&paths) else {
+            panic!("expected credentials error");
+        };
+        let message = err.to_string();
+        assert!(matches!(err, Error::Credentials(_)), "{message}");
+        assert!(
+            message.contains("not a Desktop OAuth client JSON"),
+            "{message}"
+        );
+        assert!(
+            message.contains(paths.credentials.to_string_lossy().as_ref()),
+            "{message}"
+        );
+
+        fs::remove_dir_all(root).ok();
     }
 
     #[test]

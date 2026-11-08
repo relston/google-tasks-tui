@@ -4,6 +4,14 @@ Notable changes to google-tasks-tui, newest first. There are no tagged
 releases yet; entries are grouped by date. Open work is tracked in
 [`docs/TASKS.md`](docs/TASKS.md).
 
+## 2026-11-08
+
+### Fixed
+
+- Missing or malformed Google OAuth credentials print a setup guide (Desktop
+  app client, Tasks API, download path / `GOOGLE_TASKS_CREDENTIALS`) instead of
+  a bare `reading …: No such file` or JSON parse error.
+
 ## 2026-11-06
 
 ### Added
