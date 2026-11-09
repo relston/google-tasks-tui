@@ -6,6 +6,12 @@ releases yet; entries are grouped by date. Open work is tracked in
 
 ## 2026-11-08
 
+### Added
+
+- Publisher Google Cloud project `relston-tasks-tui` (display name
+  `google-tasks-tui`) with `tasks.googleapis.com` enabled — Phase A toward a
+  shipped default Desktop OAuth client.
+
 ### Fixed
 
 - Missing or malformed Google OAuth credentials print a setup guide (Desktop
