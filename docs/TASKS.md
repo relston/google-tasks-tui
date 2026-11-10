@@ -13,16 +13,18 @@ tasks take the next unused number, and numbers are never reused.
 ## Features
 
 - **11.** OAuth consent screen and Desktop client (Phase B) for project
-  `gtasks-tui-app` (display name `google-tasks-tui`, Tasks API already
-  enabled; `gtasks-tui` was already taken globally). In Cloud Console (or
-  scripted where safe): External audience in Testing, app name / support
-  email, Tasks scope (`https://www.googleapis.com/auth/tasks`), test users
-  while unverified. Create an Auth Platform **Desktop app** OAuth client
-  named like `google-tasks-tui` and download the client JSON once (the secret
-  is only shown at create time). Keep the JSON out of the public tree until
-  Phase C explicitly chooses how to ship it. Note: `gcloud iam oauth-clients`
-  is for Cloud sign-in scopes, not this Auth Platform Desktop client — do not
-  use it.
+  `gtasks-tui-pub` under publisher account `ryan@ryanelston.com` (display
+  name `google-tasks-tui`, Tasks API already enabled). In Cloud Console:
+  External audience in Testing, app name / support email
+  `ryan@ryanelston.com`, Tasks scope
+  (`https://www.googleapis.com/auth/tasks`), test users while unverified.
+  Create an Auth Platform **Desktop app** OAuth client named like
+  `google-tasks-tui` and download the client JSON once (the secret is only
+  shown at create time) to
+  `~/.config/google-tasks-tui/publisher/credentials.json` — not the git
+  tree — until Phase C chooses how to ship it. Note: `gcloud iam
+  oauth-clients` is for Cloud sign-in scopes, not this Auth Platform Desktop
+  client — do not use it.
 
 - **12.** Bake a default Desktop OAuth client into the app (Phase C). Resolve
   credentials as env/`GOOGLE_TASKS_CREDENTIALS` → `~/.gcloud/credentials.json`

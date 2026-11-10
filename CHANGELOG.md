@@ -8,10 +8,11 @@ releases yet; entries are grouped by date. Open work is tracked in
 
 ### Added
 
-- Publisher Google Cloud project `gtasks-tui-app` (display name
-  `google-tasks-tui`) with `tasks.googleapis.com` enabled — Phase A toward a
-  shipped default Desktop OAuth client. (`gtasks-tui` was already taken;
-  earlier `relston-tasks-tui` was replaced.)
+- Publisher Google Cloud project `gtasks-tui-pub` under
+  `ryan@ryanelston.com` (display name `google-tasks-tui`) with
+  `tasks.googleapis.com` enabled — Phase A toward a shipped default Desktop
+  OAuth client. (`gtasks-tui` / `gtasks-tui-app` were unavailable or replaced;
+  Gmail-owned drafts were shut down.)
 
 ### Fixed
 
