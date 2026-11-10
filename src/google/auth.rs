@@ -297,6 +297,17 @@ fn invalidate_token(path: &std::path::Path) -> Option<String> {
     }
 }
 
+/// Remove the cached refresh token so the next `Auth::load` signs in again.
+/// Returns whether a token file was present.
+pub fn clear_cached_token(paths: &Paths) -> Result<bool> {
+    let path = paths.token();
+    let existed = path.exists();
+    if let Some(error) = invalidate_token(&path) {
+        return Err(Error::Io(std::io::Error::other(error)));
+    }
+    Ok(existed)
+}
+
 fn borrow_existing(credentials: &std::path::Path, client_id: &str) -> Option<String> {
     let raw = fs::read_to_string(credentials.with_file_name("token.json")).ok()?;
     let t: ExistingToken = serde_json::from_str(&raw).ok()?;
@@ -534,6 +545,22 @@ mod tests {
             pkce_challenge(verifier),
             "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
         );
+    }
+
+    #[test]
+    fn clear_cached_token_removes_the_file_and_is_idempotent() {
+        let root = test_root("clear-token");
+        fs::create_dir_all(root.join("config")).unwrap();
+        let paths = Paths {
+            credentials: root.join("credentials.json"),
+            require_credentials_file: false,
+            config_dir: root.join("config"),
+        };
+        fs::write(paths.token(), r#"{"client_id":"x","refresh_token":"y"}"#).unwrap();
+        assert!(clear_cached_token(&paths).unwrap());
+        assert!(!paths.token().exists());
+        assert!(!clear_cached_token(&paths).unwrap());
+        fs::remove_dir_all(root).ok();
     }
 
     #[test]

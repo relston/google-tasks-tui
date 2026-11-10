@@ -145,6 +145,8 @@ pub enum Command {
         #[command(subcommand)]
         cmd: ListCmd,
     },
+    /// Forget the saved Google sign-in so the next run opens the browser.
+    Logout,
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -212,8 +214,33 @@ pub fn run(
     format: Format,
     out: &mut impl Write,
 ) -> Result<(), Error> {
+    if matches!(command, Command::Logout) {
+        return logout(paths, out);
+    }
     let auth = Auth::load(paths).map_err(|error| Error::Fail(error.to_string()))?;
     execute(&mut Client::new(auth), command, format, out, paths)
+}
+
+fn logout(paths: &Paths, out: &mut impl Write) -> Result<(), Error> {
+    let token = paths.token();
+    let existed = crate::google::auth::clear_cached_token(paths)
+        .map_err(|error| Error::Fail(error.to_string()))?;
+    if existed {
+        writeln!(
+            out,
+            "Signed out. Removed {}.\nNext run will open a browser to sign in again.",
+            token.display()
+        )
+        .map_err(|error| Error::Fail(error.to_string()))?;
+    } else {
+        writeln!(
+            out,
+            "Already signed out (no token at {}).\nNext run will open a browser to sign in.",
+            token.display()
+        )
+        .map_err(|error| Error::Fail(error.to_string()))?;
+    }
+    Ok(())
 }
 
 fn execute(
@@ -388,6 +415,7 @@ fn execute(
                 MoveKind::from_flags(up, down, first, after, parent, top_level, to_list)?,
             )?;
         }
+        Command::Logout => unreachable!("logout is handled before Auth::load"),
         Command::List { cmd } => match cmd {
             ListCmd::Create { title } => {
                 let title = normalize_title(&title)
@@ -1115,6 +1143,49 @@ mod tests {
     fn no_subcommand_means_tui() {
         let a = Args::try_parse_from(["google-tasks-tui"]).unwrap();
         assert!(a.command.is_none());
+    }
+
+    #[test]
+    fn logout_deletes_the_saved_token_without_calling_google() {
+        use std::fs;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let root = std::env::temp_dir().join(format!(
+            "gtt-logout-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let paths = Paths {
+            credentials: root.join("credentials.json"),
+            require_credentials_file: false,
+            config_dir: root.clone(),
+        };
+        let token = paths.token();
+        fs::write(&token, r#"{"client_id":"x","refresh_token":"y"}"#).unwrap();
+        assert!(matches!(parse(&["logout"]).command, Some(Command::Logout)));
+
+        let mut out = Vec::new();
+        super::run(&paths, Command::Logout, Format::Md, &mut out).unwrap();
+        assert!(!token.exists(), "token.json should be removed");
+        let message = String::from_utf8(out).unwrap();
+        assert!(message.contains("Signed out"), "{message}");
+        assert!(
+            message.contains(token.to_string_lossy().as_ref()),
+            "{message}"
+        );
+
+        // Idempotent when already signed out.
+        let mut out = Vec::new();
+        super::run(&paths, Command::Logout, Format::Md, &mut out).unwrap();
+        assert!(String::from_utf8(out)
+            .unwrap()
+            .contains("Already signed out"));
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

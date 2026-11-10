@@ -8,6 +8,8 @@ releases yet; entries are grouped by date. Open work is tracked in
 
 ### Added
 
+- CLI `logout` removes `~/.config/google-tasks-tui/token.json` so the next
+  run opens the browser to sign in again (no Google API call).
 - Ship a default Desktop OAuth client (`gtasks-tui-pub`). First run opens the
   browser with no local `credentials.json`. Overrides still win:
   `GOOGLE_TASKS_CREDENTIALS`, then `~/.gcloud/credentials.json`. An explicit

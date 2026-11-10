@@ -163,8 +163,9 @@ is required. The refresh token is saved to
 without contacting Google before the first frame, and the board snapshot sits
 beside it in `cache.json` (also `0600`). Both files are written atomically;
 the snapshot is versioned and tied to the current account so switching
-credentials cannot display another account's tasks. Deleting either file is
-safe: the app re-fetches, and re-authorizes.
+credentials cannot display another account's tasks. Run `google-tasks-tui
+logout` (or delete the token file) to forget the sign-in; deleting the cache
+is also safe — the app re-fetches, and re-authorizes.
 
 To bring your own OAuth client instead, download a **Desktop app** JSON from a
 Google Cloud project with the Tasks API enabled and either save it as
@@ -283,7 +284,13 @@ google-tasks-tui move TASK_ID --to-list Work
 google-tasks-tui list create --title "Work"
 google-tasks-tui list update Work --title "Projects"
 google-tasks-tui list delete Projects --yes
+google-tasks-tui logout
 ```
+
+`logout` deletes `~/.config/google-tasks-tui/token.json` without contacting
+Google. The next TUI or CLI run signs in again (browser consent). It does not
+remove a BYO `~/.gcloud/credentials.json`; if a google-auth `token.json`
+beside that file still matches, that refresh token may still be reused.
 
 `lists` is a bullet list of titles with ids in backticks. `tasks` is a
 heading per list and GitHub-style checkboxes (`- [ ]` / `- [x]`), with notes
