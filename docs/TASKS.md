@@ -12,26 +12,16 @@ tasks take the next unused number, and numbers are never reused.
 
 ## Features
 
-- **11.** OAuth consent screen and Desktop client (Phase B) for project
-  `gtasks-tui-pub` under publisher account `ryan@ryanelston.com` (display
-  name `google-tasks-tui`, Tasks API already enabled). In Cloud Console:
-  External audience in Testing, app name / support email
-  `ryan@ryanelston.com`, Tasks scope
-  (`https://www.googleapis.com/auth/tasks`), test users while unverified.
-  Create an Auth Platform **Desktop app** OAuth client named like
-  `google-tasks-tui` and download the client JSON once (the secret is only
-  shown at create time) to
-  `~/.config/google-tasks-tui/publisher/credentials.json` — not the git
-  tree — until Phase C chooses how to ship it. Note: `gcloud iam
-  oauth-clients` is for Cloud sign-in scopes, not this Auth Platform Desktop
-  client — do not use it.
-
-- **12.** Bake a default Desktop OAuth client into the app (Phase C). Resolve
-  credentials as env/`GOOGLE_TASKS_CREDENTIALS` → `~/.gcloud/credentials.json`
-  → built-in default. Keep the friendly missing/malformed setup guide as the
-  fallback when nothing is present. Ship `client_id` + secret as approved
-  defaults (Desktop secrets are public-by-design); do not commit a live JSON
-  dump without an explicit choice. Update README first-run docs accordingly.
+- **12.** Bake a default Desktop OAuth client into the app (Phase C). Source
+  of truth (private, not in git):
+  `~/.config/google-tasks-tui/publisher/credentials.json` for project
+  `gtasks-tui-pub` / publisher `ryan@ryanelston.com` (Phase B complete).
+  Resolve credentials as env/`GOOGLE_TASKS_CREDENTIALS` →
+  `~/.gcloud/credentials.json` → built-in default. Keep the friendly
+  missing/malformed setup guide as the fallback when nothing is present.
+  Ship `client_id` + secret as approved defaults (Desktop secrets are
+  public-by-design); do not commit a live JSON dump without an explicit
+  choice. Update README first-run docs accordingly.
 - **13.** Optional: publish the consent screen / submit sensitive-scope
   verification (Phase D) so non–test-users can sign in without the unverified
   app warning. Privacy policy URL and branding as Google requires.

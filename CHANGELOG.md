@@ -4,6 +4,15 @@ Notable changes to google-tasks-tui, newest first. There are no tagged
 releases yet; entries are grouped by date. Open work is tracked in
 [`docs/TASKS.md`](docs/TASKS.md).
 
+## 2026-11-10
+
+### Added
+
+- Phase B OAuth for publisher project `gtasks-tui-pub`
+  (`ryan@ryanelston.com`): External Testing consent screen with the Tasks
+  scope, plus a Desktop app client. Client JSON stays private under
+  `~/.config/google-tasks-tui/publisher/` until Phase C ships a default.
+
 ## 2026-11-08
 
 ### Added
