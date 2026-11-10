@@ -154,6 +154,7 @@ mod tests {
         ));
         Paths {
             credentials: root.join("credentials.json"),
+            require_credentials_file: false,
             config_dir: root,
         }
     }

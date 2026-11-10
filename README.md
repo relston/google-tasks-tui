@@ -156,22 +156,29 @@ same CRUD is available as subcommands for scripts and agents
 
 ## Google setup
 
-You need an OAuth client of type **Desktop app** from a Google Cloud project
-with the Google Tasks API enabled. Download its JSON to
-`~/.gcloud/credentials.json`, or point `GOOGLE_TASKS_CREDENTIALS` at it. If
-that file is missing or not a Desktop client JSON, the app exits with a short
-setup guide (Console links and the expected path) instead of a bare IO error.
+On first run the app uses a **shipped Desktop OAuth client** and opens your
+browser to authorize Google Tasks access. No Google Cloud project of your own
+is required. The refresh token is saved to
+`~/.config/google-tasks-tui/token.json` (mode `0600`). Later runs reuse it
+without contacting Google before the first frame, and the board snapshot sits
+beside it in `cache.json` (also `0600`). Both files are written atomically;
+the snapshot is versioned and tied to the current account so switching
+credentials cannot display another account's tasks. Deleting either file is
+safe: the app re-fetches, and re-authorizes.
 
-On first run the app opens your browser to authorize access, then saves the
-refresh token to `~/.config/google-tasks-tui/token.json` (mode `0600`). Later
-runs reuse it without contacting Google before the first frame, and the board
-snapshot sits beside it in `cache.json` (also `0600`). Both files are written
-atomically; the snapshot is versioned and tied to the current account so
-switching credentials cannot display another account's tasks. Deleting either
-file is safe: the app re-fetches, and re-authorizes. If a
-google-auth `token.json` for the same client, with the Tasks scope, sits next
-to `credentials.json`, the app reuses its refresh token and skips the browser
-step. It only reads that file and never modifies it.
+To bring your own OAuth client instead, download a **Desktop app** JSON from a
+Google Cloud project with the Tasks API enabled and either save it as
+`~/.gcloud/credentials.json` or point `GOOGLE_TASKS_CREDENTIALS` at it. A file
+at that path wins over the shipped client. If `GOOGLE_TASKS_CREDENTIALS` is
+set but missing or not a Desktop client JSON, the app exits with a short setup
+guide instead of a bare IO error. If a google-auth `token.json` for the same
+client, with the Tasks scope, sits next to your credentials file, the app
+reuses its refresh token and skips the browser step. It only reads that file
+and never modifies it.
+
+While the publisher consent screen is in Testing, only listed test users can
+complete Google's consent flow; strangers see the unverified-app warning until
+sensitive-scope verification is finished.
 
 ## Configuration
 

@@ -1089,6 +1089,7 @@ mod tests {
         fs::create_dir_all(&root).unwrap();
         let paths = Paths {
             credentials: root.join("credentials.json"),
+            require_credentials_file: false,
             config_dir: root.clone(),
         };
         if let Some(raw) = seed_cache {

@@ -12,16 +12,6 @@ tasks take the next unused number, and numbers are never reused.
 
 ## Features
 
-- **12.** Bake a default Desktop OAuth client into the app (Phase C). Source
-  of truth (private, not in git):
-  `~/.config/google-tasks-tui/publisher/credentials.json` for project
-  `gtasks-tui-pub` / publisher `ryan@ryanelston.com` (Phase B complete).
-  Resolve credentials as env/`GOOGLE_TASKS_CREDENTIALS` →
-  `~/.gcloud/credentials.json` → built-in default. Keep the friendly
-  missing/malformed setup guide as the fallback when nothing is present.
-  Ship `client_id` + secret as approved defaults (Desktop secrets are
-  public-by-design); do not commit a live JSON dump without an explicit
-  choice. Update README first-run docs accordingly.
 - **13.** Optional: publish the consent screen / submit sensitive-scope
   verification (Phase D) so non–test-users can sign in without the unverified
   app warning. Privacy policy URL and branding as Google requires.

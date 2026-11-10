@@ -365,6 +365,7 @@ create_task = "ctrl+b"
         ));
         let paths = Paths {
             credentials: root.join("credentials.json"),
+            require_credentials_file: false,
             config_dir: root.join("config"),
         };
 

@@ -3,6 +3,7 @@
 
 pub mod auth;
 mod client;
+mod default_client;
 mod http;
 mod requests;
 

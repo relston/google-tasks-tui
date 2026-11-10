@@ -8,10 +8,13 @@ releases yet; entries are grouped by date. Open work is tracked in
 
 ### Added
 
+- Ship a default Desktop OAuth client (`gtasks-tui-pub`). First run opens the
+  browser with no local `credentials.json`. Overrides still win:
+  `GOOGLE_TASKS_CREDENTIALS`, then `~/.gcloud/credentials.json`. An explicit
+  override that is missing or malformed keeps the setup-guide error.
 - Phase B OAuth for publisher project `gtasks-tui-pub`
   (`ryan@ryanelston.com`): External Testing consent screen with the Tasks
-  scope, plus a Desktop app client. Client JSON stays private under
-  `~/.config/google-tasks-tui/publisher/` until Phase C ships a default.
+  scope, plus a Desktop app client used as that shipped default.
 
 ## 2026-11-08
 

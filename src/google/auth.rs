@@ -1,9 +1,10 @@
-//! Google OAuth for an installed ("desktop") client. Reads the client secret
-//! from `~/.gcloud/credentials.json` (override with `GOOGLE_TASKS_CREDENTIALS`)
-//! and caches the refresh token in `$XDG_CONFIG_HOME/google-tasks-tui/token.json`.
-//! On first run it reuses a refresh token from a sibling `token.json` (the
-//! google-auth quickstart format) if it covers the Tasks scope; otherwise it
-//! runs the loopback browser flow. Missing or malformed credentials print a
+//! Google OAuth for an installed ("desktop") client. Resolves the OAuth client
+//! as `GOOGLE_TASKS_CREDENTIALS` → `~/.gcloud/credentials.json` → the shipped
+//! Desktop client in [`super::default_client`]. Caches the refresh token in
+//! `$XDG_CONFIG_HOME/google-tasks-tui/token.json`. On first run it reuses a
+//! refresh token from a sibling `token.json` (the google-auth quickstart
+//! format) if it covers the Tasks scope; otherwise it runs the loopback
+//! browser flow. An explicit override that is missing or malformed prints a
 //! short setup guide instead of a bare IO/parse error.
 
 use std::{
@@ -159,14 +160,7 @@ impl Auth {
     /// browser, so call this before the TUI takes over the terminal.
     pub fn sign_in(paths: &Paths) -> Result<Self> {
         let token_path = paths.token();
-        let raw = fs::read_to_string(&paths.credentials).map_err(|error| {
-            Error::Credentials(credentials_read_error(&paths.credentials, error))
-        })?;
-        let client = serde_json::from_str::<ClientFile>(&raw)
-            .map_err(|error| {
-                Error::Credentials(credentials_parse_error(&paths.credentials, error))
-            })?
-            .installed;
+        let client = load_oauth_client(paths)?;
         let agent = http::agent();
 
         let cached = fs::read_to_string(&token_path)
@@ -220,8 +214,7 @@ impl Auth {
     /// startup doesn't wait on Google. `None` when there's nothing to reuse
     /// and the browser flow is needed.
     pub fn cached(paths: &Paths) -> Option<Self> {
-        let raw = fs::read_to_string(&paths.credentials).ok()?;
-        let client = serde_json::from_str::<ClientFile>(&raw).ok()?.installed;
+        let client = load_oauth_client(paths).ok()?;
         let token_path = paths.token();
         let tok = fs::read_to_string(&token_path)
             .ok()
@@ -310,19 +303,54 @@ fn borrow_existing(credentials: &std::path::Path, client_id: &str) -> Option<Str
     (t.client_id == client_id && t.scopes.iter().any(|s| s == SCOPE)).then_some(t.refresh_token)
 }
 
+fn shipped_oauth_client() -> ClientSecret {
+    ClientSecret {
+        client_id: super::default_client::CLIENT_ID.into(),
+        client_secret: super::default_client::CLIENT_SECRET.into(),
+        auth_uri: super::default_client::AUTH_URI.into(),
+        token_uri: super::default_client::TOKEN_URI.into(),
+    }
+}
+
+/// `GOOGLE_TASKS_CREDENTIALS` / `~/.gcloud/credentials.json` when present,
+/// otherwise the shipped Desktop client.
+fn load_oauth_client(paths: &Paths) -> Result<ClientSecret> {
+    match fs::read_to_string(&paths.credentials) {
+        Ok(raw) => serde_json::from_str::<ClientFile>(&raw)
+            .map(|file| file.installed)
+            .map_err(|error| {
+                Error::Credentials(credentials_parse_error(&paths.credentials, error))
+            }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if paths.require_credentials_file {
+                Err(Error::Credentials(credentials_read_error(
+                    &paths.credentials,
+                    error,
+                )))
+            } else {
+                Ok(shipped_oauth_client())
+            }
+        }
+        Err(error) => Err(Error::Credentials(credentials_read_error(
+            &paths.credentials,
+            error,
+        ))),
+    }
+}
+
 fn credentials_read_error(path: &std::path::Path, error: std::io::Error) -> String {
     let path = path.display();
     if error.kind() == std::io::ErrorKind::NotFound {
         return format!(
             "No OAuth credentials found at:\n  {path}\n\n\
-             Google Tasks needs a Desktop app OAuth client before you can sign in.\n\n\
-             Set one up:\n\
+             GOOGLE_TASKS_CREDENTIALS points here, so the shipped client was not used.\n\n\
+             Fix the path, or unset GOOGLE_TASKS_CREDENTIALS to use the built-in Desktop\n\
+             OAuth client. To bring your own client instead:\n\
                1. Open https://console.cloud.google.com/apis/credentials\n\
                2. Create credentials → OAuth client ID → Application type: Desktop app\n\
                3. Enable the Google Tasks API for that project\n\
                   (https://console.cloud.google.com/apis/library/tasks.googleapis.com)\n\
-               4. Download the JSON and save it to the path above\n\
-                  (or set GOOGLE_TASKS_CREDENTIALS to wherever you put it)\n\n\
+               4. Download the JSON and point GOOGLE_TASKS_CREDENTIALS at it\n\n\
              Then run google-tasks-tui again — a browser window will ask you to allow access."
         );
     }
@@ -509,11 +537,12 @@ mod tests {
     }
 
     #[test]
-    fn missing_credentials_explain_how_to_set_up() {
+    fn missing_override_credentials_explain_how_to_set_up() {
         let root = test_root("missing-creds");
         fs::create_dir_all(&root).unwrap();
         let paths = Paths {
             credentials: root.join("no-such-credentials.json"),
+            require_credentials_file: true,
             config_dir: root.join("config"),
         };
 
@@ -527,6 +556,7 @@ mod tests {
             message.contains(paths.credentials.to_string_lossy().as_ref()),
             "{message}"
         );
+        assert!(message.contains("shipped client was not used"), "{message}");
         assert!(message.contains("Desktop app"), "{message}");
         assert!(message.contains("Tasks API"), "{message}");
         assert!(message.contains("GOOGLE_TASKS_CREDENTIALS"), "{message}");
@@ -543,11 +573,61 @@ mod tests {
     }
 
     #[test]
+    fn missing_credentials_file_uses_the_shipped_client() {
+        let root = test_root("shipped-creds");
+        fs::create_dir_all(&root).unwrap();
+        let paths = Paths {
+            credentials: root.join("no-such-credentials.json"),
+            require_credentials_file: false,
+            config_dir: root.join("config"),
+        };
+
+        let client = load_oauth_client(&paths).expect("shipped client");
+        assert_eq!(client.client_id, super::super::default_client::CLIENT_ID);
+        assert_eq!(
+            client.client_secret,
+            super::super::default_client::CLIENT_SECRET
+        );
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn credentials_file_overrides_the_shipped_client() {
+        let root = test_root("override-creds");
+        fs::create_dir_all(&root).unwrap();
+        let paths = Paths {
+            credentials: root.join("credentials.json"),
+            require_credentials_file: false,
+            config_dir: root.join("config"),
+        };
+        fs::write(
+            &paths.credentials,
+            r#"{
+              "installed": {
+                "client_id": "byo-client",
+                "client_secret": "byo-secret",
+                "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                "token_uri": "https://oauth2.googleapis.com/token"
+              }
+            }"#,
+        )
+        .unwrap();
+
+        let client = load_oauth_client(&paths).expect("file client");
+        assert_eq!(client.client_id, "byo-client");
+        assert_eq!(client.client_secret, "byo-secret");
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     fn malformed_credentials_explain_the_expected_file() {
         let root = test_root("bad-creds");
         fs::create_dir_all(&root).unwrap();
         let paths = Paths {
             credentials: root.join("credentials.json"),
+            require_credentials_file: false,
             config_dir: root.join("config"),
         };
         fs::write(&paths.credentials, "{not json").unwrap();
@@ -619,6 +699,7 @@ mod tests {
         fs::create_dir_all(&root).unwrap();
         let paths = Paths {
             credentials: root.join("credentials.json"),
+            require_credentials_file: false,
             config_dir: root.join("config"),
         };
         fs::write(
@@ -643,6 +724,7 @@ mod tests {
         fs::create_dir_all(&root).unwrap();
         let paths = Paths {
             credentials: root.join("credentials.json"),
+            require_credentials_file: false,
             config_dir: root.join("config"),
         };
         fs::write(
