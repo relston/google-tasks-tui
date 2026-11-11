@@ -14,9 +14,13 @@ tasks take the next unused number, and numbers are never reused.
 
 - **13.** Optional: publish the consent screen / submit sensitive-scope
   verification (Phase D) so non–test-users can sign in without the unverified
-  app warning. Repo has [PRIVACY.md](../PRIVACY.md) and
-  [TERMS.md](../TERMS.md); still need public URLs (homepage + privacy on an
-  authorized domain), branding, demo video, and Console submit/publish.
+  app warning. Public URLs on `relston.github.io`:
+  [homepage](https://relston.github.io/google-tasks-tui/),
+  [privacy](https://relston.github.io/google-tasks-tui/privacy/),
+  [terms](https://relston.github.io/google-tasks-tui/terms/). Still need
+  Search Console ownership of `relston.github.io`, Auth branding (those URLs
+  + authorized domain + original logo), demo video, and Console
+  submit/publish.
 
 ## Maintenance
 

@@ -62,7 +62,8 @@ personal information from them.
 ## Changes
 
 If this policy changes in a material way, the “Last updated” date above will
-change and the new text will be published in this repository.
+change and the new text will be published in this repository and at
+<https://relston.github.io/google-tasks-tui/privacy/>.
 
 ## Contact
 

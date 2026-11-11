@@ -181,10 +181,14 @@ While the publisher consent screen is in Testing, only listed test users can
 complete Google's consent flow; strangers see the unverified-app warning until
 sensitive-scope verification is finished.
 
-Legal text for Google Auth branding and verification lives in this repo:
+Public branding / verification URLs (authorized domain `relston.github.io`):
 
-- [Privacy Policy](PRIVACY.md)
-- [Terms of Service](TERMS.md)
+- Homepage: <https://relston.github.io/google-tasks-tui/>
+- [Privacy Policy](https://relston.github.io/google-tasks-tui/privacy/)
+- [Terms of Service](https://relston.github.io/google-tasks-tui/terms/)
+
+Canonical Markdown copies also live in this repo as [PRIVACY.md](PRIVACY.md)
+and [TERMS.md](TERMS.md).
 
 ## Configuration
 

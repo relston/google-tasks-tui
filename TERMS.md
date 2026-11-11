@@ -43,7 +43,8 @@ credential stuffing or quota abuse aimed at harming the service for others).
 ## Updates
 
 The App and these terms may change over time. Continued use after an update
-means you accept the revised terms when they are published in this repository.
+means you accept the revised terms when they are published in this repository
+and at <https://relston.github.io/google-tasks-tui/terms/>.
 
 ## Contact
 

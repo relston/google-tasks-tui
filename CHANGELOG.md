@@ -9,7 +9,8 @@ releases yet; entries are grouped by date. Open work is tracked in
 ### Added
 
 - Short [Privacy Policy](PRIVACY.md) and [Terms of Service](TERMS.md) for
-  OAuth consent branding / sensitive-scope verification.
+  OAuth consent branding / sensitive-scope verification, also published at
+  <https://relston.github.io/google-tasks-tui/> (privacy + terms subpages).
 - CLI `logout` removes `~/.config/google-tasks-tui/token.json` so the next
   run opens the browser to sign in again (no Google API call).
 - Ship a default Desktop OAuth client (`gtasks-tui-pub`). First run opens the
