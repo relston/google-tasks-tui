@@ -181,6 +181,11 @@ While the publisher consent screen is in Testing, only listed test users can
 complete Google's consent flow; strangers see the unverified-app warning until
 sensitive-scope verification is finished.
 
+Legal text for Google Auth branding and verification lives in this repo:
+
+- [Privacy Policy](PRIVACY.md)
+- [Terms of Service](TERMS.md)
+
 ## Configuration
 
 Settings live in `~/.config/google-tasks-tui/config.toml`, next to the token

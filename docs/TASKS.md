@@ -14,7 +14,9 @@ tasks take the next unused number, and numbers are never reused.
 
 - **13.** Optional: publish the consent screen / submit sensitive-scope
   verification (Phase D) so non–test-users can sign in without the unverified
-  app warning. Privacy policy URL and branding as Google requires.
+  app warning. Repo has [PRIVACY.md](../PRIVACY.md) and
+  [TERMS.md](../TERMS.md); still need public URLs (homepage + privacy on an
+  authorized domain), branding, demo video, and Console submit/publish.
 
 ## Maintenance
 
