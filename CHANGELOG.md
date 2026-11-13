@@ -4,6 +4,14 @@ Notable changes to google-tasks-tui, newest first. There are no tagged
 releases yet; entries are grouped by date. Open work is tracked in
 [`docs/TASKS.md`](docs/TASKS.md).
 
+## 2026-11-12
+
+### Changed
+
+- Phase D OAuth branding moved to owned domain `ryanelston.com` (GitHub
+  Pages + HTTPS). Sensitive-scope verification for the Tasks scope on
+  `gtasks-tui-pub` submitted; awaiting Google review (task **13**).
+
 ## 2026-11-10
 
 ### Added

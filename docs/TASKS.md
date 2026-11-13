@@ -12,15 +12,15 @@ tasks take the next unused number, and numbers are never reused.
 
 ## Features
 
-- **13.** Optional: publish the consent screen / submit sensitive-scope
-  verification (Phase D) so non–test-users can sign in without the unverified
-  app warning. Public URLs on `relston.github.io`:
-  [homepage](https://relston.github.io/google-tasks-tui/),
-  [privacy](https://relston.github.io/google-tasks-tui/privacy/),
-  [terms](https://relston.github.io/google-tasks-tui/terms/). Still need
-  Search Console ownership of `relston.github.io`, Auth branding (those URLs
-  + authorized domain + original logo), demo video, and Console
-  submit/publish.
+- **13.** Phase D sensitive-scope verification for
+  `https://www.googleapis.com/auth/tasks` on project `gtasks-tui-pub`
+  (**submitted 2026-11-12**, awaiting Google). Branding is published on
+  owned domain `ryanelston.com`:
+  [homepage](https://ryanelston.com/google-tasks-tui/),
+  [privacy](https://ryanelston.com/google-tasks-tui/privacy/),
+  [terms](https://ryanelston.com/google-tasks-tui/terms/). Demo video and
+  Console application are in. Keep until consent shows Verified / no
+  unverified-app warning for non–test-users.
 
 ## Maintenance
 
