@@ -8,6 +8,8 @@ releases yet; entries are grouped by date. Open work is tracked in
 
 ### Changed
 
+- README features rewrite: speed, theme, CLI, QoL, remappable keys — shorter
+  copy aimed at engineers. Branding links point at `ryanelston.com`.
 - Theme name sits in the bottom-right status bar instead of the header.
 - Phase D OAuth branding moved to owned domain `ryanelston.com` (GitHub
   Pages + HTTPS). Sensitive-scope verification for the Tasks scope on

@@ -1,73 +1,45 @@
 # google-tasks-tui
 
 A fast terminal client for **Google Tasks**, written in Rust
-([ratatui](https://ratatui.rs) + crossterm). Each task list is a column and
-its tasks run down the column. Press Enter on a task to open a details shelf
-beside it.
-
-It uses your terminal's own palette, follows your active
-[Omarchy](https://omarchy.org) theme when there is one, and
-**live-reloads when you switch themes**. Any color can be overridden in
-`config.toml`, and `NO_COLOR` is honored.
-
-Press `c` to create a task, `C` to create a subtask under the selected one,
-`Space` to tick one off, `d` to set its due date, `x` to delete it, `b` to
-open URLs from its notes, `m` to move it to another list, `?` for the
-keyboard list, and `Tab`/`i` in the shelf to edit its title or notes. The
-same CRUD is available as subcommands for scripts and agents
-(`google-tasks-tui lists`, `create`, `done`, …).
+([ratatui](https://ratatui.rs) + crossterm). Lists are columns; tasks run
+down each column. Press Enter for a details shelf. Same CRUD is available as
+CLI subcommands for scripts and agents.
 
 ## Features
 
-- Shows all your task lists side by side. Columns scroll horizontally when
-  they don't fit.
-- Subtasks sit indented under their parent. Completed tasks appear struck
-  through at the bottom of their list. `v` hides them, except a completed
-  parent that still has open subtasks.
-- Includes tasks assigned from Google Docs and Chat. Google does not allow
-  those tasks to have notes or move between lists; deleting one also deletes
-  its source task, so the confirmation calls that out.
-- Long task titles wrap by terminal-cell width and grapheme boundaries, lined
-  up under the first line rather than under the bullet. CJK, emoji, and
-  combining characters keep correct cursor and column placement. Long link
-  titles wrap in the Browse Link overlay too. Set `wrap_titles = false` in the
-  config to clip each task to one line instead.
-- Control characters in a task's text — a stray carriage return pasted into a
-  title, say — are drawn as spaces instead of being sent to the terminal,
-  where they would shift the rest of the row.
-- Due dates are relative ("Today", "Friday", "3d overdue"). Overdue dates are
-  red and today's are yellow.
-- The details shelf shows status, due date, completion time, the parent task,
-  subtask progress, notes, links, and the last-updated time at the bottom.
-- `Space` ticks or unticks the selected task. It moves to or from the
-  completed group straight away, and the selection follows it.
-- `d` opens a floating due-date editor (segment entry plus a month calendar).
-  `h`/`l` or Tab move between segments; `n`/`p` adjust the focused value.
-  Enter saves the date to Google; Esc cancels.
-- `x` deletes the selected task after a y/n confirmation in the status bar.
-  The prompt names the task and counts the subtasks that go with it, since
-  Google deletes those too.
-- `D` (`Shift+d`) clears every completed task from the focused list after a
-  y/n confirmation (`tasks.clear`). Open subtasks of cleared parents stay and
-  become top-level.
-- `X` (`Shift+x`) deletes the focused list after the same kind of y/n
-  confirmation. Google removes every task in that list.
-- `T` (`Shift+t`) opens a floating panel to name a new list; Enter creates it
-  on Google, Esc cancels.
-- `I` (`Shift+i`) opens the same floating editor for the focused list's title;
-  Enter saves, Esc cancels.
-- `H` / `L` (`Shift+h` / `Shift+l`) move the focused list one column left or
-  right in the board. That order is local until the next refresh; Google has
-  no list-reorder API.
-- `y` copies the selected task to the system clipboard as markdown, ready to
-  paste into a note: the title as a heading, the due date, the notes, and the
-  links Google hung off the task, such as the Gmail thread it was made from. No
-  id, status or parent; those identify a task to the API and mean nothing in a
-  note, and `google-tasks-tui get` is still there when you want them. No link
-  back to the task itself either. The status bar confirms in green until your
-  next keypress. macOS uses `pbcopy`; Linux tries `wl-copy`, `xclip`, then
-  `xsel`. The OSC 52 fallback works over supported terminals and is reported as
-  “sent” because terminals do not acknowledge whether they accepted it.
+### Built for speed
+
+- Instant startup from a local cache; Google refreshes in the background.
+  Board stays read-only until that sync finishes — no edits against stale
+  data.
+- Non-blocking UI: API work is off-thread, lists stream in, writes run one at
+  a time while navigation stays live. Quit waits for pending writes; `q`
+  again force-quits.
+
+### Fits your theme
+
+- Semantic roles (`accent`, `muted`, `selection`, …) from the terminal ANSI
+  palette, then [Omarchy](https://omarchy.org) when present, then `[theme]`
+  overrides in `config.toml`.
+- Honors `NO_COLOR`; falls back to 256- or 16-color. Live-reloads on Omarchy
+  theme switch. Transparent mode shows terminal opacity. Missing or broken
+  themes fall back to ANSI — never a crash.
+
+### Full CLI
+
+- Same OAuth token and cache as the TUI. Markdown by default, `-f json` for
+  agents. Lists, tasks, create/update/done, move, list CRUD, logout — see
+  [CLI](#cli).
+
+### Quality of life
+
+- All lists side by side; subtasks indented; `v` hides completed (completed
+  parents with open children stay). Docs/Chat-assigned tasks are included,
+  with Google’s edit limits called out on confirm.
+- `/` searches every list (title + notes); `Enter` jumps to the match.
+- `b` browses Google-attached and notes URLs; `Enter` opens one,
+  `Shift+Enter` opens all matching.
+- `y` yanks paste-ready markdown (title, due, notes, links):
 
   ```markdown
   # Check In For Yearly Checkup
@@ -76,83 +48,25 @@ same CRUD is available as subcommands for scripts and agents
 
   - [Check In For Your Upcoming Visit](https://mail.google.com/mail/#all/1a0…)
   ```
-- `b` opens a **Browse Link** overlay of everything the selected task links
-  to. Links Google attached to the task — the Gmail thread a task was made
-  from, a linked Doc — are listed first under the source's own title, with
-  the URL beneath it; after those come any `http://` / `https://` URLs typed
-  into the notes, which have no title to show. A URL that appears both ways
-  is listed once. The first link is selected; `j`/`k` move, `Enter` opens the
-  selected URL and closes the overlay, `Shift+Enter` opens every URL in the
-  list (selection does not matter) and closes, `Esc` closes without opening.
-  If there are none, the status bar says so.
-- `/` on the board opens a **Search** overlay of every task across every list.
-  The filter is already active so you can type immediately; it matches title
-  and notes (case-insensitive substring). Each row shows its list as the
-  subtitle. `Enter` focuses that list and selects the task, turning on
-  completed-task visibility when the match would otherwise be hidden. `Esc`
-  leaves the filter, then closes the overlay.
-- `m` opens a **Move** overlay of every task list except the current one.
-  `j`/`k` choose a list, `Enter` assigns the selected task to it (and its
-  subtasks, preserving their order) and closes the overlay. Both lists are
-  refreshed afterward; a partial move identifies the task that failed.
-  `Esc` cancels. If there is only one list, the status bar says so.
-- `<` promotes a subtask to the top level of its current list. `>` on a
-  top-level task opens **Select Parent**, listing the other available open
-  top-level tasks in that list; `j`/`k` choose one and `Enter` reparents.
-  Assigned, hidden, completed, nested, and self candidates are excluded.
-  A task that already owns subtasks, or is completed and hidden, cannot itself
-  become a subtask. Promoting a task places it after its former parent.
-- `?` opens a **Keyboard** overlay listing the board commands; `Esc`/`q`/`?`
-  close it.
-- Every overlay — Browse Link, Search, Move, Select Parent, Keyboard — filters.
-  Press `/` (or type straight into Search) and the list narrows as you go; the
-  query shows in the bottom border. It is a plain case-insensitive substring
-  match on title and subtitle (Search also matches notes), so `tin` finds both
-  "Tinker Time" and "Wri**tin**g". While filtering, `↑`/`↓` move and `Enter`
-  picks; letters go to the query, so `q` and `j` type rather than closing or
-  moving. `Esc` leaves the filter and keeps the overlay, `Esc` again closes it.
-  On Browse Link, `Shift+Enter` opens everything still matching rather than
-  everything on the task.
-- API calls run on a background thread, so the UI never blocks. Lists fill in
-  as they load. One write runs at a time; navigation stays available while
-  other mutation keys wait. If you quit while a write is pending, the app
-  waits for it; press `q` again to force quit.
-- Startup is instant: the board is painted from a local snapshot before any
-  network call, then Google's copy replaces it in the background. The board is
-  read-only until every list in the current sync succeeds, so you never edit
-  stale data; the status bar says so while you wait.
-- `c` opens a "New task" shelf next to the focused list with an empty title
-  input ready to type. `Enter` creates it in that list and selects it; `Esc`
-  throws the draft away. If creation fails, the same draft reopens after the
-  board starts resynchronizing.
-- `C` does the same but as a subtask: the shelf says "New subtask" and names
-  the task it will hang under. On a top-level task that is the selection
-  itself; on a subtask it is that subtask's parent, because Google Tasks only
-  nests one level deep. On an empty list the status bar says there is nothing
-  to put it under.
-- In the shelf, `Tab` moves between the title and the notes; the focused one
-  carries a marker in the accent color. `i` turns it into a text input
-  (opening the shelf first if needed) and `Enter` saves to Google, `Esc`
-  discards. Notes are multi-line: `Shift+Enter` starts a new line, and the
-  arrows move around it.
-- Editing supports `Ctrl-W` (delete word), `Ctrl-U` (clear to line start) and
-  `Ctrl-A`/`Ctrl-E`. Changes show immediately; a failed save reports in the
-  status bar and resyncs.
-- Colors come from semantic roles: background, foreground, surface, accent,
-  muted, subtle, selection, red, green, yellow, blue. By default they use the
-  terminal's ANSI palette; on Omarchy the roles with no ANSI equivalent come
-  from the active `colors.toml`. `[theme]` in `config.toml` overrides any
-  role.
-- Respects `NO_COLOR`, and falls back to the 256- or 16-color palette when
-  the terminal doesn't advertise truecolor.
-- Supports both current (named keys like `accent`, `muted`, `red`) and legacy
-  (`color0`–`color15`, `selection_background`) palettes. Named keys take
-  priority.
-- Picks up theme switches automatically. It checks every 500 ms whether the
-  theme symlink or the palette file changed, and only reloads when one did.
-- Transparent mode paints no background, so terminal opacity shows through.
-- Never crashes when the theme is missing or broken. It falls back to ANSI
-  colors instead.
+- Relative due dates ("Today", "3d overdue"); overdue red, today yellow.
+- Details shelf: status, due, notes, links, parent / subtask progress.
+- Every overlay filters with `/` (case-insensitive substring on title /
+  subtitle; Search also matches notes).
+
+### Remappable keys
+
+Defaults below; override any action under `[keys]` in `config.toml`
+(`--default-config` prints the catalog; `?` shows live bindings).
+
+- `c` / `C` — new task / new subtask
+- `Space` — tick / untick (selection follows)
+- `i` / `Tab` — edit shelf fields; `d` — due-date picker
+- `x` / `D` / `X` — delete task / clear completed / delete list (y/n)
+- `T` / `I` — create / rename list; `H`/`L` — reorder columns (local)
+- `m` — move to another list (keeps subtask order)
+- `<` / `>` — unparent / choose parent
+- `Alt-j` / `Alt-k` — reorder among siblings
+- `?` — keyboard overlay
 
 ## Google setup
 
@@ -181,11 +95,11 @@ While the publisher consent screen is in Testing, only listed test users can
 complete Google's consent flow; strangers see the unverified-app warning until
 sensitive-scope verification is finished.
 
-Public branding / verification URLs (authorized domain `relston.github.io`):
+Public branding / verification URLs (authorized domain `ryanelston.com`):
 
-- Homepage: <https://relston.github.io/google-tasks-tui/>
-- [Privacy Policy](https://relston.github.io/google-tasks-tui/privacy/)
-- [Terms of Service](https://relston.github.io/google-tasks-tui/terms/)
+- Homepage: <https://ryanelston.com/google-tasks-tui/>
+- [Privacy Policy](https://ryanelston.com/google-tasks-tui/privacy/)
+- [Terms of Service](https://ryanelston.com/google-tasks-tui/terms/)
 
 Canonical Markdown copies also live in this repo as [PRIVACY.md](PRIVACY.md)
 and [TERMS.md](TERMS.md).
@@ -437,7 +351,7 @@ key it finds:
 | `sel_bg`    | `selection`, `selection_background`                          | reverse video   |
 | `sel_fg`    | `selection_foreground`, `bright_foreground`, `foreground`    | `fg`            |
 
-The theme name shown in the header comes from the symlink target
+The theme name shown in the status bar comes from the symlink target
 (`.../themes/<name>`).
 
 ## Project layout
