@@ -37,6 +37,7 @@ CLI subcommands for scripts and agents.
   parents with open children stay). Docs/Chat-assigned tasks are included,
   with Google’s edit limits called out on confirm.
 - `/` searches every list (title + notes); `Enter` jumps to the match.
+  Hidden completed tasks stay out of search too (`v`).
 - `b` browses Google-attached and notes URLs; `Enter` opens one,
   `Shift+Enter` opens all matching.
 - `y` yanks paste-ready markdown (title, due, notes, links):

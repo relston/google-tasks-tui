@@ -656,13 +656,14 @@ impl App {
     /// Separator between list id and task id in a Search picker's opaque value.
     const SEARCH_SEP: char = '\x1f';
 
-    /// Open a picker of every task across every list; `/` filter matches title
-    /// and notes, subtitle is the list name, Enter focuses the match.
+    /// Open a picker of every visible task across every list; `/` filter
+    /// matches title and notes, subtitle is the list name, Enter focuses the
+    /// match. Respects the completed-hidden toggle the same way the board does.
     pub(super) fn start_search(&mut self) {
         let mut rows = Vec::new();
         for list in self.board.lists() {
             let list_title = clean(&list.title).into_owned();
-            for row in self.board.rows(&list.id) {
+            for row in visible_rows(&self.board, &list.id, self.show_completed) {
                 let notes = row.task.notes.as_deref().unwrap_or("");
                 let value = format!("{}{}{}", list.id, Self::SEARCH_SEP, row.task.id);
                 rows.push(
@@ -707,17 +708,6 @@ impl App {
         if self.board.task(list_id, task_id).is_none() {
             self.error = Some("task disappeared before it could be selected".into());
             return;
-        }
-        // Reveal completed tasks when the match would otherwise be hidden.
-        if !self.show_completed
-            && !visible_rows(&self.board, list_id, false)
-                .iter()
-                .any(|row| row.task.id == task_id)
-        {
-            self.show_completed = true;
-            for id in self.board.list_ids().to_vec() {
-                self.rebuild_column(&id);
-            }
         }
         self.focus = index;
         self.columns[index].select_id(Some(task_id.into()));
@@ -2196,18 +2186,25 @@ mod tests {
     }
 
     #[test]
-    fn search_enter_reveals_a_hidden_completed_match() {
+    fn search_omits_completed_tasks_when_they_are_hidden() {
         let (mut app, commands) = app_with_lists(&["a", "b"]);
         let _ = commands.recv().unwrap();
         app.sync = SyncState::Ready;
         set_tasks(
             &mut app,
             "a",
-            vec![Task {
-                title: "open".into(),
-                ..task("open", None, "1", false)
-            }],
-            "open",
+            vec![
+                Task {
+                    title: "open parent".into(),
+                    ..task("parent", None, "1", true)
+                },
+                Task {
+                    title: "open child".into(),
+                    parent: Some("parent".into()),
+                    ..task("child", None, "1", false)
+                },
+            ],
+            "parent",
         );
         set_tasks(
             &mut app,
@@ -2227,17 +2224,29 @@ mod tests {
         app.show_completed = false;
         app.rebuild_column("a");
         app.rebuild_column("b");
-        app.focus = 0;
 
         app.start_search();
-        for c in "finished".chars() {
-            app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
-        }
-        app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-
-        assert!(app.show_completed);
-        assert_eq!(app.focus, 1);
-        assert_eq!(app.columns[1].selected_id.as_deref(), Some("done-b"));
+        let Interaction::Search(picker) = &app.interaction else {
+            panic!("expected search picker");
+        };
+        let values: Vec<_> = picker.rows().map(|row| row.value.clone()).collect();
+        assert!(
+            values.contains(&format!("a{}parent", App::SEARCH_SEP)),
+            "completed parents with open children stay searchable: {values:?}"
+        );
+        assert!(
+            values.contains(&format!("a{}child", App::SEARCH_SEP)),
+            "open children stay searchable: {values:?}"
+        );
+        assert!(
+            values.contains(&format!("b{}open-b", App::SEARCH_SEP)),
+            "open tasks stay searchable: {values:?}"
+        );
+        assert!(
+            !values.iter().any(|value| value.contains("done-b")),
+            "hidden completed tasks must not appear: {values:?}"
+        );
+        assert_eq!(picker.rows().count(), 3);
     }
 
     #[test]

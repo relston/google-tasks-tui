@@ -8,6 +8,9 @@ releases yet; entries are grouped by date. Open work is tracked in
 
 ### Changed
 
+- `/` search respects the completed-hidden toggle: completed tasks stay out
+  of the picker while `v` has them hidden (completed parents with open
+  children still appear, same as the board).
 - README features rewrite: speed, theme, CLI, QoL, remappable keys — shorter
   copy aimed at engineers. Branding links point at `ryanelston.com`.
 - Theme name sits in the bottom-right status bar instead of the header.
