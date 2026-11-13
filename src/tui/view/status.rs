@@ -1,7 +1,12 @@
 //! The status bar: a pending confirmation, the latest error or notice, or
-//! hints built from the active keymap.
+//! hints built from the active keymap, with the theme name at the right.
 
-use ratatui::{layout::Rect, style::Style, text::Line, Frame};
+use ratatui::{
+    layout::{Constraint, Layout, Rect},
+    style::Style,
+    text::{Line, Span},
+    Frame,
+};
 
 use crate::keys::Action;
 use crate::theme::Theme;
@@ -127,6 +132,17 @@ impl App {
             (None, None, Some(n)) => Line::styled(format!(" {n}"), Style::default().fg(t.green)),
             (None, None, None) => Line::styled(hints, Style::default().fg(t.subtle)),
         };
-        f.render_widget(status_line, status);
+        let theme = format!(" theme: {} ", t.name);
+        let theme_width = u16::try_from(theme.chars().count()).unwrap_or(u16::MAX);
+        let [left, right] = Layout::horizontal([
+            Constraint::Min(0),
+            Constraint::Length(theme_width.min(status.width)),
+        ])
+        .areas(status);
+        f.render_widget(status_line, left);
+        f.render_widget(
+            Line::from(Span::styled(theme, Style::default().fg(t.subtle))),
+            right,
+        );
     }
 }

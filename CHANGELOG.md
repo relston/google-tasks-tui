@@ -8,6 +8,7 @@ releases yet; entries are grouped by date. Open work is tracked in
 
 ### Changed
 
+- Theme name sits in the bottom-right status bar instead of the header.
 - Phase D OAuth branding moved to owned domain `ryanelston.com` (GitHub
   Pages + HTTPS). Sensitive-scope verification for the Tasks scope on
   `gtasks-tui-pub` submitted; awaiting Google review (task **13**).

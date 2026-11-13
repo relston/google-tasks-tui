@@ -53,13 +53,7 @@ impl App {
         ])
         .areas(f.area());
 
-        let mut head = vec![
-            Span::styled(" Tasks ", t.badge().bold()),
-            Span::styled(
-                format!("  theme: {}", t.name),
-                Style::default().fg(t.subtle),
-            ),
-        ];
+        let mut head = vec![Span::styled(" Tasks ", t.badge().bold())];
         if self.pending_operation.is_some() {
             head.push(Span::styled("  saving…", Style::default().fg(t.yellow)));
         } else if self.loading() {
@@ -193,6 +187,32 @@ mod tests {
         for (i, row) in rows.iter().enumerate() {
             assert_eq!(row.chars().count(), 30, "row {i} is {row:?}");
         }
+    }
+
+    #[test]
+    fn theme_indicator_sits_bottom_right() {
+        let mut app = one_list_app();
+        app.sync = SyncState::Ready;
+        let label = format!("theme: {}", app.theme.name);
+        let w = 160u16;
+        let h = 8u16;
+        let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+        terminal
+            .draw(|frame| app.draw(frame, &mut ViewState::default()))
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        let row = |y: u16| -> String { (0..w).map(|x| buf[(x, y)].symbol()).collect() };
+        let header = row(0);
+        let status = row(h - 1);
+        assert!(
+            !header.contains("theme:"),
+            "theme must leave the header: {header:?}"
+        );
+        let trimmed = status.trim_end();
+        assert!(
+            trimmed.ends_with(&label),
+            "theme must sit at the bottom right: {status:?}"
+        );
     }
 
     #[test]
