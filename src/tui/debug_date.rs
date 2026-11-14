@@ -77,7 +77,7 @@ impl DateEditor {
     pub(super) fn new(date: NaiveDate) -> Self {
         Self {
             date,
-            focus: Segment::Year,
+            focus: Segment::Day,
             draft: None,
         }
     }
@@ -430,9 +430,9 @@ mod tests {
     }
 
     #[test]
-    fn starts_with_the_year_focused() {
+    fn starts_with_the_day_focused() {
         let editor = DateEditor::new(date(2026, 11, 2));
-        assert_eq!(editor.focus, Segment::Year);
+        assert_eq!(editor.focus, Segment::Day);
         assert_eq!(editor.date, date(2026, 11, 2));
         assert_eq!(editor.draft, None);
     }
@@ -441,34 +441,40 @@ mod tests {
     fn tab_and_shift_tab_cycle_segments() {
         let mut editor = DateEditor::new(date(2026, 11, 2));
         editor.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(editor.focus, Segment::Year);
+        editor.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         assert_eq!(editor.focus, Segment::Month);
         editor.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         assert_eq!(editor.focus, Segment::Day);
-        editor.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-        assert_eq!(editor.focus, Segment::Year);
 
         editor.on_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE));
-        assert_eq!(editor.focus, Segment::Day);
-        editor.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT));
         assert_eq!(editor.focus, Segment::Month);
+        editor.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT));
+        assert_eq!(editor.focus, Segment::Year);
     }
 
     #[test]
     fn h_and_l_cycle_segments() {
         let mut editor = DateEditor::new(date(2026, 11, 2));
         editor.on_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
-        assert_eq!(editor.focus, Segment::Month);
+        assert_eq!(editor.focus, Segment::Year);
         editor.on_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
-        assert_eq!(editor.focus, Segment::Day);
-        editor.on_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE));
         assert_eq!(editor.focus, Segment::Month);
         editor.on_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE));
         assert_eq!(editor.focus, Segment::Year);
+        editor.on_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE));
+        assert_eq!(editor.focus, Segment::Day);
     }
 
     #[test]
     fn n_and_p_adjust_the_focused_segment() {
         let mut editor = DateEditor::new(date(2026, 1, 31));
+        editor.on_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+        assert_eq!(editor.date, date(2026, 2, 1));
+        editor.on_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
+        assert_eq!(editor.date, date(2026, 1, 31));
+
+        editor.focus = Segment::Year;
         editor.on_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
         assert_eq!(editor.date, date(2027, 1, 31));
         editor.on_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
@@ -479,39 +485,32 @@ mod tests {
         assert_eq!(editor.date, date(2026, 2, 28));
         editor.on_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
         assert_eq!(editor.date, date(2026, 1, 28));
-
-        editor.focus = Segment::Day;
-        editor.date = date(2026, 1, 31);
-        editor.on_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
-        assert_eq!(editor.date, date(2026, 2, 1));
-        editor.on_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
-        assert_eq!(editor.date, date(2026, 1, 31));
     }
 
     #[test]
     fn typing_digits_replaces_the_segment_and_advances_when_full() {
         let mut editor = DateEditor::new(date(2026, 11, 2));
-        editor.on_key(digit('1'));
-        assert_eq!(editor.draft.as_deref(), Some("1"));
+        editor.on_key(digit('0'));
+        assert_eq!(editor.draft.as_deref(), Some("0"));
         assert_eq!(editor.date, date(2026, 11, 2));
-        assert_eq!(editor.display_segment(Segment::Year), "1   ");
+        assert_eq!(editor.display_segment(Segment::Day), "0 ");
 
         editor.on_key(digit('9'));
-        editor.on_key(digit('9'));
-        editor.on_key(digit('9'));
         assert_eq!(editor.draft, None);
-        assert_eq!(editor.date, date(1999, 11, 2));
+        assert_eq!(editor.date, date(2026, 11, 9));
+        assert_eq!(editor.focus, Segment::Year);
+
+        editor.on_key(digit('1'));
+        editor.on_key(digit('9'));
+        editor.on_key(digit('9'));
+        editor.on_key(digit('9'));
+        assert_eq!(editor.date, date(1999, 11, 9));
         assert_eq!(editor.focus, Segment::Month);
 
         editor.on_key(digit('0'));
         editor.on_key(digit('3'));
-        assert_eq!(editor.date, date(1999, 3, 2));
-        assert_eq!(editor.focus, Segment::Day);
-
-        editor.on_key(digit('0'));
-        editor.on_key(digit('9'));
         assert_eq!(editor.date, date(1999, 3, 9));
-        assert_eq!(editor.focus, Segment::Year);
+        assert_eq!(editor.focus, Segment::Day);
     }
 
     #[test]
@@ -532,25 +531,22 @@ mod tests {
     fn tab_while_typing_discards_the_draft() {
         let mut editor = DateEditor::new(date(2026, 11, 2));
         editor.on_key(digit('1'));
-        editor.on_key(digit('9'));
         editor.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         assert_eq!(editor.draft, None);
         assert_eq!(editor.date, date(2026, 11, 2));
-        assert_eq!(editor.focus, Segment::Month);
+        assert_eq!(editor.focus, Segment::Year);
     }
 
     #[test]
     fn backspace_edits_the_draft() {
         let mut editor = DateEditor::new(date(2026, 11, 2));
         editor.on_key(digit('2'));
-        editor.on_key(digit('0'));
         editor.on_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
-        assert_eq!(editor.draft.as_deref(), Some("2"));
-        editor.on_key(digit('0'));
-        editor.on_key(digit('2'));
+        assert_eq!(editor.draft.as_deref(), Some(""));
+        editor.on_key(digit('1'));
         editor.on_key(digit('5'));
-        assert_eq!(editor.date, date(2025, 11, 2));
-        assert_eq!(editor.focus, Segment::Month);
+        assert_eq!(editor.date, date(2026, 11, 15));
+        assert_eq!(editor.focus, Segment::Year);
     }
 
     #[test]

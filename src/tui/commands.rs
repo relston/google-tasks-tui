@@ -1044,9 +1044,7 @@ mod tests {
             NaiveDate::from_ymd_opt(2026, 3, 9).unwrap()
         );
 
-        // Focus starts on year; Tab to day, bump once, then save.
-        app.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-        app.on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        // Focus starts on day; bump once, then save.
         app.on_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
         app.on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
