@@ -18,7 +18,7 @@ CLI subcommands for scripts and agents.
 
 ### Fits your theme
 
-![img](./assets/google-tasks-tui-themes-720p.gif)
+![Omarchy Theme Support](./assets/google-tasks-tui-themes-720p.gif)
 
 - Semantic roles (`accent`, `muted`, `selection`, …) from the terminal ANSI
   palette, then [Omarchy](https://omarchy.org) when present, then `[theme]`
@@ -29,32 +29,20 @@ CLI subcommands for scripts and agents.
 
 ### Full CLI
 
+![Google Tasks CLI](./assets/google-tasks-tui-cli.png)
+
 - Same OAuth token and cache as the TUI. Markdown by default, `-f json` for
   agents. Lists, tasks, create/update/done, move, list CRUD, logout — see
   [CLI](#cli).
 
 ### Quality of life
 
-- All lists side by side; subtasks indented; `v` hides completed (completed
-  parents with open children stay). Docs/Chat-assigned tasks are included,
-  with Google’s edit limits called out on confirm.
-- `/` searches every list (title + notes); `Enter` jumps to the match.
-  Hidden completed tasks stay out of search too (`v`).
-- `b` browses Google-attached and notes URLs; `Enter` opens one,
-  `Shift+Enter` opens all matching.
+- `/` searches every list (title + notes); `Enter` jumps to the match. Hidden completed tasks stay out of search too (`v`).
+- `b` opens urls in the  browses Google-attached and notes URLs; `Enter` opens one, `Shift+Enter` opens all matching.
 - `y` yanks paste-ready markdown (title, due, notes, links):
-
-  ```markdown
-  # Check In For Yearly Checkup
-
-  Need my vax for newborns
-
-  - [Check In For Your Upcoming Visit](https://mail.google.com/mail/#all/1a0…)
-  ```
 - Relative due dates ("Today", "3d overdue"); overdue red, today yellow.
 - Details shelf: status, due, notes, links, parent / subtask progress.
-- Every overlay filters with `/` (case-insensitive substring on title /
-  subtitle; Search also matches notes).
+- Every overlay filters with `/` (case-insensitive substring on title / subtitle; Search also matches notes).
 
 ### Remappable keys
 
