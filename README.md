@@ -18,6 +18,8 @@ CLI subcommands for scripts and agents.
 
 ### Fits your theme
 
+![img](./assets/google-tasks-tui-themes-720p.gif)
+
 - Semantic roles (`accent`, `muted`, `selection`, …) from the terminal ANSI
   palette, then [Omarchy](https://omarchy.org) when present, then `[theme]`
   overrides in `config.toml`.
