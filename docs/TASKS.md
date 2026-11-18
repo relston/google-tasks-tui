@@ -9,6 +9,9 @@ tasks take the next unused number, and numbers are never reused.
 - **4.** Consider checking mutation responses against the request (task ID,
   parent) as the pre-refactor handlers did. List reloads cover moves; a
   mismatched patch or create response would add a stray row.
+- **14.** Measure and publish resource use: cold and cached startup time,
+  resident memory, and idle CPU on a typical board (asked on r/CLI). Add the
+  numbers to the README.
 
 ## Features
 
@@ -21,6 +24,10 @@ tasks take the next unused number, and numbers are never reused.
   [terms](https://ryanelston.com/google-tasks-tui/terms/). Demo video and
   Console application are in. Keep until consent shows Verified / no
   unverified-app warning for non–test-users.
+
+- **15.** Package for the usual managers once task **13** clears (so the
+  name is settled): Homebrew tap, AUR, crates.io, and prebuilt GitHub release
+  binaries (asked on r/CLI).
 
 ## Maintenance
 
