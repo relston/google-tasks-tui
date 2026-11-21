@@ -284,7 +284,7 @@ impl Board {
 fn keep_task(task: &Task) -> bool {
     // Google's tasks.clear marks completed tasks hidden; with showHidden they
     // would otherwise reappear after a clear or refresh.
-    !task.deleted && !(task.hidden && task.is_done())
+    !(task.deleted || task.hidden && task.is_done())
 }
 
 fn keyed(tasks: Vec<Task>) -> (Vec<String>, HashMap<String, Task>) {

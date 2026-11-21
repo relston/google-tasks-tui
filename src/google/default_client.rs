@@ -17,7 +17,7 @@ mod tests {
     fn shipped_client_is_the_publisher_desktop_app() {
         assert_eq!(super::PROJECT_ID, "gtasks-tui-pub");
         assert!(super::CLIENT_ID.ends_with(".apps.googleusercontent.com"));
-        assert!(!super::CLIENT_SECRET.is_empty());
+        assert!(super::CLIENT_SECRET.starts_with("GOCSPX-"));
         assert_eq!(super::AUTH_URI, "https://accounts.google.com/o/oauth2/auth");
         assert_eq!(super::TOKEN_URI, "https://oauth2.googleapis.com/token");
     }
