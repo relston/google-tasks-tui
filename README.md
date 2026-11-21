@@ -402,5 +402,5 @@ process-wide environment variables or touch your real files.
 
 ## Tasks and changes
 
-Open work is tracked in [`docs/TASKS.md`](docs/TASKS.md); notable changes are
+Open work is tracked in [GitHub issues](https://github.com/relston/google-tasks-tui/issues); notable changes are
 in [`CHANGELOG.md`](CHANGELOG.md).

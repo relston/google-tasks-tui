@@ -117,10 +117,12 @@ disk, desktop), and the two front ends. Each file name says what it does.
 
 ## Tasks and changelog
 
-Open work lives in [`docs/TASKS.md`](docs/TASKS.md). When you finish a task,
-delete it from `docs/TASKS.md` and add a short entry describing the change
-under today's date in [`CHANGELOG.md`](CHANGELOG.md), in the same commit as
-the work.
+Open work lives in [GitHub issues](https://github.com/relston/google-tasks-tui/issues)
+(`gh issue list`); `docs/TASKS.md` was retired and migrated 1:1 to issues.
+File new work as an issue. When you finish one, add a short entry under
+today's date in [`CHANGELOG.md`](CHANGELOG.md) and reference the issue in the
+commit (`Fixes #N`) so it closes on push. Close dropped ideas as "not
+planned" with the reason.
 
 ## API parity
 
@@ -147,7 +149,7 @@ When a task or coherent set of edits is finished and the verification checks
 pass:
 
 1. Install the local binary: `cargo install --path .`
-2. Commit on `main` (include `docs/TASKS.md` / `CHANGELOG.md` /
+2. Commit on `main` (include `CHANGELOG.md` /
    `docs/TASK_API_PARITY.md` updates in the same commit as the work).
 3. Push to `origin`.
 

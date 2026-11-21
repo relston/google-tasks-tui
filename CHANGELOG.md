@@ -2,12 +2,13 @@
 
 Notable changes to google-tasks-tui, newest first. There are no tagged
 releases yet; entries are grouped by date. Open work is tracked in
-[`docs/TASKS.md`](docs/TASKS.md).
+[GitHub issues](https://github.com/relston/google-tasks-tui/issues).
 
 ## 2026-11-20
 
 ### Changed
 
+- Open work moved from `docs/TASKS.md` to GitHub issues (#1–#7).
 - Privacy policy rewritten with explicit Data Accessed, Use, Sharing,
   Protection, Retention & Deletion, and Limited Use sections for Google's
   sensitive-scope review.
