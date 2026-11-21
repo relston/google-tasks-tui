@@ -4,6 +4,13 @@ Notable changes to google-tasks-tui, newest first. There are no tagged
 releases yet; entries are grouped by date. Open work is tracked in
 [GitHub issues](https://github.com/relston/google-tasks-tui/issues).
 
+## 2026-11-21
+
+### Changed
+
+- Upgraded `toml` from 0.8 to 1.x (TOML spec 1.1). Minimum Rust stays 1.89;
+  the README documents the MSRV policy and verification now builds on 1.89.
+
 ## 2026-11-20
 
 ### Changed

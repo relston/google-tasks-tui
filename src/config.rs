@@ -246,6 +246,12 @@ accent = "magenta"
     }
 
     #[test]
+    fn parse_errors_name_the_offending_line() {
+        let error = parse("wrap_titles = true\n\nwrap_titles = \"yes\"").unwrap_err();
+        assert!(error.to_string().contains("line 3"), "{error}");
+    }
+
+    #[test]
     fn keys_accept_single_multiple_disabled_and_modified_bindings() {
         let config = parse(
             r#"

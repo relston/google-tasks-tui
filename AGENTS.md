@@ -140,8 +140,12 @@ Run all required checks before completing work:
 cargo fmt --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-targets
+mise exec rust@1.89 -- cargo check --all-targets
 git diff --check
 ```
+
+The `mise` line builds against the minimum supported Rust version; keep its
+version in step with `rust-version` in `Cargo.toml` (policy in the README).
 
 ## After every complete change
 

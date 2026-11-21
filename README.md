@@ -146,9 +146,14 @@ reported in the status bar and ignored; the rest of the file still applies.
 
 ## Install and run
 
-Supports macOS and Linux and requires a recent stable Rust toolchain. Windows
+Supports macOS and Linux and requires Rust 1.89 or newer. Windows
 is not currently supported because private file permissions and platform
 launch/clipboard integration use Unix APIs.
+
+The minimum Rust version (`rust-version` in `Cargo.toml`) follows the oldest
+toolchain our dependencies need and stays within about six months of current
+stable. It only rises when a dependency upgrade requires it, and each bump is
+noted in the changelog.
 
 ```sh
 cargo run --release
