@@ -3,6 +3,14 @@ name = "google-tasks-tui"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.89"
+description = "Terminal UI and scriptable CLI for Google Tasks"
+license = "MIT"
+repository = "https://github.com/relston/google-tasks-tui"
+homepage = "https://ryanelston.com/google-tasks-tui/"
+readme = "README.md"
+keywords = ["google-tasks", "tui", "cli", "todo", "ratatui"]
+categories = ["command-line-utilities"]
+exclude = ["assets/*.gif", "assets/*.png", "docs/", ".github/", "packaging/"]
 
 [dependencies]
 chrono = "0.4.45"
@@ -22,3 +30,7 @@ ureq = { version = "3.4.2", features = ["json"] }
 lto = true
 codegen-units = 1
 strip = true
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"

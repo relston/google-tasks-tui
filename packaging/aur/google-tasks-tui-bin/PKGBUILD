@@ -1,0 +1,26 @@
+# Maintainer: Ryan Elston <ryan@ryanelston.com>
+pkgname=google-tasks-tui-bin
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Terminal UI and scriptable CLI for Google Tasks"
+arch=('x86_64' 'aarch64')
+url="https://github.com/relston/google-tasks-tui"
+license=('MIT')
+depends=('gcc-libs' 'glibc')
+optdepends=('xdg-utils: open links in the browser'
+            'wl-clipboard: copy to the clipboard on Wayland'
+            'xclip: copy to the clipboard on X11')
+provides=('google-tasks-tui')
+conflicts=('google-tasks-tui')
+_base="$url/releases/download/v$pkgver/google-tasks-tui"
+source_x86_64=("$_base-x86_64-unknown-linux-gnu.tar.xz")
+source_aarch64=("$_base-aarch64-unknown-linux-gnu.tar.xz")
+sha256sums_x86_64=('SKIP')
+sha256sums_aarch64=('SKIP')
+
+package() {
+  cd google-tasks-tui-"$CARCH"-unknown-linux-gnu
+  install -Dm755 google-tasks-tui "$pkgdir/usr/bin/google-tasks-tui"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+}

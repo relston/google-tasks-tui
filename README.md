@@ -18,7 +18,7 @@ CLI subcommands for scripts and agents.
 
 ### Fits your theme
 
-![Omarchy Theme Support](./assets/google-tasks-tui-themes-720p.gif)
+![Omarchy Theme Support](https://raw.githubusercontent.com/relston/google-tasks-tui/main/assets/google-tasks-tui-themes-720p.gif)
 
 - Semantic roles (`accent`, `muted`, `selection`, …) from the terminal ANSI
   palette, then [Omarchy](https://omarchy.org) when present, then `[theme]`
@@ -29,7 +29,7 @@ CLI subcommands for scripts and agents.
 
 ### Full CLI
 
-![Google Tasks CLI](./assets/google-tasks-tui-cli.png)
+![Google Tasks CLI](https://raw.githubusercontent.com/relston/google-tasks-tui/main/assets/google-tasks-tui-cli.png)
 
 - Same OAuth token and cache as the TUI. Markdown by default, `-f json` for
   agents. Lists, tasks, create/update/done, move, list CRUD, logout — see
@@ -153,6 +153,23 @@ The minimum Rust version (`rust-version` in `Cargo.toml`) follows the oldest
 toolchain our dependencies need and stays within about six months of current
 stable. It only rises when a dependency upgrade requires it, and each bump is
 noted in the changelog.
+
+Once the first release is tagged, install a prebuilt binary with any of:
+
+```sh
+brew install relston/tap/google-tasks-tui   # Homebrew (macOS, Linux)
+yay -S google-tasks-tui-bin                 # AUR (or google-tasks-tui to build)
+cargo install google-tasks-tui              # crates.io
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://github.com/relston/google-tasks-tui/releases/latest/download/google-tasks-tui-installer.sh | sh
+```
+
+Release binaries for Linux and macOS (x86_64 and aarch64) are attached to
+each [GitHub release](https://github.com/relston/google-tasks-tui/releases).
+Releases are built by [dist](https://github.com/axodotdev/cargo-dist) when a
+`v*` tag is pushed; the AUR `PKGBUILD`s live in [`packaging/aur/`](packaging/aur/).
+
+To build from source:
 
 ```sh
 cargo run --release

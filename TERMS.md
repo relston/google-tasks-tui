@@ -10,8 +10,7 @@ terminal and CLI client for Google Tasks published by Ryan Elston
 
 The App is provided as free software. Source code is available in this
 repository. You may use, copy, modify, and redistribute it under the project’s
-license (see `LICENSE` if present, otherwise the license stated in the
-repository).
+MIT license (see [`LICENSE`](LICENSE)).
 
 ## Your Google Account
 

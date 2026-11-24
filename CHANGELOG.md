@@ -6,6 +6,14 @@ releases yet; entries are grouped by date. Open work is tracked in
 
 ## 2026-11-24
 
+### Added
+
+- Release packaging (#4): MIT `LICENSE`, crates.io metadata, a
+  [dist](https://github.com/axodotdev/cargo-dist) release workflow that builds
+  Linux and macOS binaries, a shell installer, and a Homebrew formula for
+  `relston/homebrew-tap` on each `v*` tag, plus AUR `PKGBUILD`s for
+  `google-tasks-tui-bin` and `google-tasks-tui`.
+
 ### Changed
 
 - Google approved sensitive-scope OAuth verification for `gtasks-tui-pub`.
