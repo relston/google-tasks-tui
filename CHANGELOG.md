@@ -4,6 +4,14 @@ Notable changes to google-tasks-tui, newest first. There are no tagged
 releases yet; entries are grouped by date. Open work is tracked in
 [GitHub issues](https://github.com/relston/google-tasks-tui/issues).
 
+## 2026-11-24
+
+### Changed
+
+- Google approved sensitive-scope OAuth verification for `gtasks-tui-pub`.
+  New sign-ins no longer see the unverified-app warning or the 100-user cap
+  (#3).
+
 ## 2026-11-21
 
 ### Changed

@@ -82,9 +82,8 @@ client, with the Tasks scope, sits next to your credentials file, the app
 reuses its refresh token and skips the browser step. It only reads that file
 and never modifies it.
 
-While the publisher consent screen is in Testing, only listed test users can
-complete Google's consent flow; strangers see the unverified-app warning until
-sensitive-scope verification is finished.
+The publisher OAuth app is verified by Google for the Tasks scope, so any
+Google account can sign in without an unverified-app warning.
 
 Public branding / verification URLs (authorized domain `ryanelston.com`):
 
