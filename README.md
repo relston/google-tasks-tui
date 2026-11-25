@@ -145,44 +145,56 @@ reported in the status bar and ignored; the rest of the file still applies.
 
 ## Install and run
 
-Supports macOS and Linux and requires Rust 1.89 or newer. Windows
-is not currently supported because private file permissions and platform
-launch/clipboard integration use Unix APIs.
+Supports macOS and Linux. Windows is not currently supported because
+private file permissions and platform launch/clipboard integration use
+Unix APIs.
 
-The minimum Rust version (`rust-version` in `Cargo.toml`) follows the oldest
-toolchain our dependencies need and stays within about six months of current
-stable. It only rises when a dependency upgrade requires it, and each bump is
-noted in the changelog.
+### Prebuilt binaries
 
-Once the first release is tagged, install a prebuilt binary with any of:
+**Homebrew** (macOS and Linux):
 
 ```sh
-brew install relston/tap/google-tasks-tui   # Homebrew (macOS, Linux)
-yay -S google-tasks-tui-bin                 # AUR (or google-tasks-tui to build)
-cargo install google-tasks-tui              # crates.io
+brew install relston/tap/google-tasks-tui
+```
+
+**Shell installer** (downloads the matching release binary into
+`~/.cargo/bin` by default):
+
+```sh
 curl --proto '=https' --tlsv1.2 -LsSf \
   https://github.com/relston/google-tasks-tui/releases/latest/download/google-tasks-tui-installer.sh | sh
 ```
 
-Release binaries for Linux and macOS (x86_64 and aarch64) are attached to
-each [GitHub release](https://github.com/relston/google-tasks-tui/releases).
-Releases are built by [dist](https://github.com/axodotdev/cargo-dist) when a
-`v*` tag is pushed; the AUR `PKGBUILD`s live in [`packaging/aur/`](packaging/aur/).
+Archives for Linux and macOS (x86_64 and aarch64) are also attached to each
+[GitHub release](https://github.com/relston/google-tasks-tui/releases).
 
-To build from source:
+### From crates.io
+
+Requires [Rust](https://rustup.rs/) 1.89 or newer:
+
+```sh
+cargo install google-tasks-tui
+```
+
+### From source
+
+Clone the repo, then either run it in place or install onto your `PATH`:
 
 ```sh
 cargo run --release
-```
-
-The release profile uses LTO and strips the binary. To install it on your
-`PATH`:
-
-```sh
 cargo install --path .
 ```
 
-This puts a `google-tasks-tui` binary in `~/.cargo/bin`. Then run:
+The release profile uses LTO and strips the binary. The minimum Rust
+version (`rust-version` in `Cargo.toml`) follows the oldest toolchain our
+dependencies need and stays within about six months of current stable. It
+only rises when a dependency upgrade requires it, and each bump is noted
+in the changelog.
+
+AUR `PKGBUILD`s for `google-tasks-tui-bin` and `google-tasks-tui` live in
+[`packaging/aur/`](packaging/aur/) but are not published to the AUR yet.
+
+Then run:
 
 ```sh
 google-tasks-tui

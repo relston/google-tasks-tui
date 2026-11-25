@@ -1,8 +1,23 @@
 # Changelog
 
-Notable changes to google-tasks-tui, newest first. There are no tagged
-releases yet; entries are grouped by date. Open work is tracked in
+Notable changes to google-tasks-tui, newest first. Entries are grouped by
+date. Open work is tracked in
 [GitHub issues](https://github.com/relston/google-tasks-tui/issues).
+
+## 2026-11-25
+
+### Changed
+
+- README install section lists the live channels: Homebrew
+  (`relston/tap/google-tasks-tui`), the release shell installer, GitHub
+  release archives, `cargo install google-tasks-tui` from crates.io, and
+  building from source. AUR packages are noted as not published yet (#4).
+
+### Added
+
+- Published `google-tasks-tui` 0.1.0 to
+  [crates.io](https://crates.io/crates/google-tasks-tui) and shipped the
+  first GitHub Release / Homebrew formula via dist (#4).
 
 ## 2026-11-24
 
